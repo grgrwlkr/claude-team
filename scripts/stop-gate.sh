@@ -10,12 +10,11 @@ cwd=$(jq -r '.cwd // empty' <<<"$input")
 active=$(jq -r '.stop_hook_active // false' <<<"$input")
 [ -n "$sid" ] && [ -n "$cwd" ] && [ -d "$cwd" ] || exit 0
 
-root=$(repo_root "$cwd") || exit 0
-run_dir=$(find_run "$root" "$sid") || exit 0
+resolved=$(resolve_run "$cwd" "$sid") || exit 0
+run_dir=${resolved%|*}
 # Second attempt after we already sent it back once: let it stop rather than loop.
 [ "$active" = true ] && exit 0
 
-name=$(jq -r '.name' "$run_dir/sessions.json" --arg s "$sid" 2>/dev/null) || name=""
 name=$(session_json "$run_dir" "$sid" | jq -r '.name')
 handoff="$run_dir/handoffs/$name.md"
 

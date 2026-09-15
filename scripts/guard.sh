@@ -12,8 +12,9 @@ tool=$(jq -r '.tool_name // empty' <<<"$input")
 [ -n "$sid" ] && [ -n "$cwd" ] && [ -n "$tool" ] || exit 0
 [ -d "$cwd" ] || exit 0
 
-root=$(repo_root "$cwd") || exit 0
-run_dir=$(find_run "$root" "$sid") || exit 0
+resolved=$(resolve_run "$cwd" "$sid") || exit 0
+run_dir=${resolved%|*}
+in_repo=${resolved##*|}
 rec=$(session_json "$run_dir" "$sid")
 name=$(jq -r '.name' <<<"$rec")
 role=$(jq -r '.role' <<<"$rec")
@@ -36,10 +37,18 @@ file_path=""
 case "$tool" in
   Edit|Write|MultiEdit|NotebookEdit)
     file_path=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' <<<"$input")
+    if [ -n "$file_path" ]; then
+      file_path=$(norm_path "$file_path") || block "file path must be absolute and free of . or .. segments (got $(jq -r '.tool_input.file_path // .tool_input.notebook_path' <<<"$input"))"
+    fi
     # Own handoff: always writable, never counted, even when paused or out of budget.
     [ -n "$file_path" ] && [ "$file_path" = "$handoff" ] && allow "handoff"
     ;;
 esac
+
+# A registered session whose working directory left the repository is held, not released.
+if [ "$in_repo" != 1 ]; then
+  block "your working directory ($cwd) is outside the repository of run $(basename "$run_dir"); cd back into your worktree before running or editing anything"
+fi
 
 # Pause: the orchestrator stopped this session or the whole wave.
 if [ -f "$run_dir/PAUSE-$name" ]; then
@@ -87,14 +96,22 @@ case "$tool" in
   Bash)
     cmd=$(jq -r '.tool_input.command // empty' <<<"$input")
     [ -n "$cmd" ] || allow
-    if printf '%s' "$cmd" | grep -Eq 'git +push[^|;&]*( -f( |$)|--force)'; then block "force push is never allowed"; fi
-    if printf '%s' "$cmd" | grep -Eq "git +push[^|;&]*(^| |:)$base( |$)"; then block "pushing the base branch ($base) is the user's call, not a session's"; fi
-    if printf '%s' "$cmd" | grep -Eq 'git +reset +--hard|git +branch +-D|git +worktree +remove|git +clean +-[a-zA-Z]*f|git +push[^|;&]*--delete'; then block "destructive git command; ask the orchestrator"; fi
-    if printf '%s' "$cmd" | grep -Eq '(^|[;&| ])claude +(stop|kill|rm|respawn)( |$)'; then block "sessions are stopped only by the orchestrator or the user"; fi
-    if printf '%s' "$cmd" | grep -Eq '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
-    if printf '%s' "$cmd" | grep -Eq '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
-    if printf '%s' "$cmd" | grep -Eq '(^|[;&| ])rm +-[a-zA-Z]*[rR]'; then
-      tail_part=${cmd#*rm }
+    # Quotes and backslashes stripped, whitespace collapsed: `git "push" --force` reads as `git push --force`.
+    flat=$(printf '%s' "$cmd" | tr -d '"'"'"'\\' | tr -s '[:space:]' ' ')
+    # git with any global options before the subcommand: git -C dir push, git --git-dir=x reset …
+    GIT='git( -[A-Za-z=/._-]+( [^ -][^ ]*)?)*'
+    has() { printf '%s' "$flat" | grep -Eq "$1"; }
+    if has "${GIT} push[^|;&]*( -f( |$)|--force)"; then block "force push is never allowed"; fi
+    if has "${GIT} push[^|;&]*(^| |:|\+)$base( |$)"; then block "pushing the base branch ($base) is the user's call, not a session's"; fi
+    if has "${GIT} reset --hard|${GIT} branch -D|${GIT} worktree remove|${GIT} clean -[a-zA-Z]*f|${GIT} push[^|;&]*--delete"; then block "destructive git command; ask the orchestrator"; fi
+    if has '(^|[;&| ])claude (stop|kill|rm|respawn)( |$)'; then block "sessions are stopped only by the orchestrator or the user"; fi
+    if has '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
+    if has '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
+    if has '\.orchestrator/' && has '(>|(^|[;&| ])(tee|mv|cp|rm|truncate|ln|chmod|touch|mkdir|rmdir)( |$)|sed -i|jq[^|;&]* -i|python[^|;&]* -c|perl -[a-zA-Z]*i)'; then
+      block "the run directory is written only by the orchestrator; your handoff goes through the Write tool at $handoff"
+    fi
+    if has '(^|[;&| ])rm -[a-zA-Z]*[rR]'; then
+      tail_part=${flat#*rm }
       for tok in $tail_part; do
         case "$tok" in
           -*) ;;
@@ -103,9 +120,9 @@ case "$tool" in
       done
     fi
     if [ "$role" != integrator ]; then
-      if printf '%s' "$cmd" | grep -Eq "git +(checkout|switch)( +[^ ]*)* +$base( |$)"; then block "only the integrator works on the base branch ($base)"; fi
+      if has "${GIT} (checkout|switch)( [^ ]*)* $base( |$)"; then block "only the integrator works on the base branch ($base)"; fi
       cur=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
-      if [ "$cur" = "$base" ] && printf '%s' "$cmd" | grep -Eq 'git +(commit|merge|rebase|cherry-pick|am)( |$)'; then
+      if [ "$cur" = "$base" ] && has "${GIT} (commit|merge|rebase|cherry-pick|am)( |$)"; then
         block "you are on the base branch ($base); commits there are the integrator's. Move to your worktree."
       fi
     fi

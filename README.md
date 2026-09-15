@@ -60,7 +60,9 @@ The plugin's `PreToolUse` hook watches every session registered in a run and blo
 - every Bash/Edit/Write while the lead has paused the session or the run (`orch pause`); reading and messaging keep working;
 - every Bash/Edit/Write past the task's tool-call budget — the passive brake against drift.
 
-The `Stop` hook refuses to let a registered session go idle without a handoff. Both hooks are inert for sessions that are not in a run.
+The `Stop` hook refuses to let a registered session go idle without a handoff. Both hooks are inert for sessions that are not in a run. A session the guard has seen once stays under guard even after it changes directory out of the repository (index in `~/.claude/orchestrator-sessions/`); edit paths are canonicalised before the check, and Bash commands are matched with quotes stripped and git's global options tolerated.
+
+**The guard is a tripwire, not a sandbox.** It catches the mistakes a well-meaning session makes and logs them for the lead; a session determined to escape a denylist can. The hard boundary is Claude Code's own permission mode and sandbox; the lead's reading of diffs and handoffs is the second line.
 
 ## Run directory
 

@@ -4,6 +4,7 @@ set -u
 
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_BASE="$PLUGIN_ROOT/tests/.tmp"
+export CLAUDE_ORCH_STATE="$TMP_BASE/state"
 PASS=0
 FAIL=0
 
