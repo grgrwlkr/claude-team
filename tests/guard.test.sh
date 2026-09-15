@@ -87,6 +87,14 @@ expect_exit 2 "forced branch delete stays blocked under authorization" bash "$GU
 : > "$RUN/events.log"
 expect_exit 2 "a developer may not delete branches even when authorized" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"git worktree remove ../w2"}')"
 
+echo "# security review: orch allowlist escapes"
+: > "$RUN/events.log"
+expect_exit 2 "second orch subcommand in one line is still checked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch status r1; orch pause r1 int-1 x"}')"
+expect_exit 2 "orch reached by path is still policed" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"./bin/orch accept r1 impl"}')"
+expect_exit 2 "orch via bash is still policed" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"bash /x/bin/orch authorize r1 push-base on"}')"
+expect_exit 2 "handoff-put under another session name is blocked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 int-1 < h.md"}')"
+expect_exit 0 "handoff-put under own name is allowed" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 dev-1 < h.md"}')"
+
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
 expect_exit 2 "stop: no handoff blocks" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"

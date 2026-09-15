@@ -110,12 +110,17 @@ case "$tool" in
     GIT='git( -[A-Za-z=/._-]+( [^ -][^ ]*)?)*'
     has() { printf '%s' "$flat" | grep -Eq "$1"; }
     # orch: read-only subcommands and the handoff channel are the session's; the rest is the lead's.
-    if has '(^|[;&| ])orch '; then
-      sub=$(printf '%s' "$flat" | sed -n 's/.*[^A-Za-z-]orch  *\([a-z-]*\).*/\1/p;s/^orch  *\([a-z-]*\).*/\1/p' | head -1)
-      case "$sub" in
-        handoff-put|handoff|status|events|ready|doctor) ;;
-        *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor" ;;
-      esac
+    # Every occurrence is checked, however orch is reached (bare, by path, via bash), and
+    # handoff-put may name only the caller's own session.
+    if has '(^|[;&| /])orch +[a-z-]'; then
+      while IFS=' ' read -r sub _run arg2 _; do
+        case "$sub" in
+          handoff-put)
+            [ "$arg2" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${arg2:-<missing>}; run is $_run" ;;
+          handoff|status|events|ready|doctor) ;;
+          *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor" ;;
+        esac
+      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^.*orch +//')
     fi
     if has "${GIT} push[^|;&]*( -f( |$)|--force)"; then block "force push is never allowed"; fi
     if has "${GIT} push[^|;&]*(^| |:|\+)$base( |$)"; then

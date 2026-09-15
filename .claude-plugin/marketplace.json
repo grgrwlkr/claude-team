@@ -9,7 +9,7 @@
       "name": "orchestrator",
       "source": "./",
       "description": "Lead session plus seven role agents as independent background sessions in their own worktrees, with peer messaging, hard guard rails and the lead as the only judge.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "category": "productivity",
       "tags": ["orchestration", "multi-agent", "worktrees", "background-sessions"]
     }
