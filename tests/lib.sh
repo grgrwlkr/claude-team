@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Shared helpers for the plugin's test scripts. bash 3.2 compatible.
+set -u
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_BASE="$PLUGIN_ROOT/tests/.tmp"
+PASS=0
+FAIL=0
+
+fresh_tmp() {
+  rm -rf "$TMP_BASE"
+  mkdir -p "$TMP_BASE"
+}
+
+# make_repo <dir>: a git repo with one commit on main and a linked worktree at .claude/worktrees/w1
+make_repo() {
+  local dir="$1"
+  mkdir -p "$dir"
+  git -C "$dir" init -q -b main
+  git -C "$dir" config user.email t@example.com
+  git -C "$dir" config user.name t
+  mkdir -p "$dir/src" "$dir/docs"
+  echo 'export const a = 1' > "$dir/src/a.ts"
+  git -C "$dir" add -A
+  git -C "$dir" commit -qm 'init'
+  mkdir -p "$dir/.claude/worktrees"
+  git -C "$dir" worktree add -q -b w1 "$dir/.claude/worktrees/w1" main
+}
+
+# make_run <repo> <run> : run dir with plan.json and sessions.json holding two sessions
+make_run() {
+  local d="$1/.orchestrator/$2"
+  mkdir -p "$d/handoffs"
+  : > "$d/events.log"
+  cat > "$d/plan.json" <<'JSON'
+{"run":"r1","goal":"test","baseBranch":"main","tasks":[
+ {"id":"impl","role":"developer","name":"dev-1","goal":"implement","pathsAllowed":["src/**","test/**"],"acceptance":["x"],"dependsOn":[],"budget":2},
+ {"id":"merge","role":"integrator","name":"int-1","goal":"merge","pathsAllowed":["**"],"acceptance":["x"],"dependsOn":["impl"],"budget":50}
+]}
+JSON
+  cat > "$d/sessions.json" <<'JSON'
+[
+ {"taskId":"impl","name":"dev-1","role":"developer","id":"aaaa1111","sessionId":"sid-dev","pathsAllowed":["src/**","test/**"],"budget":2},
+ {"taskId":"merge","name":"int-1","role":"integrator","id":"bbbb2222","sessionId":"sid-int","pathsAllowed":["**"],"budget":50}
+]
+JSON
+}
+
+# hook_input <session_id> <cwd> <tool> <tool_input_json>
+hook_input() {
+  printf '{"session_id":"%s","cwd":"%s","hook_event_name":"PreToolUse","tool_name":"%s","tool_input":%s}' "$1" "$2" "$3" "$4"
+}
+
+# expect_exit <expected> <label> <cmd...>  — runs cmd with stdin already redirected by caller
+expect_exit() {
+  local want="$1" label="$2"; shift 2
+  local got=0
+  "$@" >"$TMP_BASE/out" 2>"$TMP_BASE/err" || got=$?
+  if [ "$got" -eq "$want" ]; then
+    PASS=$((PASS+1)); printf 'ok   %s\n' "$label"
+  else
+    FAIL=$((FAIL+1)); printf 'FAIL %s (want exit %s, got %s)\n  stderr: %s\n' "$label" "$want" "$got" "$(cat "$TMP_BASE/err")"
+  fi
+}
+
+expect_grep() {
+  local pattern="$1" file="$2" label="$3"
+  if grep -q -- "$pattern" "$file"; then PASS=$((PASS+1)); printf 'ok   %s\n' "$label"
+  else FAIL=$((FAIL+1)); printf 'FAIL %s (pattern %s not in %s)\n' "$label" "$pattern" "$file"; fi
+}
+
+summary() {
+  printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
+  [ "$FAIL" -eq 0 ]
+}

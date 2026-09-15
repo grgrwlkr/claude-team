@@ -1,0 +1,10 @@
+{
+  "name": "orchestrator",
+  "description": "A team of Claude Code sessions run by one lead: analyst, developer, designer, QA, reviewer, integrator and researcher as independent background sessions in their own worktrees, talking to each other directly, with the lead watching, pausing and judging.",
+  "author": {
+    "name": "grgrwlkr"
+  },
+  "homepage": "https://github.com/grgrwlkr/claude-team#readme",
+  "version": "0.1.0",
+  "keywords": ["orchestration", "multi-agent", "background-sessions", "worktrees", "team"]
+}

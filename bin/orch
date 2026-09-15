@@ -1,0 +1,333 @@
+#!/usr/bin/env bash
+# orch — the orchestrator's hands: run directory, plan, briefs, spawning, status, brakes.
+# bash 3.2 compatible; needs git, jq and claude on PATH. Never launches a session unless told to (spawn without --dry-run).
+set -u
+
+SELF="$0"
+while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
+PLUGIN_ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
+RULES="$PLUGIN_ROOT/skills/orchestrator/references/team-rules.md"
+ROLES="analyst developer designer qa reviewer integrator researcher"
+# Every session the plugin launches, the lead included, runs the built-in Concise output style; --settings outranks /output-style.
+STYLE='{"outputStyle":"Concise"}'
+
+die() { printf 'orch: %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found on PATH$2"; }
+
+repo_root() {
+  local common
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || die "not inside a git repository"
+  case "$common" in /*) ;; *) common="$(cd "$common" && pwd -P)";; esac
+  dirname "$common"
+}
+run_dir() {
+  local r; r="$(repo_root)/.orchestrator/$1"
+  [ -d "$r" ] || die "run '$1' does not exist; orch init $1 --base <branch>"
+  printf '%s' "$r"
+}
+strip_ansi() { sed 's/\x1b\[[0-9;]*[A-Za-z]//g'; }
+now() { date +%Y-%m-%dT%H:%M:%S%z; }
+
+usage() {
+  cat <<'EOF'
+orch doctor [--no-daemon]                         check claude, jq, git repo, PATH, background service
+orch start [--model M] [--fallback M] -- <task>   launch the lead session (default: fable, fallback opus, effort high)
+orch init <run> --base <branch> [--orchestrator <name>]
+orch plan <run> <plan.json>                       validate and store the task graph
+orch ready <run>                                  tasks whose dependencies are done and that are not spawned
+orch brief <run> <task-id>                        print the brief a spawn would send
+orch spawn <run> <task-id> [--dry-run]            spawn one task as a background session and register it
+orch spawn <run> --wave [--dry-run]               spawn every ready task
+orch status <run> [--no-live]                     roster joined with claude agents --json
+orch events <run> [--since <line>]                guard log (blocks, budgets, pauses)
+orch handoff <run> <name>                         print a session's handoff
+orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
+orch resume <run> <name|all>
+orch decide <run> "<decision>"                    append to decisions.md
+EOF
+}
+
+cmd_doctor() {
+  local rc=0 nodaemon=0
+  [ "${1:-}" = --no-daemon ] && nodaemon=1
+  command -v claude >/dev/null 2>&1 && echo "ok   claude $(claude --version 2>/dev/null | head -1)" || { echo "FAIL claude not on PATH"; rc=1; }
+  command -v jq >/dev/null 2>&1 && echo "ok   jq $(jq --version)" || { echo "FAIL jq not on PATH (brew install jq / apt install jq)"; rc=1; }
+  git rev-parse --git-dir >/dev/null 2>&1 && echo "ok   git repository: $(repo_root)" || { echo "FAIL not inside a git repository"; rc=1; }
+  command -v orch >/dev/null 2>&1 && echo "ok   orch on PATH" || echo "warn orch not on PATH (plugin bin/ is added when the plugin is enabled; fine when calling by path)"
+  [ -f "$RULES" ] && echo "ok   rules file $RULES" || { echo "FAIL rules file missing at $RULES"; rc=1; }
+  if [ "$nodaemon" -eq 0 ]; then
+    if claude daemon status >/dev/null 2>&1; then echo "ok   background service running"; else echo "info background service not running; the first claude --bg starts it"; fi
+  fi
+  return $rc
+}
+
+cmd_start() {
+  local model=fable fallback=opus
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --model) model="$2"; shift 2 ;;
+      --fallback) fallback="$2"; shift 2 ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  [ $# -gt 0 ] || die "start needs a task: orch start -- <task>"
+  need claude
+  exec env -u CLAUDE_CODE_CHILD_SESSION claude --model "$model" --fallback-model "$fallback" --effort high --settings "$STYLE" "/orchestrator $*"
+}
+
+cmd_init() {
+  local run="${1:-}" base="" orch_name="orchestrator"; shift || true
+  [ -n "$run" ] || die "init needs a run name"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) base="$2"; shift 2 ;;
+      --orchestrator) orch_name="$2"; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+  [ -n "$base" ] || die "init needs --base <branch>"
+  local root d; root=$(repo_root); d="$root/.orchestrator/$run"
+  [ -e "$d" ] && die "run '$run' already exists at $d"
+  mkdir -p "$d/handoffs"
+  : > "$d/events.log"
+  echo '[]' > "$d/sessions.json"
+  printf '# Decisions — run %s\n\n' "$run" > "$d/decisions.md"
+  jq -n --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$(now)" \
+    '{run:$run, baseBranch:$base, orchestrator:$o, createdAt:$t, tasks:[]}' > "$d/plan.json"
+  local excl="$root/.git/info/exclude"
+  mkdir -p "$(dirname "$excl")"
+  grep -qx '.orchestrator/' "$excl" 2>/dev/null || echo '.orchestrator/' >> "$excl"
+  echo "$d"
+}
+
+cmd_plan() {
+  local run="${1:-}" file="${2:-}"
+  [ -n "$run" ] && [ -n "$file" ] || die "plan <run> <plan.json>"
+  [ -f "$file" ] || die "no such file $file"
+  local d; d=$(run_dir "$run")
+  jq -e . "$file" >/dev/null 2>&1 || die "$file is not valid JSON"
+  local roles_json; roles_json=$(printf '%s\n' $ROLES | jq -R . | jq -sc .)
+  local err
+  err=$(jq -r --argjson roles "$roles_json" '
+    def bad(msg): "ERROR: " + msg;
+    [ .tasks[] | select((.role | IN($roles[])) | not) | bad("task \(.id): unknown role \(.role)") ]
+    + [ .tasks[] | select((.id // "") == "" or (.name // "") == "" or (.goal // "") == "") | bad("task \(.id // "?"): id, name and goal are required") ]
+    + [ .tasks[] | select(.name | test("^[A-Za-z0-9][A-Za-z0-9-]*$") | not) | bad("task \(.id): name must be letters, digits, hyphens") ]
+    + ( [ .tasks[].name ] | group_by(.) | map(select(length > 1) | bad("duplicate name \(.[0])")) )
+    + ( [ .tasks[].id ] | group_by(.) | map(select(length > 1) | bad("duplicate id \(.[0])")) )
+    + ( . as $p | [ .tasks[] | .dependsOn[]? as $dep | select(($p.tasks | map(.id) | index($dep)) == null) | bad("task \(.id): dependsOn unknown task \($dep)") ] )
+    + ( [ .tasks[] | select(.role != "reviewer" and ((.pathsAllowed // []) | length) == 0) | bad("task \(.id): pathsAllowed is empty; only the reviewer may own no paths") ] )
+    + ( [ .tasks[] | {id, wave: ((.dependsOn // []) | sort), paths: (.pathsAllowed // [])} ] as $t
+        | [ range(0; $t|length) as $i | range($i+1; $t|length) as $j
+            | select($t[$i].wave == $t[$j].wave)
+            | ($t[$i].paths - ($t[$i].paths - $t[$j].paths)) as $shared
+            | select(($shared | length) > 0)
+            | bad("tasks \($t[$i].id) and \($t[$j].id) share paths \($shared | join(", ")) in the same wave; sequence them or split the paths") ] )
+    | .[]' "$file")
+  if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
+  local base orch_name created
+  base=$(jq -r '.baseBranch' "$d/plan.json"); orch_name=$(jq -r '.orchestrator' "$d/plan.json"); created=$(jq -r '.createdAt' "$d/plan.json")
+  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" \
+     '.run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t
+      | .tasks |= map(.budget = (.budget // 150) | .model = (.model // "opus") | .effort = (.effort // "high") | .dependsOn = (.dependsOn // []) | .pathsAllowed = (.pathsAllowed // []) | .acceptance = (.acceptance // []))' \
+     "$file" > "$d/plan.json.tmp" && mv "$d/plan.json.tmp" "$d/plan.json"
+  echo "plan stored: $(jq '.tasks | length' "$d/plan.json") tasks → $d/plan.json"
+}
+
+# task_done <run_dir> <task-id>: handoff of the task's session exists with Status done
+task_done() {
+  local name; name=$(jq -r --arg id "$2" '.tasks[] | select(.id == $id) | .name' "$1/plan.json")
+  [ -n "$name" ] || return 1
+  local h="$1/handoffs/$name.md"
+  [ -f "$h" ] && grep -A2 '^## Status' "$h" | grep -qi 'done'
+}
+
+cmd_ready() {
+  local d; d=$(run_dir "${1:-}")
+  local id ok dep spawned
+  for id in $(jq -r '.tasks[].id' "$d/plan.json"); do
+    spawned=$(jq -r --arg id "$id" 'map(select(.taskId == $id)) | length' "$d/sessions.json")
+    [ "$spawned" -eq 0 ] || continue
+    ok=1
+    for dep in $(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .dependsOn[]' "$d/plan.json"); do
+      task_done "$d" "$dep" || { ok=0; break; }
+    done
+    [ "$ok" -eq 1 ] && echo "$id"
+  done
+}
+
+render_brief() {
+  local d="$1" id="$2"
+  local task; task=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$d/plan.json")
+  [ -n "$task" ] || die "no task '$id' in plan"
+  local dep
+  for dep in $(jq -r '.dependsOn[]' <<<"$task"); do
+    task_done "$d" "$dep" || die "task '$id' depends on '$dep', whose handoff is not done yet"
+  done
+  local run base orch_name name role goal budget
+  run=$(jq -r '.run' "$d/plan.json"); base=$(jq -r '.baseBranch' "$d/plan.json"); orch_name=$(jq -r '.orchestrator' "$d/plan.json")
+  name=$(jq -r '.name' <<<"$task"); role=$(jq -r '.role' <<<"$task"); goal=$(jq -r '.goal' <<<"$task"); budget=$(jq -r '.budget' <<<"$task")
+  cat <<EOF
+# Team run "$run" · you are $name · role: $role
+orchestrator: $orch_name
+rules (read first, before any tool call): $RULES
+run dir: $d
+your handoff (mandatory before you stop): $d/handoffs/$name.md
+base branch: $base — branch your worktree from it; never commit to it
+allowed paths (relative to your worktree; the guard enforces them): $(jq -r '.pathsAllowed | join(", ")' <<<"$task")
+budget: $budget guarded tool calls (Bash/Edit/Write), then the guard stops you — plan for it
+acceptance the orchestrator will check itself:
+$(jq -r '.acceptance[] | "- " + .' <<<"$task")
+
+roster (SendMessage by name):
+$(jq -r --arg me "$name" '.tasks[] | select(.name != $me) | "- \(.name) (\(.role)): \(.goal | .[0:110])"' "$d/plan.json")
+
+## Task
+$goal
+
+## Handoffs you depend on
+EOF
+  local depname
+  for dep in $(jq -r '.dependsOn[]' <<<"$task"); do
+    depname=$(jq -r --arg id "$dep" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
+    printf '\n### %s (%s)\n' "$depname" "$dep"
+    cat "$d/handoffs/$depname.md"
+  done
+  [ "$(jq -r '.dependsOn | length' <<<"$task")" -eq 0 ] && echo "(none)"
+  cat <<EOF
+
+## First steps
+1. Read the rules file. 2. Read the task and the handoffs above. 3. Create or enter your worktree. 4. Send the orchestrator one line: "STARTED: <name>, plan in three bullets". 5. Work. 6. Handoff, then "DONE: handoff at $d/handoffs/$name.md".
+EOF
+}
+
+cmd_brief() { local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "brief <run> <task-id>"; render_brief "$d" "$2"; }
+
+spawn_one() {
+  local d="$1" id="$2" dry="$3"
+  local task name role model effort
+  task=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$d/plan.json")
+  [ -n "$task" ] || die "no task '$id' in plan"
+  name=$(jq -r '.name' <<<"$task"); role=$(jq -r '.role' <<<"$task"); model=$(jq -r '.model' <<<"$task"); effort=$(jq -r '.effort' <<<"$task")
+  if jq -e --arg n "$name" 'map(select(.name == $n)) | length > 0' "$d/sessions.json" >/dev/null; then die "session '$name' is already registered; respawn is the orchestrator's decision (claude respawn <id>)"; fi
+  local brief; brief=$(render_brief "$d" "$id") || exit 1
+  local extra=""
+  [ -n "${ORCH_PERMISSION_MODE:-}" ] && extra="--permission-mode $ORCH_PERMISSION_MODE"
+  local cmdline="env -u CLAUDE_CODE_CHILD_SESSION claude --agent orchestrator:$role --bg --name $name --model $model --effort $effort --settings '$STYLE' $extra"
+  if [ "$dry" -eq 1 ]; then
+    printf '%s "<brief, %s bytes>"\n' "$cmdline" "$(printf '%s' "$brief" | wc -c | tr -d ' ')"
+    return 0
+  fi
+  need claude
+  local out sid_short
+  # shellcheck disable=SC2086  # $extra is deliberately word-split
+  out=$(env -u CLAUDE_CODE_CHILD_SESSION claude --agent "orchestrator:$role" --bg --name "$name" --model "$model" --effort "$effort" --settings "$STYLE" $extra "$brief" 2>&1 | strip_ansi)
+  sid_short=$(printf '%s\n' "$out" | sed -n 's/.*backgrounded · \([0-9a-f]\{8\}\).*/\1/p' | head -1)
+  [ -n "$sid_short" ] || die "could not parse the session id from claude --bg output:
+$out"
+  local session_id="" i=0
+  while [ $i -lt 30 ]; do
+    session_id=$(claude agents --json --all 2>/dev/null | jq -r --arg id "$sid_short" '.[] | select(.id == $id) | .sessionId // empty' | head -1)
+    [ -n "$session_id" ] && break
+    sleep 1; i=$((i+1))
+  done
+  [ -n "$session_id" ] || die "session $sid_short started but its sessionId did not appear in claude agents --json within 30 s; register it by hand"
+  jq --arg id "$id" --arg name "$name" --arg role "$role" --arg short "$sid_short" --arg sid "$session_id" --arg t "$(now)" --argjson task "$task" \
+     '. + [{taskId:$id, name:$name, role:$role, id:$short, sessionId:$sid, pathsAllowed:$task.pathsAllowed, budget:$task.budget, spawnedAt:$t}]' \
+     "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
+  printf '%s\n' "$(jq -c --arg n "$name" 'map(select(.name == $n)) | .[0]' "$d/sessions.json")"
+  printf 'next: SendMessage to "%s" with notify_when_idle, then end your turn\n' "$name" >&2
+}
+
+cmd_spawn() {
+  local d; d=$(run_dir "${1:-}"); shift || true
+  local dry=0 wave=0 id=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1 ;;
+      --wave) wave=1 ;;
+      *) id="$1" ;;
+    esac; shift
+  done
+  if [ "$wave" -eq 1 ]; then
+    local any=0 t
+    for t in $(cmd_ready "$(jq -r '.run' "$d/plan.json")"); do any=1; spawn_one "$d" "$t" "$dry"; done
+    [ "$any" -eq 1 ] || echo "no ready task to spawn"
+  else
+    [ -n "$id" ] || die "spawn <run> <task-id> | --wave"
+    spawn_one "$d" "$id" "$dry"
+  fi
+}
+
+cmd_status() {
+  local d; d=$(run_dir "${1:-}"); local live=1
+  [ "${2:-}" = --no-live ] && live=0
+  local agents='[]'
+  if [ "$live" -eq 1 ] && command -v claude >/dev/null 2>&1; then agents=$(claude agents --json --all 2>/dev/null || echo '[]'); fi
+  printf '%-18s %-11s %-9s %-8s %-18s %-9s %s\n' NAME ROLE ID STATE WAITING CALLS LAST_EVENT
+  jq -r '.[] | [.name, .role, .id, .sessionId, (.budget|tostring)] | @tsv' "$d/sessions.json" | while IFS="$(printf '\t')" read -r name role id sid budget; do
+    local state waiting calls last
+    state=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .state // "?"' <<<"$agents" | head -1); [ -n "$state" ] || state="-"
+    waiting=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .waitingFor // ""' <<<"$agents" | head -1)
+    calls=$(grep -c "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$d/events.log" 2>/dev/null || true); calls=${calls:-0}
+    last=$(grep "^[^|]*|$sid|" "$d/events.log" 2>/dev/null | grep '|block|' | sed -n '$p' | cut -d'|' -f4,6 | cut -c1-60)
+    printf '%-18s %-11s %-9s %-8s %-18s %-9s %s\n' "$name" "$role" "$id" "$state" "${waiting:--}" "$calls/$budget" "${last:--}"
+  done
+  [ -f "$d/PAUSE" ] && echo "RUN PAUSED: $(cat "$d/PAUSE")"
+  local p; for p in "$d"/PAUSE-*; do [ -f "$p" ] && echo "PAUSED ${p##*/PAUSE-}: $(cat "$p")"; done
+  echo "ready to spawn: $(cmd_ready "$(jq -r '.run' "$d/plan.json")" | tr '\n' ' ')"
+}
+
+cmd_events() {
+  local d; d=$(run_dir "${1:-}"); local since=0
+  [ "${2:-}" = --since ] && since="${3:-0}"
+  awk -v s="$since" 'NR > s' "$d/events.log"
+}
+
+cmd_handoff() { local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "handoff <run> <name>"; cat "$d/handoffs/$2.md"; }
+
+cmd_pause() {
+  local d; d=$(run_dir "${1:-}"); local who="${2:-}" reason="${3:-paused by the orchestrator}"
+  [ -n "$who" ] || die "pause <run> <name|all> \"<reason>\""
+  if [ "$who" = all ]; then printf '%s\n' "$reason" > "$d/PAUSE"; else
+    jq -e --arg n "$who" 'map(select(.name == $n)) | length > 0' "$d/sessions.json" >/dev/null || jq -e --arg n "$who" '.tasks | map(select(.name == $n)) | length > 0' "$d/plan.json" >/dev/null || die "no session or task named '$who'"
+    printf '%s\n' "$reason" > "$d/PAUSE-$who"
+  fi
+  printf '%s|orchestrator|%s|pause|%s|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$who" "$who" "$reason" >> "$d/events.log"
+  echo "paused $who: $reason — now message the session what to do instead"
+}
+
+cmd_resume() {
+  local d; d=$(run_dir "${1:-}"); local who="${2:-}"
+  [ -n "$who" ] || die "resume <run> <name|all>"
+  if [ "$who" = all ]; then rm -f "$d/PAUSE"; else rm -f "$d/PAUSE-$who"; fi
+  printf '%s|orchestrator|%s|resume|%s|\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$who" "$who" >> "$d/events.log"
+  echo "resumed $who"
+}
+
+cmd_decide() {
+  local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "decide <run> \"<decision>\""
+  printf -- '- %s — %s\n' "$(now)" "$2" >> "$d/decisions.md"
+  echo "recorded in $d/decisions.md — now message the parties"
+}
+
+need jq " (brew install jq / apt install jq)"
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  doctor) cmd_doctor "$@" ;;
+  start) cmd_start "$@" ;;
+  init) cmd_init "$@" ;;
+  plan) cmd_plan "$@" ;;
+  ready) cmd_ready "$@" ;;
+  brief) cmd_brief "$@" ;;
+  spawn) cmd_spawn "$@" ;;
+  status) cmd_status "$@" ;;
+  events) cmd_events "$@" ;;
+  handoff) cmd_handoff "$@" ;;
+  pause) cmd_pause "$@" ;;
+  resume) cmd_resume "$@" ;;
+  decide) cmd_decide "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *) die "unknown command '$cmd'"; ;;
+esac

@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# PreToolUse guard for orchestrated team sessions.
+# Exit 2 blocks the tool call and tells the session why; exit 0 lets it through.
+# Inert (exit 0, no side effects) for any session not registered in a run's sessions.json.
+set -u
+. "$(dirname "$0")/lib.sh"
+
+input=$(cat)
+sid=$(jq -r '.session_id // empty' <<<"$input")
+cwd=$(jq -r '.cwd // empty' <<<"$input")
+tool=$(jq -r '.tool_name // empty' <<<"$input")
+[ -n "$sid" ] && [ -n "$cwd" ] && [ -n "$tool" ] || exit 0
+[ -d "$cwd" ] || exit 0
+
+root=$(repo_root "$cwd") || exit 0
+run_dir=$(find_run "$root" "$sid") || exit 0
+rec=$(session_json "$run_dir" "$sid")
+name=$(jq -r '.name' <<<"$rec")
+role=$(jq -r '.role' <<<"$rec")
+budget=$(jq -r '.budget // 0' <<<"$rec")
+base=$(jq -r '.baseBranch // "main"' "$run_dir/plan.json" 2>/dev/null)
+[ -n "$base" ] && [ "$base" != null ] || base=main
+handoff="$run_dir/handoffs/$name.md"
+
+block() {
+  log_event "$run_dir" "$sid" "$name" "$tool" block "$1"
+  printf 'orchestrator guard blocked this call for %s (%s): %s\nReport BLOCKED: to the orchestrator instead of working around it.\n' "$name" "$role" "$1" >&2
+  exit 2
+}
+allow() {
+  log_event "$run_dir" "$sid" "$name" "$tool" allow "${1:-}"
+  exit 0
+}
+
+file_path=""
+case "$tool" in
+  Edit|Write|MultiEdit|NotebookEdit)
+    file_path=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' <<<"$input")
+    # Own handoff: always writable, never counted, even when paused or out of budget.
+    [ -n "$file_path" ] && [ "$file_path" = "$handoff" ] && allow "handoff"
+    ;;
+esac
+
+# Pause: the orchestrator stopped this session or the whole wave.
+if [ -f "$run_dir/PAUSE-$name" ]; then
+  block "paused by the orchestrator: $(cat "$run_dir/PAUSE-$name" 2>/dev/null). Read and answer its message; edits and commands resume when it runs orch resume."
+fi
+if [ -f "$run_dir/PAUSE" ]; then
+  block "the whole run is paused by the orchestrator: $(cat "$run_dir/PAUSE" 2>/dev/null). Wait for its message."
+fi
+
+# Budget: allowed guarded calls so far, before this one.
+if [ "$budget" -gt 0 ] 2>/dev/null; then
+  used=$(grep -c "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$run_dir/events.log" 2>/dev/null || true)
+  used=${used:-0}
+  if [ "$used" -ge "$budget" ]; then
+    block "tool-call budget spent ($used of $budget). Write your handoff at $handoff with Status partial and stop; the orchestrator decides what happens next."
+  fi
+fi
+
+case "$tool" in
+  Edit|Write|MultiEdit|NotebookEdit)
+    [ -n "$file_path" ] || allow
+    case "$file_path" in
+      "$run_dir"/handoffs/*) block "that handoff belongs to another session; you may write only $handoff" ;;
+      "$run_dir"/*) block "the run directory is the orchestrator's; you may write only $handoff" ;;
+    esac
+    wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || block "edits are allowed only inside your git worktree"
+    common=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null)
+    case "$common" in /*) ;; *) common="$(cd "$cwd" && cd "$common" && pwd -P)";; esac
+    if [ "$(dirname "$common")" = "$wt" ]; then
+      block "this is the main checkout; move into your own worktree under .claude/worktrees/ before editing"
+    fi
+    case "$file_path" in
+      "$wt"/*) rel=${file_path#"$wt"/} ;;
+      *) block "path is outside your worktree ($wt)" ;;
+    esac
+    ok=0
+    while IFS= read -r pat; do
+      [ -n "$pat" ] || continue
+      # shellcheck disable=SC2053  # the glob must stay unquoted to act as a pattern
+      if [[ "$rel" == $pat ]]; then ok=1; break; fi
+    done < <(jq -r '.pathsAllowed[]?' <<<"$rec")
+    [ "$ok" -eq 1 ] || block "path $rel is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it."
+    allow "$rel"
+    ;;
+  Bash)
+    cmd=$(jq -r '.tool_input.command // empty' <<<"$input")
+    [ -n "$cmd" ] || allow
+    if printf '%s' "$cmd" | grep -Eq 'git +push[^|;&]*( -f( |$)|--force)'; then block "force push is never allowed"; fi
+    if printf '%s' "$cmd" | grep -Eq "git +push[^|;&]*(^| |:)$base( |$)"; then block "pushing the base branch ($base) is the user's call, not a session's"; fi
+    if printf '%s' "$cmd" | grep -Eq 'git +reset +--hard|git +branch +-D|git +worktree +remove|git +clean +-[a-zA-Z]*f|git +push[^|;&]*--delete'; then block "destructive git command; ask the orchestrator"; fi
+    if printf '%s' "$cmd" | grep -Eq '(^|[;&| ])claude +(stop|kill|rm|respawn)( |$)'; then block "sessions are stopped only by the orchestrator or the user"; fi
+    if printf '%s' "$cmd" | grep -Eq '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
+    if printf '%s' "$cmd" | grep -Eq '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
+    if printf '%s' "$cmd" | grep -Eq '(^|[;&| ])rm +-[a-zA-Z]*[rR]'; then
+      tail_part=${cmd#*rm }
+      for tok in $tail_part; do
+        case "$tok" in
+          -*) ;;
+          /*|~*|..*|\$HOME*) block "rm -r may target only relative paths inside your worktree (saw $tok)" ;;
+        esac
+      done
+    fi
+    if [ "$role" != integrator ]; then
+      if printf '%s' "$cmd" | grep -Eq "git +(checkout|switch)( +[^ ]*)* +$base( |$)"; then block "only the integrator works on the base branch ($base)"; fi
+      cur=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+      if [ "$cur" = "$base" ] && printf '%s' "$cmd" | grep -Eq 'git +(commit|merge|rebase|cherry-pick|am)( |$)'; then
+        block "you are on the base branch ($base); commits there are the integrator's. Move to your worktree."
+      fi
+    fi
+    allow "$(printf '%s' "$cmd" | cut -c1-120)"
+    ;;
+  *)
+    allow
+    ;;
+esac

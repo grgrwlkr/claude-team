@@ -1,0 +1,17 @@
+{
+  "name": "claude-team",
+  "description": "A lead Claude Code session that runs a team of role sessions: analyst, developer, designer, QA, reviewer, integrator, researcher.",
+  "owner": {
+    "name": "grgrwlkr"
+  },
+  "plugins": [
+    {
+      "name": "orchestrator",
+      "source": "./",
+      "description": "Lead session plus seven role agents as independent background sessions in their own worktrees, with peer messaging, hard guard rails and the lead as the only judge.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "tags": ["orchestration", "multi-agent", "worktrees", "background-sessions"]
+    }
+  ]
+}
