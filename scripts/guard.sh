@@ -49,6 +49,11 @@ esac
 if [ "$in_repo" != 1 ]; then
   block "your working directory ($cwd) is outside the repository of run $(basename "$run_dir"); cd back into your worktree before running or editing anything"
 fi
+# Nor may it sit inside the orchestrator's own directories, where relative paths would dodge the checks below.
+cwd_real=$(cd "$cwd" && pwd -P)
+case "$cwd_real/" in
+  "$run_dir"/*|"$INDEX_DIR"/*) block "your working directory is inside the orchestrator's directory ($cwd_real); cd back into your worktree" ;;
+esac
 
 # Pause: the orchestrator stopped this session or the whole wave.
 if [ -f "$run_dir/PAUSE-$name" ]; then
@@ -107,8 +112,8 @@ case "$tool" in
     if has '(^|[;&| ])claude (stop|kill|rm|respawn)( |$)'; then block "sessions are stopped only by the orchestrator or the user"; fi
     if has '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
     if has '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
-    if has '\.orchestrator/' && has '(>|(^|[;&| ])(tee|mv|cp|rm|truncate|ln|chmod|touch|mkdir|rmdir)( |$)|sed -i|jq[^|;&]* -i|python[^|;&]* -c|perl -[a-zA-Z]*i)'; then
-      block "the run directory is written only by the orchestrator; your handoff goes through the Write tool at $handoff"
+    if has '(\.orchestrator/|orchestrator-sessions)' && has '(>|(^|[;&| ])(tee|mv|cp|rm|truncate|ln|chmod|touch|mkdir|rmdir)( |$)|sed -i|jq[^|;&]* -i|python[^|;&]* -c|perl -[a-zA-Z]*i)'; then
+      block "the run directory and the session index are written only by the orchestrator; your handoff goes through the Write tool at $handoff"
     fi
     if has '(^|[;&| ])rm -[a-zA-Z]*[rR]'; then
       tail_part=${flat#*rm }

@@ -26,6 +26,10 @@ Roles message each other directly because a developer waiting on the lead to rel
 - The Concise output style is built in everywhere, so pinning it via `--settings` is safe on any machine.
 - `env -u CLAUDE_CODE_CHILD_SESSION` on every launch: harmless where the marker is absent, and it prevents an inherited marker from silencing transcripts where it is present.
 
+## What the guard is and is not
+
+The guard is a tripwire against the mistakes a cooperative session makes, and a log the lead reads. It is not a sandbox: a session with an unrestricted Bash tool can reach any file the user can, so every filesystem check here (allowed paths, the run directory, the session index) can be defeated by a session that sets out to defeat it, through `sh -c`, `eval`, encoded commands, or an interpreter. Two commit security reviews (2026-09-15) found and we closed the cheap bypasses: cd out of the repository, `..` and symlinks in edit paths, quoting and global git options in the denylist, Bash writes into the run directory and the index, cwd inside those directories. The remaining class is closed only by Claude Code's own permission mode and sandbox on the worker sessions; run them in `acceptEdits` or with the sandbox on when the task is sensitive, and treat the guard as defence in depth, not as the boundary.
+
 ## Known gaps
 
 - Quota exhaustion on the lead's model is not detected; fallback chains cover overload only.

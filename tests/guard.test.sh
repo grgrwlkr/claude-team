@@ -63,6 +63,9 @@ expect_exit 2 "bash write into run dir blocked" bash "$GUARD" <<< "$(hook_input 
 expect_exit 2 "bash touch PAUSE in run dir blocked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"touch '"$RUN"'/PAUSE"}')"
 expect_exit 0 "bash read of a handoff allowed" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"cat '"$RUN"'/handoffs/dev-1.md"}')"
 expect_exit 2 "registered session outside the repository is blocked, not ignored" bash "$GUARD" <<< "$(hook_input sid-int /tmp Bash '{"command":"ls"}')"
+expect_exit 2 "cwd inside the run directory is blocked" bash "$GUARD" <<< "$(hook_input sid-int "$RUN" Bash '{"command":"echo x > sessions.json"}')"
+expect_exit 2 "bash write into the session index is blocked" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"rm -f '"$CLAUDE_ORCH_STATE"'/sid-int"}')"
+expect_exit 2 "truncating the session index is blocked" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":": > '"$CLAUDE_ORCH_STATE"'/sid-int"}')"
 
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
