@@ -112,7 +112,10 @@ case "$tool" in
     if has '(^|[;&| ])claude (stop|kill|rm|respawn)( |$)'; then block "sessions are stopped only by the orchestrator or the user"; fi
     if has '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
     if has '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
-    if has '(\.orchestrator/|orchestrator-sessions)' && has '(>|(^|[;&| ])(tee|mv|cp|rm|truncate|ln|chmod|touch|mkdir|rmdir)( |$)|sed -i|jq[^|;&]* -i|python[^|;&]* -c|perl -[a-zA-Z]*i)'; then
+    touches_state=0
+    has '(\.orchestrator/|orchestrator-sessions)' && touches_state=1
+    printf '%s' "$flat" | grep -qF -- "$INDEX_DIR" && touches_state=1
+    if [ "$touches_state" -eq 1 ] && has '(>|(^|[;&| ])(tee|mv|cp|rm|truncate|ln|chmod|touch|mkdir|rmdir)( |$)|sed -i|jq[^|;&]* -i|python[^|;&]* -c|perl -[a-zA-Z]*i)'; then
       block "the run directory and the session index are written only by the orchestrator; your handoff goes through the Write tool at $handoff"
     fi
     if has '(^|[;&| ])rm -[a-zA-Z]*[rR]'; then
