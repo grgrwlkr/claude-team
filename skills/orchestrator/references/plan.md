@@ -46,5 +46,28 @@ Fields:
 | `dependsOn` | ids whose handoffs are pasted into this task's brief; a task is ready when all are `done` |
 | `budget` | tool calls allowed for Bash/Edit/Write before the guard stops the session; the brake against drift |
 | `model`, `effort` | optional per-task overrides; default `opus` / `high` |
+| `reviewOf` | reviewer tasks only: the id of the task whose code this review covers. `orch plan` refuses a graph where a developer task has no reviewer |
+
+Every developer task must be covered by a reviewer task (`reviewOf`), and review runs in rounds: the orchestrator re-spawns the same review task with `orch spawn <run> <id> --round N`, which gives the session the name `<name>-r<N>` and a brief telling it to re-read the whole diff and answer its earlier findings. The venue and the round cap live in the plan:
+
+```json
+"review": { "venue": "branch", "maxRounds": 3 }
+```
+
+`venue: "pr"` means every session that changed code opens a pull or merge request and reviewers comment in threads on it; `branch` means the reviewer reads `git diff <base>...HEAD` and files findings through the orchestrator. Set both with `orch review <run> venue <branch|pr>` and `orch review <run> rounds <n>`.
 
 Rules of thumb: a wave is the set of ready tasks; spawn them together, one session each. The integrator's task depends on every task whose branch it merges. QA's task depends on the developer's task it tests, never runs in the same wave on the same paths. The reviewer reads a branch and edits nothing except its handoff, so its `pathsAllowed` is `[]`.
+
+## Authorizations
+
+`plan.json` carries the user's standing answers for the whole run, collected once at plan approval and never asked again:
+
+```json
+"authorize": { "pushBase": false, "deleteMerged": false, "tag": false }
+```
+
+The lead writes them with `orch authorize <run> push-base|delete-merged|tag on|off`, `orch plan` preserves them, and `scripts/guard.sh` reads them: with `pushBase` the integrator pushes the base branch, with `deleteMerged` it deletes merged branches and worktrees. No other role gains anything from either flag.
+
+## Acceptance
+
+`accepted.json` beside the plan holds the lead's verdicts (`orch accept <run> <task-id> "<note>"`). A task counts as done when it is accepted **or** its handoff says `done`, so a teammate that finished the work but reported `blocked` on something the lead has since resolved does not stall its dependents, and nobody edits a handoff to change its status.

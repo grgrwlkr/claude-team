@@ -41,6 +41,12 @@ orch spawn <run> --wave [--dry-run]               spawn every ready task
 orch status <run> [--no-live]                     roster joined with claude agents --json
 orch events <run> [--since <line>]                guard log (blocks, budgets, pauses)
 orch handoff <run> <name>                         print a session's handoff
+orch handoff-put <run> <name>                     write a session's handoff from stdin (works from inside a worktree)
+orch accept <run> <task-id> ["<note>"]            the lead accepts a task; unblocks dependents whatever the handoff says
+orch address <run> <session-name>                 set the orchestrator's addressable name (from ListAgents)
+orch authorize <run> <push-base|delete-merged|tag> <on|off>
+orch review <run> venue <branch|pr>               where review happens: the branch diff, or a pull/merge request with threads
+orch review <run> rounds <n>                      how many review rounds a task may take (default 3)
 orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
 orch resume <run> <name|all>
 orch decide <run> "<decision>"                    append to decisions.md
@@ -94,7 +100,10 @@ cmd_init() {
   echo '[]' > "$d/sessions.json"
   printf '# Decisions — run %s\n\n' "$run" > "$d/decisions.md"
   jq -n --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$(now)" \
-    '{run:$run, baseBranch:$base, orchestrator:$o, createdAt:$t, tasks:[]}' > "$d/plan.json"
+    '{run:$run, baseBranch:$base, orchestrator:$o, createdAt:$t,
+      authorize:{pushBase:false, deleteMerged:false, tag:false},
+      review:{venue:"branch", maxRounds:3}, tasks:[]}' > "$d/plan.json"
+  echo '[]' > "$d/accepted.json"
   local excl="$root/.git/info/exclude"
   mkdir -p "$(dirname "$excl")"
   grep -qx '.orchestrator/' "$excl" 2>/dev/null || echo '.orchestrator/' >> "$excl"
@@ -118,6 +127,11 @@ cmd_plan() {
     + ( [ .tasks[].id ] | group_by(.) | map(select(length > 1) | bad("duplicate id \(.[0])")) )
     + ( . as $p | [ .tasks[] | .dependsOn[]? as $dep | select(($p.tasks | map(.id) | index($dep)) == null) | bad("task \(.id): dependsOn unknown task \($dep)") ] )
     + ( [ .tasks[] | select(.role != "reviewer" and ((.pathsAllowed // []) | length) == 0) | bad("task \(.id): pathsAllowed is empty; only the reviewer may own no paths") ] )
+    + ( . as $p
+        | [ $p.tasks[] | select(.role == "developer") as $t
+            | select(([ $p.tasks[] | select(.role == "reviewer")
+                        | select(((.reviewOf // "") == $t.id) or (((.dependsOn // []) | index($t.id)) != null)) ] | length) == 0)
+            | bad("task \($t.id) writes code and no reviewer task reviews it; add a reviewer task with reviewOf: \"\($t.id)\"") ] )
     + ( [ .tasks[] | {id, wave: ((.dependsOn // []) | sort), paths: (.pathsAllowed // [])} ] as $t
         | [ range(0; $t|length) as $i | range($i+1; $t|length) as $j
             | select($t[$i].wave == $t[$j].wave)
@@ -126,21 +140,45 @@ cmd_plan() {
             | bad("tasks \($t[$i].id) and \($t[$j].id) share paths \($shared | join(", ")) in the same wave; sequence them or split the paths") ] )
     | .[]' "$file")
   if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
-  local base orch_name created
+  local base orch_name created auth review
   base=$(jq -r '.baseBranch' "$d/plan.json"); orch_name=$(jq -r '.orchestrator' "$d/plan.json"); created=$(jq -r '.createdAt' "$d/plan.json")
-  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" \
-     '.run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t
+  auth=$(jq -c '.authorize // {pushBase:false, deleteMerged:false, tag:false}' "$d/plan.json")
+  review=$(jq -c '.review // {venue:"branch", maxRounds:3}' "$d/plan.json")
+  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" --argjson auth "$auth" --argjson review "$review" \
+     '.run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t | .authorize = $auth | .review = $review
       | .tasks |= map(.budget = (.budget // 150) | .model = (.model // "opus") | .effort = (.effort // "high") | .dependsOn = (.dependsOn // []) | .pathsAllowed = (.pathsAllowed // []) | .acceptance = (.acceptance // []))' \
      "$file" > "$d/plan.json.tmp" && mv "$d/plan.json.tmp" "$d/plan.json"
   echo "plan stored: $(jq '.tasks | length' "$d/plan.json") tasks → $d/plan.json"
 }
 
-# task_done <run_dir> <task-id>: handoff of the task's session exists with Status done
+# task_done <run_dir> <task-id>: the lead accepted the task, or its handoff says done.
+# Acceptance is separate from the handoff on purpose: a task can be finished while its
+# handoff reads "blocked" on something the lead resolved (a push the user later authorized).
 task_done() {
   local name; name=$(jq -r --arg id "$2" '.tasks[] | select(.id == $id) | .name' "$1/plan.json")
   [ -n "$name" ] || return 1
+  if [ -f "$1/accepted.json" ] && jq -e --arg id "$2" 'map(select(.taskId == $id)) | length > 0' "$1/accepted.json" >/dev/null 2>&1; then
+    return 0
+  fi
   local h="$1/handoffs/$name.md"
   [ -f "$h" ] && grep -A2 '^## Status' "$h" | grep -qi 'done'
+}
+
+# handoff_state <run_dir> <name> <task-id>: accepted | done | partial | blocked | failed | none
+handoff_state() {
+  if [ -f "$1/accepted.json" ] && jq -e --arg id "$3" 'map(select(.taskId == $id)) | length > 0' "$1/accepted.json" >/dev/null 2>&1; then
+    printf 'accepted'; return
+  fi
+  local h="$1/handoffs/$2.md" line
+  [ -f "$h" ] || { printf 'none'; return; }
+  line=$(grep -A2 '^## Status' "$h" | tr 'A-Z' 'a-z')
+  case "$line" in
+    *done*) printf 'done' ;;
+    *partial*) printf 'partial' ;;
+    *blocked*) printf 'blocked' ;;
+    *failed*) printf 'failed' ;;
+    *) printf 'written' ;;
+  esac
 }
 
 cmd_ready() {
@@ -155,26 +193,136 @@ cmd_ready() {
     done
     [ "$ok" -eq 1 ] && echo "$id"
   done
+  return 0
+}
+
+cmd_accept() {
+  local d; d=$(run_dir "${1:-}"); local id="${2:-}" note="${3:-}"
+  [ -n "$id" ] || die "accept <run> <task-id> [\"<note>\"]"
+  jq -e --arg id "$id" '.tasks | map(select(.id == $id)) | length > 0' "$d/plan.json" >/dev/null || die "no task '$id' in plan"
+  [ -f "$d/accepted.json" ] || echo '[]' > "$d/accepted.json"
+  jq --arg id "$id" --arg note "$note" --arg t "$(now)" \
+     'map(select(.taskId != $id)) + [{taskId:$id, at:$t, note:$note}]' "$d/accepted.json" > "$d/accepted.tmp" && mv "$d/accepted.tmp" "$d/accepted.json"
+  printf '%s|orchestrator|%s|accept|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$id" "$note" >> "$d/events.log"
+  echo "accepted $id — dependents are unblocked; orch ready shows what to spawn next"
+}
+
+cmd_address() {
+  local d; d=$(run_dir "${1:-}"); local name="${2:-}"
+  [ -n "$name" ] || die "address <run> <session-name>  (your own name, the first row of ListAgents)"
+  jq --arg o "$name" '.orchestrator = $o' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
+  echo "orchestrator address: $name — teammates spawned from now on address you by it"
+}
+
+cmd_authorize() {
+  local d; d=$(run_dir "${1:-}"); local flag="${2:-}" value="${3:-on}" key
+  case "$flag" in
+    push-base) key=pushBase ;;
+    delete-merged) key=deleteMerged ;;
+    tag) key=tag ;;
+    *) die "authorize <run> <push-base|delete-merged|tag> <on|off>" ;;
+  esac
+  case "$value" in on|true|yes) value=true ;; off|false|no) value=false ;; *) die "value must be on or off" ;; esac
+  jq --arg k "$key" --argjson v "$value" '.authorize = ((.authorize // {}) | .[$k] = $v)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
+  printf '%s|orchestrator|%s|authorize|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$flag" "$value" >> "$d/events.log"
+  echo "authorize $flag=$value — the guard honours it for this run"
+}
+
+cmd_review() {
+  local d; d=$(run_dir "${1:-}"); local key="${2:-}" value="${3:-}"
+  case "$key" in
+    venue)
+      case "$value" in
+        branch|pr) ;;
+        *) die "review <run> venue <branch|pr>  (branch: the reviewer reads the diff; pr: everyone who changed code opens a pull or merge request and reviewers comment in threads)" ;;
+      esac
+      jq --arg v "$value" '.review = ((.review // {maxRounds:3}) | .venue = $v)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
+      echo "review venue: $value"
+      ;;
+    rounds)
+      case "$value" in ''|*[!0-9]*) die "review <run> rounds <n>" ;; esac
+      [ "$value" -ge 1 ] || die "rounds must be at least 1"
+      jq --argjson n "$value" '.review = ((.review // {venue:"branch"}) | .maxRounds = $n)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
+      echo "review rounds: up to $value"
+      ;;
+    *) die "review <run> <venue|rounds> <value>" ;;
+  esac
+}
+
+cmd_handoff_put() {
+  local d; d=$(run_dir "${1:-}"); local name="${2:-}"
+  [ -n "$name" ] || die "handoff-put <run> <name>  (content on stdin)"
+  jq -e --arg n "$name" '.tasks | map(select(.name == $n)) | length > 0' "$d/plan.json" >/dev/null || die "no session named '$name' in the plan"
+  local tmp="$d/handoffs/.$name.tmp"
+  cat > "$tmp" || die "could not read stdin"
+  [ -s "$tmp" ] || { rm -f "$tmp"; die "empty handoff refused"; }
+  mv "$tmp" "$d/handoffs/$name.md"
+  printf '%s|handoff-put|%s|handoff|allow|%s bytes\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name" "$(wc -c < "$d/handoffs/$name.md" | tr -d ' ')" >> "$d/events.log"
+  echo "handoff stored: $d/handoffs/$name.md"
 }
 
 render_brief() {
-  local d="$1" id="$2"
+  local d="$1" id="$2" round="${3:-1}"
   local task; task=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$d/plan.json")
   [ -n "$task" ] || die "no task '$id' in plan"
   local dep
   for dep in $(jq -r '.dependsOn[]' <<<"$task"); do
     task_done "$d" "$dep" || die "task '$id' depends on '$dep', whose handoff is not done yet"
   done
-  local run base orch_name name role goal budget
+  local run base orch_name name role goal budget venue max_rounds review_of review_line
   run=$(jq -r '.run' "$d/plan.json"); base=$(jq -r '.baseBranch' "$d/plan.json"); orch_name=$(jq -r '.orchestrator' "$d/plan.json")
   name=$(jq -r '.name' <<<"$task"); role=$(jq -r '.role' <<<"$task"); goal=$(jq -r '.goal' <<<"$task"); budget=$(jq -r '.budget' <<<"$task")
+  venue=$(jq -r '.review.venue // "branch"' "$d/plan.json"); max_rounds=$(jq -r '.review.maxRounds // 3' "$d/plan.json")
+  review_of=$(jq -r '.reviewOf // ""' <<<"$task")
+  [ "$round" -gt 1 ] && name="$name-r$round"
+  if [ "$role" = reviewer ]; then
+    local target_name="" target_branch=""
+    if [ -n "$review_of" ]; then
+      target_name=$(jq -r --arg id "$review_of" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
+      target_branch="the branch of $target_name"
+    else
+      target_branch="the branch named in your task"
+    fi
+    if [ "$venue" = pr ]; then
+      review_line="review venue: the pull or merge request opened by $target_name — round $round of $max_rounds.
+  Read the full diff, then leave every finding as its own thread on the changed line (gh pr review --comment -b … / gh api repos/{owner}/{repo}/pulls/{n}/comments, or glab mr note), plus one summary comment stating blocker / should fix / nit counts.
+  Re-review means re-reading the diff from scratch on the new head and answering each of your earlier threads: fixed, not fixed, or new finding. Resolve only threads you confirmed fixed."
+    else
+      review_line="review venue: $target_branch, read with git -C <its worktree> diff $base...HEAD — round $round of $max_rounds.
+  Findings go into your handoff, most severe first, each with file, line, claim and evidence. On a re-review read the diff again from scratch and mark each earlier finding fixed, not fixed, or new."
+    fi
+  elif [ "$venue" = pr ] && [ "$role" != researcher ]; then
+    review_line="review venue: pull request. When your work is ready, push your branch and open a PR against $base (gh pr create --draft --base $base, or glab mr create) with the acceptance criteria as a checklist, then put the PR link in your handoff and in your DONE message. Reviewers comment in threads there; answer each thread with what you changed and the commit that changed it."
+  else
+    review_line="review venue: branch. A reviewer will read your branch diff against $base and file findings through the orchestrator; answer its questions with file and line."
+  fi
+  local base_line auth_line
+  if [ "$role" = integrator ]; then
+    base_line="base branch: $base — you merge into it; work on it only through your own worktree"
+    if [ "$(jq -r '.authorize.pushBase // false' "$d/plan.json")" = true ]; then
+      auth_line="authorized for this run: pushing $base"
+    else
+      auth_line="NOT authorized: pushing $base — merge locally, then report DONE; the orchestrator gets the user's word and runs orch authorize"
+    fi
+    if [ "$(jq -r '.authorize.deleteMerged // false' "$d/plan.json")" = true ]; then
+      auth_line="$auth_line; deleting merged branches and worktrees after you verify every ref is contained in $base"
+    fi
+  else
+    base_line="base branch: $base — branch your worktree from it; never commit to it"
+    auth_line="the integrator owns $base; never push or merge it"
+  fi
   cat <<EOF
 # Team run "$run" · you are $name · role: $role
-orchestrator: $orch_name
+orchestrator: $orch_name — address it with SendMessage by exactly this name
 rules (read first, before any tool call): $RULES
 run dir: $d
 your handoff (mandatory before you stop): $d/handoffs/$name.md
-base branch: $base — branch your worktree from it; never commit to it
+  from inside a worktree the file is out of reach, so send it instead:
+  orch handoff-put $run $name <<'HANDOFF' … HANDOFF   (the guard allows this; a Bash write into the run dir is blocked)
+scratch files and logs: .scratch/ inside your own worktree — never /tmp, where parallel sessions collide
+$base_line
+$auth_line
+$review_line
 allowed paths (relative to your worktree; the guard enforces them): $(jq -r '.pathsAllowed | join(", ")' <<<"$task")
 budget: $budget guarded tool calls (Bash/Edit/Write), then the guard stops you — plan for it
 acceptance the orchestrator will check itself:
@@ -198,20 +346,23 @@ EOF
   cat <<EOF
 
 ## First steps
-1. Read the rules file. 2. Read the task and the handoffs above. 3. Create or enter your worktree. 4. Send the orchestrator one line: "STARTED: <name>, plan in three bullets". 5. Work. 6. Handoff, then "DONE: handoff at $d/handoffs/$name.md".
+1. Read the rules file. 2. Read the task and the handoffs above. 3. Create or enter your worktree. 4. Send the orchestrator one line: "STARTED: $name, plan in three bullets" — it starts watching you only after this. 5. Work. 6. Send the handoff with orch handoff-put, then message the orchestrator "DONE: $name" or "BLOCKED: <what you need, from whom>". Silence is not a report: the orchestrator acts on your messages, not on your idleness.
 EOF
 }
 
-cmd_brief() { local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "brief <run> <task-id>"; render_brief "$d" "$2"; }
+cmd_brief() { local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "brief <run> <task-id>"; render_brief "$d" "$2" "${3:-1}"; }
 
 spawn_one() {
-  local d="$1" id="$2" dry="$3"
-  local task name role model effort
+  local d="$1" id="$2" dry="$3" round="${4:-1}"
+  local task name role model effort max_rounds
   task=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$d/plan.json")
   [ -n "$task" ] || die "no task '$id' in plan"
+  max_rounds=$(jq -r '.review.maxRounds // 3' "$d/plan.json")
+  [ "$round" -le "$max_rounds" ] || die "round $round exceeds the run's maxRounds ($max_rounds); the orchestrator decides what happens after the last round — accept with the findings recorded, or re-scope the task"
   name=$(jq -r '.name' <<<"$task"); role=$(jq -r '.role' <<<"$task"); model=$(jq -r '.model' <<<"$task"); effort=$(jq -r '.effort' <<<"$task")
-  if jq -e --arg n "$name" 'map(select(.name == $n)) | length > 0' "$d/sessions.json" >/dev/null; then die "session '$name' is already registered; respawn is the orchestrator's decision (claude respawn <id>)"; fi
-  local brief; brief=$(render_brief "$d" "$id") || exit 1
+  [ "$round" -gt 1 ] && name="$name-r$round"
+  if jq -e --arg n "$name" 'map(select(.name == $n)) | length > 0' "$d/sessions.json" >/dev/null; then die "session '$name' is already registered; for another review round use --round $((round+1))"; fi
+  local brief; brief=$(render_brief "$d" "$id" "$round") || exit 1
   local extra=""
   [ -n "${ORCH_PERMISSION_MODE:-}" ] && extra="--permission-mode $ORCH_PERMISSION_MODE"
   local cmdline="env -u CLAUDE_CODE_CHILD_SESSION claude --agent orchestrator:$role --bg --name $name --model $model --effort $effort --settings '$STYLE' $extra"
@@ -242,21 +393,22 @@ $out"
 
 cmd_spawn() {
   local d; d=$(run_dir "${1:-}"); shift || true
-  local dry=0 wave=0 id=""
+  local dry=0 wave=0 id="" round=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) dry=1 ;;
       --wave) wave=1 ;;
+      --round) round="$2"; shift ;;
       *) id="$1" ;;
     esac; shift
   done
   if [ "$wave" -eq 1 ]; then
     local any=0 t
-    for t in $(cmd_ready "$(jq -r '.run' "$d/plan.json")"); do any=1; spawn_one "$d" "$t" "$dry"; done
+    for t in $(cmd_ready "$(jq -r '.run' "$d/plan.json")"); do any=1; spawn_one "$d" "$t" "$dry" 1; done
     [ "$any" -eq 1 ] || echo "no ready task to spawn"
   else
-    [ -n "$id" ] || die "spawn <run> <task-id> | --wave"
-    spawn_one "$d" "$id" "$dry"
+    [ -n "$id" ] || die "spawn <run> <task-id> [--round N] | --wave"
+    spawn_one "$d" "$id" "$dry" "$round"
   fi
 }
 
@@ -265,14 +417,15 @@ cmd_status() {
   [ "${2:-}" = --no-live ] && live=0
   local agents='[]'
   if [ "$live" -eq 1 ] && command -v claude >/dev/null 2>&1; then agents=$(claude agents --json --all 2>/dev/null || echo '[]'); fi
-  printf '%-18s %-11s %-9s %-8s %-18s %-9s %s\n' NAME ROLE ID STATE WAITING CALLS LAST_EVENT
-  jq -r '.[] | [.name, .role, .id, .sessionId, (.budget|tostring)] | @tsv' "$d/sessions.json" | while IFS="$(printf '\t')" read -r name role id sid budget; do
-    local state waiting calls last
+  printf '%-16s %-11s %-9s %-8s %-9s %-8s %s\n' NAME ROLE ID STATE HANDOFF CALLS LAST_EVENT
+  jq -r '.[] | [.name, .role, .id, .sessionId, (.budget|tostring), .taskId] | @tsv' "$d/sessions.json" | while IFS="$(printf '\t')" read -r name role id sid budget taskid; do
+    local state calls last hs
     state=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .state // "?"' <<<"$agents" | head -1); [ -n "$state" ] || state="-"
-    waiting=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .waitingFor // ""' <<<"$agents" | head -1)
     calls=$(grep -c "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$d/events.log" 2>/dev/null || true); calls=${calls:-0}
-    last=$(grep "^[^|]*|$sid|" "$d/events.log" 2>/dev/null | grep '|block|' | sed -n '$p' | cut -d'|' -f4,6 | cut -c1-60)
-    printf '%-18s %-11s %-9s %-8s %-18s %-9s %s\n' "$name" "$role" "$id" "$state" "${waiting:--}" "$calls/$budget" "${last:--}"
+    # The last event of any kind, not the last block: a stale "Stop|no handoff" hid a handoff written afterwards.
+    last=$(grep "^[^|]*|$sid|" "$d/events.log" 2>/dev/null | sed -n '$p' | cut -d'|' -f4,5,6 | cut -c1-58)
+    hs=$(handoff_state "$d" "$name" "$taskid")
+    printf '%-16s %-11s %-9s %-8s %-9s %-8s %s\n' "$name" "$role" "$id" "$state" "$hs" "$calls/$budget" "${last:--}"
   done
   [ -f "$d/PAUSE" ] && echo "RUN PAUSED: $(cat "$d/PAUSE")"
   local p; for p in "$d"/PAUSE-*; do [ -f "$p" ] && echo "PAUSED ${p##*/PAUSE-}: $(cat "$p")"; done
@@ -325,6 +478,11 @@ case "$cmd" in
   status) cmd_status "$@" ;;
   events) cmd_events "$@" ;;
   handoff) cmd_handoff "$@" ;;
+  handoff-put) cmd_handoff_put "$@" ;;
+  accept) cmd_accept "$@" ;;
+  address) cmd_address "$@" ;;
+  authorize) cmd_authorize "$@" ;;
+  review) cmd_review "$@" ;;
   pause) cmd_pause "$@" ;;
   resume) cmd_resume "$@" ;;
   decide) cmd_decide "$@" ;;

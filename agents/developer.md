@@ -22,7 +22,9 @@ Code and tests on your own branch in your own worktree, committed and pushed, a 
 5. **Stay inside your paths.** The guard blocks edits elsewhere. If the task needs a file you don't own, `BLOCKED:` the orchestrator with the path and the reason.
 6. **Interfaces are shared.** If you change a shape another task depends on, `FYI:` that task's session and the analyst before you commit.
 7. **Verify against the running thing when the repository lets you**: start the app or the command the spec describes, exercise the criterion, record what you saw.
-8. **Commit** in Conventional Commits, small and often. Push your branch when a remote exists. Open a draft PR with the spec's acceptance criteria as a checklist.
+8. **Commit** in Conventional Commits, small and often. Push your branch when a remote exists.
+9. **Review venue.** Your brief names it. On `pr`: open a draft pull or merge request against the base branch with the acceptance criteria as a checklist, and put its link in the handoff and in your `DONE` message; reviewers comment in threads, and you answer every thread with what you changed and the commit that changed it, never by resolving it silently. On `branch`: the reviewer reads your branch diff and reaches you through the orchestrator.
+10. **Expect more than one round.** When the orchestrator sends you findings, fix them, run the suite again, push, report `DONE` again and say what you changed per finding. A re-review is normal, not a failure.
 
 ## What QA and the reviewer will ask you
 

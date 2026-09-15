@@ -22,6 +22,9 @@ budget=$(jq -r '.budget // 0' <<<"$rec")
 base=$(jq -r '.baseBranch // "main"' "$run_dir/plan.json" 2>/dev/null)
 [ -n "$base" ] && [ "$base" != null ] || base=main
 handoff="$run_dir/handoffs/$name.md"
+# Standing authorizations the user gave at plan approval; the lead writes them with `orch authorize`.
+auth_push=$(jq -r '.authorize.pushBase // false' "$run_dir/plan.json" 2>/dev/null)
+auth_delete=$(jq -r '.authorize.deleteMerged // false' "$run_dir/plan.json" 2>/dev/null)
 
 block() {
   log_event "$run_dir" "$sid" "$name" "$tool" block "$1"
@@ -106,9 +109,32 @@ case "$tool" in
     # git with any global options before the subcommand: git -C dir push, git --git-dir=x reset …
     GIT='git( -[A-Za-z=/._-]+( [^ -][^ ]*)?)*'
     has() { printf '%s' "$flat" | grep -Eq "$1"; }
+    # orch: read-only subcommands and the handoff channel are the session's; the rest is the lead's.
+    if has '(^|[;&| ])orch '; then
+      sub=$(printf '%s' "$flat" | sed -n 's/.*[^A-Za-z-]orch  *\([a-z-]*\).*/\1/p;s/^orch  *\([a-z-]*\).*/\1/p' | head -1)
+      case "$sub" in
+        handoff-put|handoff|status|events|ready|doctor) ;;
+        *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor" ;;
+      esac
+    fi
     if has "${GIT} push[^|;&]*( -f( |$)|--force)"; then block "force push is never allowed"; fi
-    if has "${GIT} push[^|;&]*(^| |:|\+)$base( |$)"; then block "pushing the base branch ($base) is the user's call, not a session's"; fi
-    if has "${GIT} reset --hard|${GIT} branch -D|${GIT} worktree remove|${GIT} clean -[a-zA-Z]*f|${GIT} push[^|;&]*--delete"; then block "destructive git command; ask the orchestrator"; fi
+    if has "${GIT} push[^|;&]*(^| |:|\+)$base( |$)"; then
+      if [ "$role" = integrator ] && [ "$auth_push" = true ]; then
+        :  # the plan carries the user's standing authorization for this run
+      elif [ "$role" = integrator ]; then
+        block "pushing the base branch ($base) is not authorized in this run's plan. Report BLOCKED: and let the orchestrator set it with orch authorize <run> push-base on after the user says so."
+      else
+        block "pushing the base branch ($base) is the integrator's, and only when the plan authorizes it"
+      fi
+    fi
+    if has "${GIT} reset --hard|${GIT} branch -D|${GIT} clean -[a-zA-Z]*f|${GIT} push[^|;&]*--delete"; then block "destructive git command; ask the orchestrator"; fi
+    if has "${GIT} (branch -d|worktree remove)( |$)"; then
+      if [ "$role" = integrator ] && [ "$auth_delete" = true ]; then
+        :  # cleanup of merged branches and worktrees is authorized for this run
+      else
+        block "deleting branches or worktrees needs role integrator and delete-merged in the plan's authorize block; verify containment in $base first and ask the orchestrator"
+      fi
+    fi
     if has '(^|[;&| ])claude (stop|kill|rm|respawn)( |$)'; then block "sessions are stopped only by the orchestrator or the user"; fi
     if has '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
     if has '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
@@ -116,7 +142,7 @@ case "$tool" in
     has '(\.orchestrator/|orchestrator-sessions)' && touches_state=1
     printf '%s' "$flat" | grep -qF -- "$INDEX_DIR" && touches_state=1
     if [ "$touches_state" -eq 1 ] && has '(>|(^|[;&| ])(tee|mv|cp|rm|truncate|ln|chmod|touch|mkdir|rmdir)( |$)|sed -i|jq[^|;&]* -i|python[^|;&]* -c|perl -[a-zA-Z]*i)'; then
-      block "the run directory and the session index are written only by the orchestrator; your handoff goes through the Write tool at $handoff"
+      block "the run directory and the session index are written only by the orchestrator; send your handoff with 'orch handoff-put $(basename "$run_dir") $name' on stdin, or write $handoff with the Write tool when you are not inside a worktree"
     fi
     if has '(^|[;&| ])rm -[a-zA-Z]*[rR]'; then
       tail_part=${flat#*rm }

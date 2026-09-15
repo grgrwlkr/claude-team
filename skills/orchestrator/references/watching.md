@@ -4,14 +4,16 @@ The lead's job after a spawn is to wait cheaply and judge sharply. Nothing here 
 
 ## Wake-ups, not polling
 
-- After every `orch spawn`, send the new session one `SendMessage` with `notify_when_idle`. One-shot, on this machine only. The notification arrives as a turn when the session goes idle; that is your cue to read its handoff.
-- Then end your turn. Do not `sleep`, do not re-run `orch status` in a loop. The user may also see everything in `claude agents`.
+- **Teammates report with messages.** `STARTED` when they begin, `DONE` or `BLOCKED` when they finish or stop. Those messages, not idleness, are what you act on.
+- `notify_when_idle` is a cheap extra alarm, not the signal. Subscribe **once, after the session's `STARTED` arrives**, and never re-subscribe to the same session: subscribing to an already-idle session fires immediately and replays the old turn, so a loop of resubscribes wakes you forever while the teammate is merely waiting on its own background command. `SendMessage` requires `message`; for a pure subscription pass `message: ""`.
+- On a wake-up with no `DONE`/`BLOCKED` message: check `orch status` once. If the session is `working` or its handoff is `none`, end your turn without re-subscribing.
+- Do not `sleep`, do not re-run `orch status` in a loop. The user sees everything in `claude agents` anyway.
 
 ## On every wake-up
 
-1. `orch status <run>` — one table: name, role, state (`working`, `blocked`, `done`, `failed`, `stopped`), `waitingFor`, tool calls used of budget, last event.
+1. `orch status <run>` — one table: name, role, session state, handoff state (`none`, `partial`, `blocked`, `done`, `accepted`), tool calls used of budget, last event of any kind.
 2. `orch events <run> --since <last seen>` — guard blocks, budget hits, pauses. A block is a signal about the brief as much as about the session: a developer editing outside its paths usually means the paths were wrong or the task leaked.
-3. For every `done`: read `orch handoff <run> <name>`; then verify yourself — run the tests, read the diff (`git -C <worktree> diff <base>...HEAD`), open the spec. Accept, or message the session with what is missing and spawn nothing new for that task.
+3. For every `done`: read `orch handoff <run> <name>`; then verify yourself — run the tests, read the diff (`git -C <worktree> diff <base>...HEAD`), open the spec. Then `orch accept <run> <task-id> "<why>"`, which unblocks the dependents. Acceptance is yours and lives outside the handoff on purpose: a teammate that finished the work but wrote `blocked` on something you have since resolved is accepted without anyone rewriting its handoff. Not accepting is equally explicit: message the session what is missing and spawn nothing new for that task.
 4. For every `blocked`: read `claude logs <id>`; answer through `SendMessage`; if the answer is the user's, ask the user, in one list, at the end of your turn.
 5. For every `ESCALATION:` message: read both positions and the spec; write the decision into `decisions.md` (`orch decide <run> "<text>"`); message both parties with it. Decide on the merits; the analyst's spec wins over a developer's preference, a measured fact wins over the spec.
 6. Spawn the next wave: tasks whose `dependsOn` are all `done`.
@@ -25,7 +27,21 @@ The lead's job after a spawn is to wait cheaply and judge sharply. Nothing here 
 
 ## What you never delegate
 
-Correctness, completeness and safety are decided here, by you, on evidence you produced or re-ran. QA proposes a verdict with a coverage report; the reviewer proposes findings with cited lines; you confirm both against the code. Merging into the base branch is the integrator's task, but the go for a merge is yours, and pushing to the base branch is the user's unless the brief says otherwise.
+Correctness, completeness and safety are decided here, by you, on evidence you produced or re-ran. QA proposes a verdict with a coverage report; the reviewer proposes findings with cited lines; you confirm both against the code. Merging into the base branch is the integrator's task, and the go for a merge is yours.
+
+## Never park the run on the user
+
+Every gated action of the run is settled once, at plan approval, and written into the plan with `orch authorize <run> push-base|delete-merged|tag on`. The guard reads those flags, so an integrator authorized at approval time pushes without anyone asking again. Mid-run, a gate you did not collect is your mistake, not a reason to stop: finish everything else, leave the gated step for the end, and report it in one line with the exact command the user can run. Stop the run only when continuing would be unsafe or would waste the work.
+
+Deletion is authorized the same way and verified mechanically before it happens: every branch and worktree you delete must be contained in the base branch. Check it in one command, count what you checked, and refuse when the count is zero:
+
+```bash
+bash -c 'n=0; for b in $(git branch --format="%(refname:short)" | grep "^ao/"); do
+  git merge-base --is-ancestor "$b" main || { echo "NOT contained: $b"; exit 1; }; n=$((n+1)); done
+  [ "$n" -gt 0 ] || { echo "zero refs checked — refusing"; exit 1; }; echo "$n refs contained in main"'
+```
+
+Run such loops through `bash -c`: in zsh an unquoted `$(…)` does not word-split, so the loop runs once over one non-existent ref and prints a false all-clear.
 
 ## Closing a run
 

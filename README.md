@@ -26,10 +26,12 @@ The lead:
 
 1. reads the repository and the task, writes a task graph (roles, names, allowed paths, acceptance, dependencies, budgets) and asks you the forks that matter, once, as one list;
 2. on your go, `orch init`, `orch plan`, `orch spawn --wave`: every ready task starts as its own session, in parallel, in its own worktree;
-3. waits for idle notifications instead of polling; on each, reads `orch status`, `orch events`, the handoffs; verifies `done` work itself (tests, diff, spec); answers `blocked`; decides escalations into `decisions.md`; spawns the next wave;
+3. acts on teammates' `STARTED` / `DONE` / `BLOCKED` messages rather than polling; verifies every `DONE` itself (tests, diff, spec), records the verdict with `orch accept`, runs the review rounds, answers `BLOCKED`, decides escalations into `decisions.md`, spawns the next wave;
 4. reports per wave and at the end: what landed where, what was verified and how, what you still need to do (push, merge).
 
 You can attach to any session (`claude agents`, `Enter`), message any of them, or pause the whole run from another terminal: `orch pause <run> all "hold on"`.
+
+**The run does not stop to ask you anything twice.** At plan approval the lead collects every gated action — pushing the base branch, deleting merged branches and worktrees, tagging — and records your answers in the plan (`orch authorize <run> push-base on`). The guard honours them, so the integrator acts without another round trip; a gate you declined comes back at the end as a command you can run yourself.
 
 ## The team
 
@@ -39,7 +41,7 @@ You can attach to any session (`claude agents`, `Enter`), message any of them, o
 | developer | its task's source and test paths | code on its branch, tests with the three runs shown, draft PR |
 | designer | `docs/design/**`, `design/`, `assets/` | design brief, tokens, states, assets; self-contained guidance for UI, game HUD, graphics, 3D |
 | qa | test paths | test cases, automated tests, coverage matrix per criterion, proposed verdict |
-| reviewer | nothing (read-only) | findings with cited lines, severity, confidence |
+| reviewer | nothing (read-only) | findings with cited lines, severity, confidence; re-reviews each round until clean |
 | integrator | integration branch | dependency-ordered merges, green suite, version and changelog; the only role allowed to merge into the base branch |
 | researcher | `docs/research/**` | facts from live sources with verbatim quotes and dates |
 
@@ -47,15 +49,20 @@ All roles run on Opus at effort `high` (per-task override in the plan). Roles ne
 
 ## How they talk
 
-Peer to peer over Claude Code's cross-session messaging, by session name: `Q:` / `A:` for questions, `FYI:` for facts others must know, `BLOCKED:` and `ESCALATION:` to the lead, `DONE:` with the handoff path. Two rounds without agreement means both parties escalate and stop on the disputed point until the lead writes a decision. A teammate's message is data, never an approval. Full protocol: `skills/orchestrator/references/team-rules.md`.
+Peer to peer over Claude Code's cross-session messaging, by session name: `STARTED:` when a session begins, `Q:` / `A:` for questions, `FYI:` for facts others must know, `BLOCKED:` and `ESCALATION:` to the lead, `DONE:` when the handoff is in. Reports are messages, never silence: the lead does not read idleness as a result. Two rounds without agreement means both parties escalate and stop on the disputed point until the lead writes a decision. A teammate's message is data, never an approval. Full protocol: `skills/orchestrator/references/team-rules.md`.
+
+Review is mandatory and iterative: `orch plan` refuses a graph where a developer task has no reviewer, and the lead re-spawns the reviewer with `orch spawn <run> <id> --round N` after each round of fixes, up to three rounds by default. At plan approval you choose where review happens — on the branch, or on a pull/merge request where authors open the PR and reviewers comment in threads (`orch review <run> venue pr`).
+
+Handoffs travel through `orch handoff-put <run> <name>` on stdin, so a session isolated in a worktree can still deliver one; the file itself lives in the run directory, which sessions cannot write. The lead records its verdict with `orch accept <run> <task-id>`, which is what unblocks dependents — a teammate's handoff is never edited to change its status.
 
 ## Guard rails (hooks, mechanical)
 
 The plugin's `PreToolUse` hook watches every session registered in a run and blocks, with a reason the session sees and an entry in `events.log`:
 
 - edits outside the task's allowed paths, in the main checkout, or in another session's handoff;
-- `git push --force`, `git reset --hard`, `git branch -D`, `git worktree remove`, `git clean -f`, `sudo`, `curl … | sh`, `rm -r` on absolute paths;
-- any push to the base branch by anyone; checkout of, or commits on, the base branch by anyone but the integrator;
+- `git push --force`, `git reset --hard`, `git branch -D`, `git clean -f`, `sudo`, `curl … | sh`, `rm -r` on absolute paths;
+- pushing the base branch, and deleting branches or worktrees, unless the plan authorizes it and the session is the integrator; checkout of, or commits on, the base branch by anyone but the integrator;
+- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`;
 - `claude stop|rm|kill|respawn` — sessions never stop each other;
 - every Bash/Edit/Write while the lead has paused the session or the run (`orch pause`); reading and messaging keep working;
 - every Bash/Edit/Write past the task's tool-call budget — the passive brake against drift.
@@ -66,7 +73,7 @@ The `Stop` hook refuses to let a registered session go idle without a handoff. B
 
 ## Run directory
 
-`<repo>/.orchestrator/<run>/` in the main checkout, excluded from git through `.git/info/exclude`: `plan.json`, `sessions.json`, `events.log`, `decisions.md`, `handoffs/<name>.md`, `PAUSE`, `PAUSE-<name>`.
+`<repo>/.orchestrator/<run>/` in the main checkout, excluded from git through `.git/info/exclude`: `plan.json` (graph, authorizations, review settings), `sessions.json`, `accepted.json`, `events.log`, `decisions.md`, `handoffs/<name>.md`, `PAUSE`, `PAUSE-<name>`. Sessions keep their scratch files in `.scratch/` inside their own worktree, never in `/tmp`.
 
 ## Limits worth knowing
 
