@@ -95,6 +95,15 @@ expect_exit 2 "orch via bash is still policed" bash "$GUARD" <<< "$(hook_input s
 expect_exit 2 "handoff-put under another session name is blocked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 int-1 < h.md"}')"
 expect_exit 0 "handoff-put under own name is allowed" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 dev-1 < h.md"}')"
 
+echo "# installs are gated by the install-tools authorization"
+: > "$RUN/events.log"
+expect_exit 2 "npm global install blocked without authorization" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"npm install -g playwright"}')"
+expect_exit 2 "brew install blocked without authorization" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"brew install ffmpeg"}')"
+expect_exit 2 "playwright browser download blocked without authorization" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"npx playwright install chromium"}')"
+expect_exit 0 "project-local npm install is not an install of tooling" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"npm install"}')"
+jq '.authorize.installTools = true' "$RUN/plan.json" > "$RUN/plan.tmp" && mv "$RUN/plan.tmp" "$RUN/plan.json"
+expect_exit 0 "brew install allowed when authorized" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"brew install ffmpeg"}')"
+
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
 expect_exit 2 "stop: no handoff blocks" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"

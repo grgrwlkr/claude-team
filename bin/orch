@@ -7,7 +7,7 @@ SELF="$0"
 while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
 PLUGIN_ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
 RULES="$PLUGIN_ROOT/skills/orchestrator/references/team-rules.md"
-ROLES="analyst developer designer qa reviewer integrator researcher"
+ROLES="analyst developer designer qa tester reviewer integrator researcher"
 # Every session the plugin launches, the lead included, runs the built-in Concise output style; --settings outranks /output-style.
 STYLE='{"outputStyle":"Concise"}'
 
@@ -44,9 +44,11 @@ orch handoff <run> <name>                         print a session's handoff
 orch handoff-put <run> <name>                     write a session's handoff from stdin (works from inside a worktree)
 orch accept <run> <task-id> ["<note>"]            the lead accepts a task; unblocks dependents whatever the handoff says
 orch address <run> <session-name>                 set the orchestrator's addressable name (from ListAgents)
-orch authorize <run> <push-base|delete-merged|tag> <on|off>
+orch authorize <run> <push-base|delete-merged|tag|install-tools> <on|off>
 orch review <run> venue <branch|pr>               where review happens: the branch diff, or a pull/merge request with threads
 orch review <run> rounds <n>                      how many review rounds a task may take (default 3)
+orch interactive <run> <on|off>                   require a tester task per developer task: run the app, verify visually
+orch tools                                        inventory of the machine's means to run and watch an app (browser, screenshots, recording)
 orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
 orch resume <run> <name|all>
 orch decide <run> "<decision>"                    append to decisions.md
@@ -101,8 +103,8 @@ cmd_init() {
   printf '# Decisions — run %s\n\n' "$run" > "$d/decisions.md"
   jq -n --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$(now)" \
     '{run:$run, baseBranch:$base, orchestrator:$o, createdAt:$t,
-      authorize:{pushBase:false, deleteMerged:false, tag:false},
-      review:{venue:"branch", maxRounds:3}, tasks:[]}' > "$d/plan.json"
+      authorize:{pushBase:false, deleteMerged:false, tag:false, installTools:false},
+      review:{venue:"branch", maxRounds:3}, interactive:false, tasks:[]}' > "$d/plan.json"
   echo '[]' > "$d/accepted.json"
   local excl="$root/.git/info/exclude"
   mkdir -p "$(dirname "$excl")"
@@ -126,7 +128,7 @@ cmd_plan() {
     + ( [ .tasks[].name ] | group_by(.) | map(select(length > 1) | bad("duplicate name \(.[0])")) )
     + ( [ .tasks[].id ] | group_by(.) | map(select(length > 1) | bad("duplicate id \(.[0])")) )
     + ( . as $p | [ .tasks[] | .dependsOn[]? as $dep | select(($p.tasks | map(.id) | index($dep)) == null) | bad("task \(.id): dependsOn unknown task \($dep)") ] )
-    + ( [ .tasks[] | select(.role != "reviewer" and ((.pathsAllowed // []) | length) == 0) | bad("task \(.id): pathsAllowed is empty; only the reviewer may own no paths") ] )
+    + ( [ .tasks[] | select((.role != "reviewer" and .role != "tester") and ((.pathsAllowed // []) | length) == 0) | bad("task \(.id): pathsAllowed is empty; only the reviewer and the tester may own no paths") ] )
     + ( . as $p
         | [ $p.tasks[] | select(.role == "developer") as $t
             | select(([ $p.tasks[] | select(.role == "reviewer")
@@ -140,12 +142,24 @@ cmd_plan() {
             | bad("tasks \($t[$i].id) and \($t[$j].id) share paths \($shared | join(", ")) in the same wave; sequence them or split the paths") ] )
     | .[]' "$file")
   if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
-  local base orch_name created auth review
+  local base orch_name created auth review interactive
   base=$(jq -r '.baseBranch' "$d/plan.json"); orch_name=$(jq -r '.orchestrator' "$d/plan.json"); created=$(jq -r '.createdAt' "$d/plan.json")
-  auth=$(jq -c '.authorize // {pushBase:false, deleteMerged:false, tag:false}' "$d/plan.json")
+  auth=$(jq -c '.authorize // {pushBase:false, deleteMerged:false, tag:false, installTools:false}' "$d/plan.json")
   review=$(jq -c '.review // {venue:"branch", maxRounds:3}' "$d/plan.json")
-  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" --argjson auth "$auth" --argjson review "$review" \
-     '.run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t | .authorize = $auth | .review = $review
+  interactive=$(jq -r '.interactive // false' "$d/plan.json")
+  if [ "$interactive" = true ]; then
+    err=$(jq -r '
+      def bad(msg): "ERROR: " + msg;
+      . as $p
+      | [ $p.tasks[] | select(.role == "developer") as $t
+          | select(([ $p.tasks[] | select(.role == "tester")
+                      | select(((.verifies // "") == $t.id) or (((.dependsOn // []) | index($t.id)) != null)) ] | length) == 0)
+          | bad("interactive verification is on and task \($t.id) has no tester task; add a tester task with verifies: \"\($t.id)\" that runs the app and checks the criteria") ]
+      | .[]' "$file")
+    if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
+  fi
+  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" --argjson auth "$auth" --argjson review "$review" --argjson inter "$interactive" \
+     '.run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t | .authorize = $auth | .review = $review | .interactive = $inter
       | .tasks |= map(.budget = (.budget // 150) | .model = (.model // "opus") | .effort = (.effort // "high") | .dependsOn = (.dependsOn // []) | .pathsAllowed = (.pathsAllowed // []) | .acceptance = (.acceptance // []))' \
      "$file" > "$d/plan.json.tmp" && mv "$d/plan.json.tmp" "$d/plan.json"
   echo "plan stored: $(jq '.tasks | length' "$d/plan.json") tasks → $d/plan.json"
@@ -220,7 +234,8 @@ cmd_authorize() {
     push-base) key=pushBase ;;
     delete-merged) key=deleteMerged ;;
     tag) key=tag ;;
-    *) die "authorize <run> <push-base|delete-merged|tag> <on|off>" ;;
+    install-tools) key=installTools ;;
+    *) die "authorize <run> <push-base|delete-merged|tag|install-tools> <on|off>" ;;
   esac
   case "$value" in on|true|yes) value=true ;; off|false|no) value=false ;; *) die "value must be on or off" ;; esac
   jq --arg k "$key" --argjson v "$value" '.authorize = ((.authorize // {}) | .[$k] = $v)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
@@ -247,6 +262,52 @@ cmd_review() {
       ;;
     *) die "review <run> <venue|rounds> <value>" ;;
   esac
+}
+
+cmd_interactive() {
+  local d; d=$(run_dir "${1:-}"); local value="${2:-}"
+  case "$value" in on|true|yes) value=true ;; off|false|no) value=false ;; *) die "interactive <run> <on|off>" ;; esac
+  jq --argjson v "$value" '.interactive = $v' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
+  if [ "$value" = true ]; then
+    echo "interactive verification on: every developer task needs a tester task (verifies: <id>); orch plan enforces it"
+  else
+    echo "interactive verification off"
+  fi
+}
+
+# tool_row <group> <name> <probe-command> <install hint>
+tool_row() {
+  local status="missing"
+  if eval "$3" >/dev/null 2>&1; then status="available"; fi
+  printf '%-11s %-24s %-10s %s\n' "$1" "$2" "$status" "$([ "$status" = missing ] && printf '%s' "$4")"
+}
+
+cmd_tools() {
+  local mcps=""
+  command -v claude >/dev/null 2>&1 && mcps=$(claude mcp list 2>/dev/null | strip_ansi || true)
+  has_mcp() { printf '%s' "$mcps" | grep -qi -- "$1"; }
+  echo "Means of running and watching an app on this machine (for the tester role; the lead asks the user before anything is installed):"
+  printf '%-11s %-24s %-10s %s\n' GROUP TOOL STATUS "INSTALL HINT"
+  tool_row browser "claude-in-chrome MCP" 'has_mcp claude-in-chrome' "Claude in Chrome extension + /chrome in a session"
+  tool_row browser "chrome-devtools MCP" 'has_mcp chrome-devtools' "claude mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest"
+  tool_row browser "playwright MCP" 'has_mcp playwright' "claude mcp add playwright -- npx -y @playwright/mcp@latest"
+  tool_row browser "playwright CLI" 'command -v playwright || ls node_modules/.bin/playwright' "npm i -D @playwright/test && npx playwright install chromium"
+  tool_row browser "puppeteer" 'ls node_modules/puppeteer' "npm i -D puppeteer"
+  tool_row screenshot "screencapture (macOS)" 'command -v screencapture' "part of macOS"
+  tool_row screenshot "peekaboo MCP (macOS)" 'has_mcp peekaboo' "brew install steipete/tap/peekaboo"
+  tool_row screenshot "computer-use MCP" 'has_mcp computer-use' "Claude Desktop / computer-use extension"
+  tool_row screenshot "scrot / grim (Linux)" 'command -v scrot || command -v grim' "apt install scrot  |  grim on Wayland"
+  tool_row screenshot "xdotool (Linux X11)" 'command -v xdotool' "apt install xdotool"
+  tool_row recording "ffmpeg" 'command -v ffmpeg' "brew install ffmpeg  |  apt install ffmpeg"
+  tool_row terminal "tmux" 'command -v tmux' "brew install tmux  |  apt install tmux"
+  tool_row terminal "expect" 'command -v expect' "brew install expect  |  apt install expect"
+  tool_row http "curl" 'command -v curl' "system package"
+  tool_row http "httpie" 'command -v http' "brew install httpie"
+  tool_row mobile "xcrun simctl (iOS sim)" 'command -v xcrun && xcrun simctl help' "Xcode"
+  tool_row mobile "adb (Android)" 'command -v adb' "Android platform-tools"
+  tool_row container "docker" 'command -v docker' "Docker Desktop / OrbStack / docker.io"
+  echo
+  echo "Pick by target: web UI -> a browser MCP or Playwright; CLI/TUI -> tmux or expect plus terminal capture; desktop/game -> screenshot and recording tools; API -> curl/httpie."
 }
 
 cmd_handoff_put() {
@@ -290,6 +351,20 @@ render_brief() {
     else
       review_line="review venue: $target_branch, read with git -C <its worktree> diff $base...HEAD — round $round of $max_rounds.
   Findings go into your handoff, most severe first, each with file, line, claim and evidence. On a re-review read the diff again from scratch and mark each earlier finding fixed, not fixed, or new."
+    fi
+  elif [ "$role" = tester ]; then
+    local verifies target
+    verifies=$(jq -r '.verifies // ""' <<<"$task")
+    target=$(jq -r --arg id "$verifies" '.tasks[] | select(.id == $id) | .name' "$d/plan.json" 2>/dev/null)
+    review_line="interactive verification of ${target:-the task named in your goal} — round $round of $max_rounds.
+  Run the application from its worktree the way the repository documents (README, package scripts, Makefile, docker compose), exercise every acceptance criterion as a user would, and capture evidence for each: screenshots, recordings, terminal transcripts, HTTP responses, logs. Evidence goes under .scratch/evidence/ in your worktree, named by criterion; paths go into the handoff.
+  Means: run 'orch tools' first and pick from what is available for this target. Nothing is installed by you; when the run has no suitable means, report BLOCKED: with the exact tool and install command from 'orch tools' so the orchestrator can ask the user."
+    if [ "$(jq -r '.authorize.installTools // false' "$d/plan.json")" = true ]; then
+      review_line="$review_line
+  authorized for this run: installing the verification tooling 'orch tools' lists as missing (and only that)."
+    else
+      review_line="$review_line
+  NOT authorized: installing anything; the guard blocks package installs until the plan authorizes install-tools."
     fi
   elif [ "$venue" = pr ] && [ "$role" != researcher ]; then
     review_line="review venue: pull request. When your work is ready, push your branch and open a PR against $base (gh pr create --draft --base $base, or glab mr create) with the acceptance criteria as a checklist, then put the PR link in your handoff and in your DONE message. Reviewers comment in threads there; answer each thread with what you changed and the commit that changed it."
@@ -483,6 +558,8 @@ case "$cmd" in
   address) cmd_address "$@" ;;
   authorize) cmd_authorize "$@" ;;
   review) cmd_review "$@" ;;
+  interactive) cmd_interactive "$@" ;;
+  tools) cmd_tools "$@" ;;
   pause) cmd_pause "$@" ;;
   resume) cmd_resume "$@" ;;
   decide) cmd_decide "$@" ;;

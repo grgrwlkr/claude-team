@@ -19,7 +19,7 @@ This invocation is the user's request for the whole run, including every session
 
 ## Preflight
 
-Run `orch doctor`. It checks `claude`, `jq`, a git repository, the plugin's `bin/` on PATH and the background service. Fix or report what fails before anything else. Note your own model in the first line of your first reply: this skill is meant to run on Fable with Opus as fallback (`orch start` launches that way); if you are something else, say so and continue.
+Run `orch doctor`, and `orch tools` when the task produces something a user runs or sees. `orch doctor` checks `claude`, `jq`, a git repository, the plugin's `bin/` on PATH and the background service. Fix or report what fails before anything else. Note your own model in the first line of your first reply: this skill is meant to run on Fable with Opus as fallback (`orch start` launches that way); if you are something else, say so and continue.
 
 ## 1. Understand and decompose
 
@@ -32,6 +32,7 @@ Write the plan as a task graph: roles, names, goals, allowed paths, acceptance, 
 - Developers own disjoint paths in the same wave. Same files means sequence, not parallelism.
 - QA depends on the developer task it tests and owns the test paths; it does not touch source.
 - **Every developer task gets a reviewer task** with `reviewOf: <task-id>`; `orch plan` refuses a graph where code goes unreviewed. The reviewer owns no paths and delivers findings with cited lines.
+- **With interactive verification on, every developer task also gets a tester task** with `verifies: <task-id>`: it runs the application from the branch, exercises each acceptance criterion as a user would with the means the machine has (browser MCP, Playwright, screenshots, terminal capture), and hands over evidence per criterion. `orch plan` refuses the graph otherwise. Testers run in the same wave as reviewers and re-run per round like them.
 - The integrator depends on every branch it merges and is the only role allowed to merge into the base branch. Pushing the base branch stays with the user unless the user said otherwise in the task.
 - Budgets: analyst 80–150, researcher 60–120, designer 100–200, developer 150–300, QA 150–250, reviewer 60–120, integrator 80–150 tool calls. Smaller is safer; a session that runs out writes a handoff and you respawn narrower.
 
@@ -44,6 +45,7 @@ In that same list, settle every action this run may need that a session cannot t
 - **push the base branch** — the integrator merges locally regardless; may it push?
 - **delete merged branches and worktrees** at the end?
 - **tag or release?**
+- **interactive verification** — should a tester run the application after each developer round and check the result visually? Run `orch tools` first and quote its table: what is available on this machine, what is missing and how it installs. If the user wants it and tools are missing, ask in the same breath whether the run may install them (`orch authorize <run> install-tools on`); otherwise the tester reports `BLOCKED:` on the first criterion it cannot exercise. Record the answer with `orch interactive <run> on|off`.
 - **where review happens** — on the branch (the reviewer reads `git diff base...HEAD` and files findings through you), or on a pull or merge request (everyone who changed code opens one, reviewers comment in threads, authors answer them). Say which forge tooling you actually found (`gh`, `glab`, a remote at all) so the choice is informed: `orch review <run> venue branch|pr`.
 
 Record each yes: `orch authorize <run> push-base on`, `delete-merged on`, `tag on`. The guard reads the plan, so an authorized integrator acts without another round trip; the plan is also where the answer survives your own compaction. A gate the user declined stays declined and the run ends with the exact command they can run themselves.
@@ -75,6 +77,8 @@ Review is not a single pass. For each reviewed task:
 2. You read them, drop what does not hold, and message the developer the ones that stand.
 3. The developer fixes and reports `DONE` again.
 4. Spawn the **same reviewer task for the next round**: `orch spawn <run> <review-task-id> --round 2`. The session gets its own name (`rev-1-r2`) and a brief that tells it to re-read the diff from scratch and mark each earlier finding fixed, not fixed, or new.
+
+The tester follows the same rounds when interactive verification is on: after each developer fix, `orch spawn <run> <tester-task-id> --round N` re-runs the full scenario list on the new build. Read its evidence yourself — open the screenshots and transcripts with the Read tool — before you accept; a table of passes with no evidence you have seen is a claim, not a result.
 
 Repeat until a round comes back clean, or until the run's `maxRounds` (default 3, `orch review <run> rounds <n>`). `orch spawn --round` refuses to go past it: at that point you decide — accept with the remaining findings recorded in `decisions.md`, re-scope the task, or escalate to the user in your report, but never loop forever.
 

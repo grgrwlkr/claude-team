@@ -141,4 +141,33 @@ expect_exit 0 "round 2 dry-run" "$ORCH" spawn r1 rev --round 2 --dry-run
 expect_grep '--name rev-1-r2' "$TMP_BASE/out" "round 2 gets its own session name"
 expect_exit 1 "round beyond maxRounds is refused" "$ORCH" spawn r1 rev --round 3 --dry-run
 
+echo "# interactive verification: tools inventory, tester role, install authorization"
+expect_exit 0 "tools inventory runs" "$ORCH" tools
+expect_grep 'browser' "$TMP_BASE/out" "inventory covers browser automation"
+expect_grep 'screenshot' "$TMP_BASE/out" "inventory covers screenshots"
+expect_grep 'available' "$TMP_BASE/out" "inventory marks each tool"
+expect_exit 0 "interactive on" "$ORCH" interactive r1 on
+expect_grep '"interactive": true' .orchestrator/r1/plan.json "interactive flag stored"
+expect_exit 1 "plan with interactive on refuses a developer task without a tester" "$ORCH" plan r1 "$TMP_BASE/reviewed.json"
+expect_grep 'tester' "$TMP_BASE/err" "the refusal names the tester role"
+cat > "$TMP_BASE/tested.json" <<'JSON'
+{"run":"r1","baseBranch":"main","tasks":[
+ {"id":"impl","role":"developer","name":"d1","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":50},
+ {"id":"rev","role":"reviewer","name":"rev-1","goal":"review impl","pathsAllowed":[],"acceptance":["findings cited"],"dependsOn":["impl"],"reviewOf":"impl","budget":40},
+ {"id":"run","role":"tester","name":"tester-1","goal":"run the app and exercise the criteria","pathsAllowed":[],"acceptance":["every criterion has evidence"],"dependsOn":["impl"],"verifies":"impl","budget":80},
+ {"id":"merge-task","role":"integrator","name":"int-1","goal":"merge","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":["rev","run"],"budget":60}
+]}
+JSON
+expect_exit 0 "plan with a tester per developer task is accepted" "$ORCH" plan r1 "$TMP_BASE/tested.json"
+expect_grep '"interactive": true' .orchestrator/r1/plan.json "interactive survives orch plan"
+"$ORCH" accept r1 impl "for the tester brief" > /dev/null
+expect_exit 0 "tester brief renders" "$ORCH" brief r1 run
+expect_grep 'evidence' "$TMP_BASE/out" "tester brief demands evidence"
+expect_grep 'orch tools' "$TMP_BASE/out" "tester brief points at the inventory"
+expect_grep 'install' "$TMP_BASE/out" "tester brief states the install policy"
+expect_exit 0 "authorize install-tools" "$ORCH" authorize r1 install-tools on
+expect_grep '"installTools": true' .orchestrator/r1/plan.json "install authorization stored"
+expect_exit 0 "interactive off" "$ORCH" interactive r1 off
+expect_exit 0 "plan without testers is accepted again when interactive is off" "$ORCH" plan r1 "$TMP_BASE/reviewed.json"
+
 summary

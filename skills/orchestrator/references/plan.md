@@ -38,7 +38,7 @@ Fields:
 | Field | Meaning |
 |---|---|
 | `id` | stable task id, used in `dependsOn` |
-| `role` | one of `analyst`, `developer`, `designer`, `qa`, `reviewer`, `integrator`, `researcher` |
+| `role` | one of `analyst`, `developer`, `designer`, `qa`, `tester`, `reviewer`, `integrator`, `researcher` |
 | `name` | the session's team name (`--name`); unique within the run; letters, digits, hyphens |
 | `goal` | one paragraph, verbatim into the brief |
 | `pathsAllowed` | globs relative to the worktree root; `*` matches across `/`; the guard blocks edits elsewhere. Two tasks never share a path in the same wave |
@@ -46,6 +46,7 @@ Fields:
 | `dependsOn` | ids whose handoffs are pasted into this task's brief; a task is ready when all are `done` |
 | `budget` | tool calls allowed for Bash/Edit/Write before the guard stops the session; the brake against drift |
 | `model`, `effort` | optional per-task overrides; default `opus` / `high` |
+| `verifies` | tester tasks only: the id of the developer task whose build this interactive run checks. Required for every developer task when the plan has `interactive: true` |
 | `reviewOf` | reviewer tasks only: the id of the task whose code this review covers. `orch plan` refuses a graph where a developer task has no reviewer |
 
 Every developer task must be covered by a reviewer task (`reviewOf`), and review runs in rounds: the orchestrator re-spawns the same review task with `orch spawn <run> <id> --round N`, which gives the session the name `<name>-r<N>` and a brief telling it to re-read the whole diff and answer its earlier findings. The venue and the round cap live in the plan:
@@ -67,6 +68,10 @@ Rules of thumb: a wave is the set of ready tasks; spawn them together, one sessi
 ```
 
 The lead writes them with `orch authorize <run> push-base|delete-merged|tag on|off`, `orch plan` preserves them, and `scripts/guard.sh` reads them: with `pushBase` the integrator pushes the base branch, with `deleteMerged` it deletes merged branches and worktrees. No other role gains anything from either flag.
+
+## Interactive verification
+
+`"interactive": true` (set with `orch interactive <run> on`) means a `tester` task with `verifies` covers every developer task: it starts the application from the branch, drives every acceptance criterion the way a user would, and hands over evidence per criterion. `orch tools` lists the machine's means; the tester installs nothing unless `authorize.installTools` is on (`orch authorize <run> install-tools on`), and the guard blocks package installs otherwise.
 
 ## Acceptance
 

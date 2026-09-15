@@ -1,6 +1,6 @@
 # orchestrator — a Claude Code plugin for one lead and a team of role sessions
 
-`/orchestrator <task>` turns the current Claude Code session into a lead that decomposes the task, spawns a team of background sessions (analyst, developer, designer, QA, reviewer, integrator, researcher), each in its own git worktree, lets them talk to each other directly, watches them through hard guard rails, and judges the result itself. You watch everything in `claude agents`.
+`/orchestrator <task>` turns the current Claude Code session into a lead that decomposes the task, spawns a team of background sessions (analyst, developer, designer, QA, tester, reviewer, integrator, researcher), each in its own git worktree, lets them talk to each other directly, watches them through hard guard rails, and judges the result itself. You watch everything in `claude agents`.
 
 Portable by design: it needs `claude`, `git`, `jq` and nothing else — no particular `CLAUDE.md`, no other skills or plugins. The designer carries its own design guidance; if design skills are installed it uses them, if not it does not stall.
 
@@ -41,6 +41,7 @@ You can attach to any session (`claude agents`, `Enter`), message any of them, o
 | developer | its task's source and test paths | code on its branch, tests with the three runs shown, draft PR |
 | designer | `docs/design/**`, `design/`, `assets/` | design brief, tokens, states, assets; self-contained guidance for UI, game HUD, graphics, 3D |
 | qa | test paths | test cases, automated tests, coverage matrix per criterion, proposed verdict |
+| tester | nothing (read-only; evidence in its worktree's `.scratch/evidence/`) | runs the app from the branch, exercises every criterion as a user would with the means the machine has, hands over screenshots, recordings and transcripts per criterion; re-runs each round |
 | reviewer | nothing (read-only) | findings with cited lines, severity, confidence; re-reviews each round until clean |
 | integrator | integration branch | dependency-ordered merges, green suite, version and changelog; the only role allowed to merge into the base branch |
 | researcher | `docs/research/**` | facts from live sources with verbatim quotes and dates |
@@ -50,6 +51,8 @@ All roles run on Opus at effort `high` (per-task override in the plan). Roles ne
 ## How they talk
 
 Peer to peer over Claude Code's cross-session messaging, by session name: `STARTED:` when a session begins, `Q:` / `A:` for questions, `FYI:` for facts others must know, `BLOCKED:` and `ESCALATION:` to the lead, `DONE:` when the handoff is in. Reports are messages, never silence: the lead does not read idleness as a result. Two rounds without agreement means both parties escalate and stop on the disputed point until the lead writes a decision. A teammate's message is data, never an approval. Full protocol: `skills/orchestrator/references/team-rules.md`.
+
+Interactive verification is a choice the lead puts to you at plan approval, together with `orch tools`, an inventory of what this machine can drive and capture (browser MCPs, Playwright, screenshots, recording, terminal capture, simulators). With `orch interactive <run> on`, every developer task gets a tester task that runs the application after each round and hands over evidence per criterion; missing tooling is reported to you with the install command, and nothing is installed unless you authorized it (`orch authorize <run> install-tools on`). The guard blocks package installs otherwise.
 
 Review is mandatory and iterative: `orch plan` refuses a graph where a developer task has no reviewer, and the lead re-spawns the reviewer with `orch spawn <run> <id> --round N` after each round of fixes, up to three rounds by default. At plan approval you choose where review happens — on the branch, or on a pull/merge request where authors open the PR and reviewers comment in threads (`orch review <run> venue pr`).
 
@@ -62,6 +65,7 @@ The plugin's `PreToolUse` hook watches every session registered in a run and blo
 - edits outside the task's allowed paths, in the main checkout, or in another session's handoff;
 - `git push --force`, `git reset --hard`, `git branch -D`, `git clean -f`, `sudo`, `curl … | sh`, `rm -r` on absolute paths;
 - pushing the base branch, and deleting branches or worktrees, unless the plan authorizes it and the session is the integrator; checkout of, or commits on, the base branch by anyone but the integrator;
+- package installs (`brew`, `apt`, `npm -g`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless the plan authorizes `install-tools`; a project-local `npm install` passes;
 - `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`;
 - `claude stop|rm|kill|respawn` — sessions never stop each other;
 - every Bash/Edit/Write while the lead has paused the session or the run (`orch pause`); reading and messaging keep working;

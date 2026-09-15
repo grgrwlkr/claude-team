@@ -25,6 +25,7 @@ handoff="$run_dir/handoffs/$name.md"
 # Standing authorizations the user gave at plan approval; the lead writes them with `orch authorize`.
 auth_push=$(jq -r '.authorize.pushBase // false' "$run_dir/plan.json" 2>/dev/null)
 auth_delete=$(jq -r '.authorize.deleteMerged // false' "$run_dir/plan.json" 2>/dev/null)
+auth_install=$(jq -r '.authorize.installTools // false' "$run_dir/plan.json" 2>/dev/null)
 
 block() {
   log_event "$run_dir" "$sid" "$name" "$tool" block "$1"
@@ -141,6 +142,11 @@ case "$tool" in
       fi
     fi
     if has '(^|[;&| ])claude (stop|kill|rm|respawn)( |$)'; then block "sessions are stopped only by the orchestrator or the user"; fi
+    # Installing tooling onto the machine is the user's call, given once at plan approval (install-tools).
+    # A project-local `npm install` or `bun install` is the project's own dependency step and passes.
+    if [ "$auth_install" != true ] && has '(^|[;&| ])(brew|apt|apt-get|dnf|yum|pacman|apk|choco|winget|pipx|cargo|gem) +(install|add)( |$)|(^|[;&| ])(npm|pnpm|yarn|bun) +(install|add|i)( [^|;&]*)? +(-g|--global)( |$)|(^|[;&| ])(pip3?|uv) +(install|pip install|tool install)( |$)|(^|[;&| ])npx +playwright +install|(^|[;&| ])playwright +install|(^|[;&| ])claude +mcp +add( |$)'; then
+      block "installing tooling on this machine is not authorized in this run's plan; report BLOCKED: with the tool and the install command from 'orch tools', the orchestrator asks the user and runs orch authorize <run> install-tools on"
+    fi
     if has '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
     if has '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
     touches_state=0
