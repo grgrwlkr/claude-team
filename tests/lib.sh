@@ -13,6 +13,23 @@ fresh_tmp() {
   mkdir -p "$TMP_BASE"
 }
 
+# stub_claude: a fake `claude` first on PATH, so no test reaches the real CLI, its MCP servers or the network.
+# Every invocation is appended to $TMP_BASE/claude.calls.
+stub_claude() {
+  mkdir -p "$TMP_BASE/bin"
+  cat > "$TMP_BASE/bin/claude" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$TMP_BASE/claude.calls"
+case "\$*" in
+  --version) echo "0.0.0 (stub)" ;;
+  "mcp list") [ -n "\${STUB_SLOW:-}" ] && sleep 5; echo "playwright: npx -y @playwright/mcp@latest - ✓ Connected" ;;
+  agents*) echo '[]' ;;
+esac
+EOF
+  chmod +x "$TMP_BASE/bin/claude"
+  PATH="$TMP_BASE/bin:$PATH"; export PATH
+}
+
 # make_repo <dir>: a git repo with one commit on main and a linked worktree at .claude/worktrees/w1
 make_repo() {
   local dir="$1"
@@ -68,6 +85,19 @@ expect_grep() {
   local pattern="$1" file="$2" label="$3"
   if grep -q -- "$pattern" "$file"; then PASS=$((PASS+1)); printf 'ok   %s\n' "$label"
   else FAIL=$((FAIL+1)); printf 'FAIL %s (pattern %s not in %s)\n' "$label" "$pattern" "$file"; fi
+}
+
+expect_no_grep() {
+  local pattern="$1" file="$2" label="$3"
+  if grep -q -- "$pattern" "$file"; then FAIL=$((FAIL+1)); printf 'FAIL %s (pattern %s found in %s)\n' "$label" "$pattern" "$file"
+  else PASS=$((PASS+1)); printf 'ok   %s\n' "$label"; fi
+}
+
+# expect_calls <n> <label>: how many times the stubbed claude was asked for `mcp list`
+expect_calls() {
+  local got; got=$(grep -c '^mcp list$' "$TMP_BASE/claude.calls" 2>/dev/null || true)
+  if [ "${got:-0}" -eq "$1" ]; then PASS=$((PASS+1)); printf 'ok   %s\n' "$2"
+  else FAIL=$((FAIL+1)); printf 'FAIL %s (claude mcp list ran %s times, want %s)\n' "$2" "${got:-0}" "$1"; fi
 }
 
 summary() {

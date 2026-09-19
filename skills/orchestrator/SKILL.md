@@ -34,7 +34,7 @@ Write the plan as a task graph: roles, names, goals, allowed paths, acceptance, 
 - **Every developer task gets a reviewer task** with `reviewOf: <task-id>`; `orch plan` refuses a graph where code goes unreviewed. The reviewer owns no paths and delivers findings with cited lines.
 - **With interactive verification on, every developer task also gets a tester task** with `verifies: <task-id>`: it runs the application from the branch, exercises each acceptance criterion as a user would with the means the machine has (browser MCP, Playwright, screenshots, terminal capture), and hands over evidence per criterion. `orch plan` refuses the graph otherwise. Testers run in the same wave as reviewers and re-run per round like them.
 - The integrator depends on every branch it merges and is the only role allowed to merge into the base branch. Pushing the base branch stays with the user unless the user said otherwise in the task.
-- Budgets: analyst 80–150, researcher 60–120, designer 100–200, developer 150–300, QA 150–250, reviewer 60–120, integrator 80–150 tool calls. Smaller is safer; a session that runs out writes a handoff and you respawn narrower.
+- Budgets, in guarded tool calls (Bash, Edit, Write and every MCP tool): analyst 40–80, researcher 30–60, designer 50–100, developer 80–150, QA 80–120, reviewer 30–60, tester 80–150 (it drives the app through MCP calls, and they count), integrator 40–80. A brake that never engages is no brake: a budget several times what the work needs lets drift run that far. A session that runs out writes a handoff and you respawn narrower; `orch status` marks a session with `!` from 80%.
 
 ## 2. Ask once, and collect every gate in the same breath
 
@@ -67,7 +67,7 @@ Then end your turn and wait for each session's `STARTED` message. Subscribe with
 
 ## 4. Watch and judge
 
-Follow `references/watching.md`. Short form: act on teammates' messages, read `orch status` and `orch events`, verify every `DONE` yourself (tests, diff, spec), record the verdict with `orch accept <run> <task-id> "<why>"`, answer every `BLOCKED`, decide every `ESCALATION:` into `decisions.md`, pause on danger or drift, spawn the next wave. Verdicts are yours; QA and the reviewer only propose. `orch accept` is what unblocks dependents — never edit a teammate's handoff to change its status.
+Follow `references/watching.md`. Short form: act on teammates' messages, read `orch status` and `orch events`, verify every `DONE` yourself (tests, diff, spec), record the verdict with `orch accept <run> <task-id> "<why>"`, answer every `BLOCKED`, decide every `ESCALATION:` into `decisions.md`, pause on danger or drift, spawn the next wave. Verdicts are yours; QA and the reviewer only propose. `orch accept` is what unblocks dependents — never edit a teammate's handoff to change its status. A developer's own `done` makes only its reviewer, tester and QA ready; the integrator and any developer task that builds on that code stay blocked until you accept it.
 
 ## 4a. The review loop
 
@@ -76,7 +76,7 @@ Review is not a single pass. For each reviewed task:
 1. The reviewer reports findings (threads on the PR, or its handoff in branch mode).
 2. You read them, drop what does not hold, and message the developer the ones that stand.
 3. The developer fixes and reports `DONE` again.
-4. Spawn the **same reviewer task for the next round**: `orch spawn <run> <review-task-id> --round 2`. The session gets its own name (`rev-1-r2`) and a brief that tells it to re-read the diff from scratch and mark each earlier finding fixed, not fixed, or new.
+4. Spawn the **same reviewer task for the next round**: `orch spawn <run> <review-task-id> --round 2`. The session gets its own name (`rev-1-r2`), hands off under that name, and gets a brief that tells it to re-read the diff from scratch and mark each earlier finding fixed, not fixed, or new. A later round on a small fix rarely needs the first round's budget: `--budget <n>` sets that session's own.
 
 The tester follows the same rounds when interactive verification is on: after each developer fix, `orch spawn <run> <tester-task-id> --round N` re-runs the full scenario list on the new build. Read its evidence yourself — open the screenshots and transcripts with the Read tool — before you accept; a table of passes with no evidence you have seen is a claim, not a result.
 
@@ -86,7 +86,7 @@ Accept the reviewed task only after a clean round, or after you yourself confirm
 
 ## 5. Report
 
-After each wave and at the end: one table (task, session, state, branch/PR, verified how, next), then what the user must do (push, review, merge) and what you did not verify. When the run is closed, tell live sessions to shut down and leave the worktrees in place.
+After each wave and at the end: one table (task, session, state, branch/PR, verified how, next), then what the user must do (push, review, merge) and what you did not verify. To close the run: `orch close <run>` — it refuses while a task is unaccepted, reports which of the run's branches are contained in the base branch and how many it checked, clears the run's entries from the session index and prints the final table. It deletes nothing. Then tell live sessions to shut down and leave the worktrees in place.
 
 ## Never
 

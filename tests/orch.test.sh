@@ -4,6 +4,7 @@
 ORCH="$PLUGIN_ROOT/bin/orch"
 
 fresh_tmp
+stub_claude
 REPO="$TMP_BASE/repo"; make_repo "$REPO"
 cd "$REPO" || exit 1
 
@@ -143,6 +144,14 @@ expect_exit 1 "round beyond maxRounds is refused" "$ORCH" spawn r1 rev --round 3
 
 echo "# interactive verification: tools inventory, tester role, install authorization"
 expect_exit 0 "tools inventory runs" "$ORCH" tools
+expect_grep 'playwright MCP  *available' "$TMP_BASE/out" "inventory reads the stubbed claude, never the real one"
+expect_exit 0 "tools inventory runs again" "$ORCH" tools
+expect_calls 1 "second run is served from the cache"
+expect_exit 0 "tools --refresh bypasses the cache" "$ORCH" tools --refresh
+expect_calls 2 "--refresh asked claude again"
+expect_exit 0 "tools survives a claude mcp list that hangs" env STUB_SLOW=1 ORCH_MCP_TIMEOUT=1 "$ORCH" tools --refresh
+expect_grep 'playwright MCP  *unknown' "$TMP_BASE/out" "a timed-out MCP list reads unknown, not missing"
+expect_grep 'did not finish' "$TMP_BASE/err" "the timeout is said out loud"
 expect_grep 'browser' "$TMP_BASE/out" "inventory covers browser automation"
 expect_grep 'screenshot' "$TMP_BASE/out" "inventory covers screenshots"
 expect_grep 'available' "$TMP_BASE/out" "inventory marks each tool"
@@ -169,5 +178,59 @@ expect_exit 0 "authorize install-tools" "$ORCH" authorize r1 install-tools on
 expect_grep '"installTools": true' .orchestrator/r1/plan.json "install authorization stored"
 expect_exit 0 "interactive off" "$ORCH" interactive r1 off
 expect_exit 0 "plan without testers is accepted again when interactive is off" "$ORCH" plan r1 "$TMP_BASE/reviewed.json"
+
+echo "# acceptance gates what builds on code; verification roles start on the developer's done"
+expect_exit 0 "init second run" "$ORCH" init r2 --base main
+cat > "$TMP_BASE/gate.json" <<'JSON'
+{"run":"r2","baseBranch":"main","tasks":[
+ {"id":"impl","role":"developer","name":"d1","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":5},
+ {"id":"rev","role":"reviewer","name":"rev-1","goal":"review impl","pathsAllowed":[],"acceptance":["findings cited"],"dependsOn":["impl"],"reviewOf":"impl","budget":40},
+ {"id":"merge-task","role":"integrator","name":"int-1","goal":"merge","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":["impl","rev"],"budget":60}
+]}
+JSON
+expect_exit 0 "plan for the gate run" "$ORCH" plan r2 "$TMP_BASE/gate.json"
+printf '# d1\n## Status\nblocked — waiting until the analyst is done\n## Branch\nw1 at 0000000\n' > "$TMP_BASE/h1.md"
+expect_exit 0 "developer hands off blocked" sh -c "'$ORCH' handoff-put r2 d1 < '$TMP_BASE/h1.md'"
+expect_exit 0 "ready after a blocked handoff" "$ORCH" ready r2
+expect_no_grep '^rev$' "$TMP_BASE/out" "status is the first word, not a substring: 'blocked … is done' unblocks nobody"
+printf '# d1\n## Status\n\nDone — implemented\n## Branch\nw1 at 0000000\n' > "$TMP_BASE/h2.md"
+expect_exit 0 "developer hands off done" sh -c "'$ORCH' handoff-put r2 d1 < '$TMP_BASE/h2.md'"
+expect_exit 0 "ready after done" "$ORCH" ready r2
+expect_grep '^rev$' "$TMP_BASE/out" "the reviewer is ready on the developer's done"
+expect_no_grep '^merge-task$' "$TMP_BASE/out" "the integrator is not"
+printf '# rev-1\n## Status\ndone\n' > "$TMP_BASE/h3.md"
+expect_exit 0 "reviewer hands off" sh -c "'$ORCH' handoff-put r2 rev-1 < '$TMP_BASE/h3.md'"
+expect_exit 0 "ready after the review" "$ORCH" ready r2
+expect_no_grep '^merge-task$' "$TMP_BASE/out" "the integrator waits for orch accept of the developer task"
+expect_exit 1 "integrator brief refused before acceptance" "$ORCH" brief r2 merge-task
+expect_grep 'orch accept' "$TMP_BASE/err" "the refusal names orch accept"
+
+echo "# review rounds can hand off"
+expect_exit 0 "round-2 session delivers its handoff" sh -c "'$ORCH' handoff-put r2 rev-1-r2 < '$TMP_BASE/h3.md'"
+expect_grep 'done' .orchestrator/r2/handoffs/rev-1-r2.md "round-2 handoff landed"
+expect_exit 1 "a round beyond maxRounds cannot hand off" sh -c "'$ORCH' handoff-put r2 rev-1-r9 < '$TMP_BASE/h3.md'"
+expect_exit 1 "a round of an unknown task cannot hand off" sh -c "'$ORCH' handoff-put r2 nobody-r2 < '$TMP_BASE/h3.md'"
+
+echo "# budget: per-spawn override and the 80% mark"
+expect_exit 0 "round 2 with its own budget" "$ORCH" spawn r2 rev --round 2 --budget 25 --dry-run
+expect_grep 'budget=25' "$TMP_BASE/out" "dry-run shows the overridden budget"
+echo '[{"taskId":"impl","name":"d1","role":"developer","id":"aaaa1111","sessionId":"sid-d1","pathsAllowed":["src/**"],"budget":5}]' > .orchestrator/r2/sessions.json
+for _ in 1 2 3 4; do echo "2026-09-20T00:00:00Z|sid-d1|d1|Bash|allow|ls" >> .orchestrator/r2/events.log; done
+expect_exit 0 "status with a nearly spent budget" "$ORCH" status r2 --no-live
+expect_grep '4/5!' "$TMP_BASE/out" "status marks a session at 80% of its budget"
+
+echo "# close"
+mkdir -p "$CLAUDE_ORCH_STATE"
+(cd .orchestrator/r2 && pwd -P) > "$CLAUDE_ORCH_STATE/sid-d1"
+echo "/somewhere/else" > "$CLAUDE_ORCH_STATE/sid-other"
+expect_exit 1 "close refuses while tasks are not accepted" "$ORCH" close r2
+expect_grep 'merge-task' "$TMP_BASE/err" "the refusal lists the unaccepted tasks"
+for t in impl rev merge-task; do "$ORCH" accept r2 "$t" ok > /dev/null; done
+expect_exit 0 "close succeeds once everything is accepted" "$ORCH" close r2
+expect_grep '1 refs checked' "$TMP_BASE/out" "close counts the refs it verified"
+expect_grep 'contained in main: w1' "$TMP_BASE/out" "close reports containment per branch"
+expect_exit 1 "this run's index entry is gone" test -f "$CLAUDE_ORCH_STATE/sid-d1"
+expect_exit 0 "another run's index entry stays" test -f "$CLAUDE_ORCH_STATE/sid-other"
+expect_exit 0 "CLOSED marker written" test -f .orchestrator/r2/CLOSED
 
 summary

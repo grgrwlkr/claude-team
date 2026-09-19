@@ -14,6 +14,10 @@ Roles are full background sessions (`claude --agent orchestrator:<role> --bg`), 
 
 Three brakes are hooks, not prose: path ownership, a danger list for Bash, and a tool-call budget. Prose is ignored under pressure; a hook is not. Pause is a file, so the lead or a human in any terminal can stop a session without knowing its process. Everything that requires judgement (is the work correct, is coverage enough, should this merge) stays with the lead, which re-runs checks itself; QA and the reviewer propose. This matches the rule in many users' instruction layers that verification is never delegated, and it is the right split regardless: a verdict from the party that produced the work is not evidence.
 
+## A developer's "done" readies its verifiers, nothing else
+
+Readiness used to be "accepted, or the handoff says done" for every dependent, which let an integrator start on a developer's word while the review still had blockers. Requiring acceptance for every dependent would deadlock the other way: the lead accepts only after a clean review round, and the reviewer could not start before acceptance. So the dependent's role decides: reviewer, tester and QA start on the developer's `done`; whatever builds on the code waits for `orch accept`.
+
 ## Peer messaging with an escalation ceiling
 
 Roles message each other directly because a developer waiting on the lead to relay a spec question wastes a wave. The ceiling of two rounds before `ESCALATION:` bounds the cost of a disagreement and keeps the lead as the tie-breaker rather than a router.
