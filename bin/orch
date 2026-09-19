@@ -10,6 +10,8 @@ RULES="$PLUGIN_ROOT/skills/orchestrator/references/team-rules.md"
 ROLES="analyst developer designer qa tester reviewer integrator researcher"
 # Every session the plugin launches, the lead included, runs the built-in Concise output style; --settings outranks /output-style.
 STYLE='{"outputStyle":"Concise"}'
+# Same index the guard keeps (scripts/lib.sh): <session id> -> run dir.
+INDEX_DIR="${CLAUDE_ORCH_STATE:-$HOME/.claude/orchestrator-sessions}"
 
 die() { printf 'orch: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found on PATH$2"; }
@@ -25,6 +27,15 @@ run_dir() {
   [ -d "$r" ] || die "run '$1' does not exist; orch init $1 --base <branch>"
   printf '%s' "$r"
 }
+# state_root: <repo>/.orchestrator, created and kept out of git status.
+state_root() {
+  local root excl; root=$(repo_root)
+  mkdir -p "$root/.orchestrator"
+  excl="$root/.git/info/exclude"
+  mkdir -p "$(dirname "$excl")"
+  grep -qx '.orchestrator/' "$excl" 2>/dev/null || echo '.orchestrator/' >> "$excl"
+  printf '%s' "$root/.orchestrator"
+}
 strip_ansi() { sed 's/\x1b\[[0-9;]*[A-Za-z]//g'; }
 now() { date +%Y-%m-%dT%H:%M:%S%z; }
 
@@ -36,7 +47,7 @@ orch init <run> --base <branch> [--orchestrator <name>]
 orch plan <run> <plan.json>                       validate and store the task graph
 orch ready <run>                                  tasks whose dependencies are done and that are not spawned
 orch brief <run> <task-id>                        print the brief a spawn would send
-orch spawn <run> <task-id> [--dry-run]            spawn one task as a background session and register it
+orch spawn <run> <task-id> [--round N] [--budget N] [--dry-run]   spawn one task as a background session and register it
 orch spawn <run> --wave [--dry-run]               spawn every ready task
 orch status <run> [--no-live]                     roster joined with claude agents --json
 orch events <run> [--since <line>]                guard log (blocks, budgets, pauses)
@@ -48,10 +59,11 @@ orch authorize <run> <push-base|delete-merged|tag|install-tools> <on|off>
 orch review <run> venue <branch|pr>               where review happens: the branch diff, or a pull/merge request with threads
 orch review <run> rounds <n>                      how many review rounds a task may take (default 3)
 orch interactive <run> <on|off>                   require a tester task per developer task: run the app, verify visually
-orch tools                                        inventory of the machine's means to run and watch an app (browser, screenshots, recording)
+orch tools [--refresh]                            inventory of the machine's means to run and watch an app; the MCP list is cached for an hour
 orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
 orch resume <run> <name|all>
 orch decide <run> "<decision>"                    append to decisions.md
+orch close <run> [--force]                        containment report for the run's branches, session index cleanup, CLOSED marker
 EOF
 }
 
@@ -95,7 +107,7 @@ cmd_init() {
     esac
   done
   [ -n "$base" ] || die "init needs --base <branch>"
-  local root d; root=$(repo_root); d="$root/.orchestrator/$run"
+  local d; d="$(state_root)/$run"
   [ -e "$d" ] && die "run '$run' already exists at $d"
   mkdir -p "$d/handoffs"
   : > "$d/events.log"
@@ -106,9 +118,6 @@ cmd_init() {
       authorize:{pushBase:false, deleteMerged:false, tag:false, installTools:false},
       review:{venue:"branch", maxRounds:3}, interactive:false, tasks:[]}' > "$d/plan.json"
   echo '[]' > "$d/accepted.json"
-  local excl="$root/.git/info/exclude"
-  mkdir -p "$(dirname "$excl")"
-  grep -qx '.orchestrator/' "$excl" 2>/dev/null || echo '.orchestrator/' >> "$excl"
   echo "$d"
 }
 
@@ -165,17 +174,30 @@ cmd_plan() {
   echo "plan stored: $(jq '.tasks | length' "$d/plan.json") tasks → $d/plan.json"
 }
 
-# task_done <run_dir> <task-id>: the lead accepted the task, or its handoff says done.
+# handoff_word <file>: the first word of the first non-empty line under "## Status", lowercased.
+# The word, not a substring: "blocked — waiting until dev-1 is done" is blocked.
+handoff_word() {
+  awk '/^## Status/ {f=1; next} f && NF {print tolower($1); exit}' "$1" | tr -cd 'a-z'
+}
+
+# task_done <run_dir> <task-id> [<dependent's role>]: the lead accepted the task, or its handoff says done.
 # Acceptance is separate from the handoff on purpose: a task can be finished while its
 # handoff reads "blocked" on something the lead resolved (a push the user later authorized).
+# A developer's own "done" opens the door only to the roles that verify it; whatever builds
+# on the code (the integrator, the next developer) waits for orch accept.
 task_done() {
-  local name; name=$(jq -r --arg id "$2" '.tasks[] | select(.id == $id) | .name' "$1/plan.json")
+  local name role
+  name=$(jq -r --arg id "$2" '.tasks[] | select(.id == $id) | .name' "$1/plan.json")
+  role=$(jq -r --arg id "$2" '.tasks[] | select(.id == $id) | .role' "$1/plan.json")
   [ -n "$name" ] || return 1
   if [ -f "$1/accepted.json" ] && jq -e --arg id "$2" 'map(select(.taskId == $id)) | length > 0' "$1/accepted.json" >/dev/null 2>&1; then
     return 0
   fi
+  if [ "$role" = developer ]; then
+    case "${3:-}" in reviewer|tester|qa) ;; *) return 1 ;; esac
+  fi
   local h="$1/handoffs/$name.md"
-  [ -f "$h" ] && grep -A2 '^## Status' "$h" | grep -qi 'done'
+  [ -f "$h" ] && [ "$(handoff_word "$h")" = done ]
 }
 
 # handoff_state <run_dir> <name> <task-id>: accepted | done | partial | blocked | failed | none
@@ -183,27 +205,25 @@ handoff_state() {
   if [ -f "$1/accepted.json" ] && jq -e --arg id "$3" 'map(select(.taskId == $id)) | length > 0' "$1/accepted.json" >/dev/null 2>&1; then
     printf 'accepted'; return
   fi
-  local h="$1/handoffs/$2.md" line
+  local h="$1/handoffs/$2.md" word
   [ -f "$h" ] || { printf 'none'; return; }
-  line=$(grep -A2 '^## Status' "$h" | tr 'A-Z' 'a-z')
-  case "$line" in
-    *done*) printf 'done' ;;
-    *partial*) printf 'partial' ;;
-    *blocked*) printf 'blocked' ;;
-    *failed*) printf 'failed' ;;
+  word=$(handoff_word "$h")
+  case "$word" in
+    done|partial|blocked|failed) printf '%s' "$word" ;;
     *) printf 'written' ;;
   esac
 }
 
 cmd_ready() {
   local d; d=$(run_dir "${1:-}")
-  local id ok dep spawned
+  local id ok dep spawned role
   for id in $(jq -r '.tasks[].id' "$d/plan.json"); do
     spawned=$(jq -r --arg id "$id" 'map(select(.taskId == $id)) | length' "$d/sessions.json")
     [ "$spawned" -eq 0 ] || continue
+    role=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .role' "$d/plan.json")
     ok=1
     for dep in $(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .dependsOn[]' "$d/plan.json"); do
-      task_done "$d" "$dep" || { ok=0; break; }
+      task_done "$d" "$dep" "$role" || { ok=0; break; }
     done
     [ "$ok" -eq 1 ] && echo "$id"
   done
@@ -282,9 +302,32 @@ tool_row() {
   printf '%-11s %-24s %-10s %s\n' "$1" "$2" "$status" "$([ "$status" = missing ] && printf '%s' "$4")"
 }
 
+# mcp_list <refresh:0|1>: `claude mcp list` health-checks every configured server, so it is bounded
+# (ORCH_MCP_TIMEOUT seconds, default 45) and cached for an hour under <repo>/.orchestrator/.
+mcp_list() {
+  command -v claude >/dev/null 2>&1 || return 0
+  local cache="" tmp pid i=0 limit="${ORCH_MCP_TIMEOUT:-45}"
+  git rev-parse --git-dir >/dev/null 2>&1 && cache="$(state_root)/tools-mcp.cache"
+  if [ -n "$cache" ] && [ "$1" -eq 0 ] && [ -n "$(find "$cache" -mmin -60 2>/dev/null)" ]; then
+    cat "$cache"; return 0
+  fi
+  tmp=$(mktemp "${TMPDIR:-/tmp}/orch-mcp.XXXXXX") || return 0
+  claude mcp list >"$tmp" 2>/dev/null & pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt $((limit * 5)) ]; do sleep 0.2; i=$((i+1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null
+    echo "note: claude mcp list did not finish in $limit s; MCP rows below may read missing (ORCH_MCP_TIMEOUT raises the limit)" >&2
+    strip_ansi < "$tmp"
+  else
+    strip_ansi < "$tmp" | if [ -n "$cache" ]; then tee "$cache"; else cat; fi
+  fi
+  rm -f "$tmp"
+}
+
 cmd_tools() {
-  local mcps=""
-  command -v claude >/dev/null 2>&1 && mcps=$(claude mcp list 2>/dev/null | strip_ansi || true)
+  local mcps="" refresh=0
+  [ "${1:-}" = --refresh ] && refresh=1
+  mcps=$(mcp_list "$refresh")
   has_mcp() { printf '%s' "$mcps" | grep -qi -- "$1"; }
   echo "Means of running and watching an app on this machine (for the tester role; the lead asks the user before anything is installed):"
   printf '%-11s %-24s %-10s %s\n' GROUP TOOL STATUS "INSTALL HINT"
@@ -313,7 +356,14 @@ cmd_tools() {
 cmd_handoff_put() {
   local d; d=$(run_dir "${1:-}"); local name="${2:-}"
   [ -n "$name" ] || die "handoff-put <run> <name>  (content on stdin)"
-  jq -e --arg n "$name" '.tasks | map(select(.name == $n)) | length > 0' "$d/plan.json" >/dev/null || die "no session named '$name' in the plan"
+  # A later round runs under <task name>-r<N> (orch spawn --round N), up to the run's maxRounds.
+  jq -e --arg n "$name" '
+    (.review.maxRounds // 3) as $max
+    | [.tasks[].name] as $names
+    | ($names | index($n)) != null
+      or ( ($n | capture("^(?<base>.+)-r(?<r>[0-9]+)$")? // null) as $m
+           | $m != null and ($names | index($m.base)) != null and ($m.r | tonumber) >= 2 and ($m.r | tonumber) <= $max )
+    ' "$d/plan.json" >/dev/null || die "no session named '$name' in the plan (rounds are <task name>-r2 … -r<maxRounds>)"
   local tmp="$d/handoffs/.$name.tmp"
   cat > "$tmp" || die "could not read stdin"
   [ -s "$tmp" ] || { rm -f "$tmp"; die "empty handoff refused"; }
@@ -323,16 +373,17 @@ cmd_handoff_put() {
 }
 
 render_brief() {
-  local d="$1" id="$2" round="${3:-1}"
+  local d="$1" id="$2" round="${3:-1}" budget_override="${4:-}"
   local task; task=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$d/plan.json")
   [ -n "$task" ] || die "no task '$id' in plan"
   local dep
   for dep in $(jq -r '.dependsOn[]' <<<"$task"); do
-    task_done "$d" "$dep" || die "task '$id' depends on '$dep', whose handoff is not done yet"
+    task_done "$d" "$dep" "$(jq -r '.role' <<<"$task")" || die "task '$id' depends on '$dep', which is not done yet: its handoff must say done, and a developer task must also be accepted (orch accept) before anything but its reviewer, tester or QA builds on it"
   done
   local run base orch_name name role goal budget venue max_rounds review_of review_line
   run=$(jq -r '.run' "$d/plan.json"); base=$(jq -r '.baseBranch' "$d/plan.json"); orch_name=$(jq -r '.orchestrator' "$d/plan.json")
   name=$(jq -r '.name' <<<"$task"); role=$(jq -r '.role' <<<"$task"); goal=$(jq -r '.goal' <<<"$task"); budget=$(jq -r '.budget' <<<"$task")
+  [ -n "$budget_override" ] && budget="$budget_override"
   venue=$(jq -r '.review.venue // "branch"' "$d/plan.json"); max_rounds=$(jq -r '.review.maxRounds // 3' "$d/plan.json")
   review_of=$(jq -r '.reviewOf // ""' <<<"$task")
   [ "$round" -gt 1 ] && name="$name-r$round"
@@ -399,7 +450,7 @@ $base_line
 $auth_line
 $review_line
 allowed paths (relative to your worktree; the guard enforces them): $(jq -r '.pathsAllowed | join(", ")' <<<"$task")
-budget: $budget guarded tool calls (Bash/Edit/Write), then the guard stops you — plan for it
+budget: $budget guarded tool calls (Bash, Edit, Write and every MCP tool), then the guard stops you — plan for it
 acceptance the orchestrator will check itself:
 $(jq -r '.acceptance[] | "- " + .' <<<"$task")
 
@@ -428,21 +479,23 @@ EOF
 cmd_brief() { local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "brief <run> <task-id>"; render_brief "$d" "$2" "${3:-1}"; }
 
 spawn_one() {
-  local d="$1" id="$2" dry="$3" round="${4:-1}"
+  local d="$1" id="$2" dry="$3" round="${4:-1}" budget="${5:-}"
   local task name role model effort max_rounds
   task=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$d/plan.json")
   [ -n "$task" ] || die "no task '$id' in plan"
+  # A later round usually needs less than the first; --budget sets this session's own brake.
+  [ -n "$budget" ] && task=$(jq -c --argjson b "$budget" '.budget = $b' <<<"$task")
   max_rounds=$(jq -r '.review.maxRounds // 3' "$d/plan.json")
   [ "$round" -le "$max_rounds" ] || die "round $round exceeds the run's maxRounds ($max_rounds); the orchestrator decides what happens after the last round — accept with the findings recorded, or re-scope the task"
   name=$(jq -r '.name' <<<"$task"); role=$(jq -r '.role' <<<"$task"); model=$(jq -r '.model' <<<"$task"); effort=$(jq -r '.effort' <<<"$task")
   [ "$round" -gt 1 ] && name="$name-r$round"
   if jq -e --arg n "$name" 'map(select(.name == $n)) | length > 0' "$d/sessions.json" >/dev/null; then die "session '$name' is already registered; for another review round use --round $((round+1))"; fi
-  local brief; brief=$(render_brief "$d" "$id" "$round") || exit 1
+  local brief; brief=$(render_brief "$d" "$id" "$round" "$budget") || exit 1
   local extra=""
   [ -n "${ORCH_PERMISSION_MODE:-}" ] && extra="--permission-mode $ORCH_PERMISSION_MODE"
   local cmdline="env -u CLAUDE_CODE_CHILD_SESSION claude --agent orchestrator:$role --bg --name $name --model $model --effort $effort --settings '$STYLE' $extra"
   if [ "$dry" -eq 1 ]; then
-    printf '%s "<brief, %s bytes>"\n' "$cmdline" "$(printf '%s' "$brief" | wc -c | tr -d ' ')"
+    printf '%s "<brief, %s bytes>" budget=%s\n' "$cmdline" "$(printf '%s' "$brief" | wc -c | tr -d ' ')" "$(jq -r '.budget' <<<"$task")"
     return 0
   fi
   need claude
@@ -468,12 +521,15 @@ $out"
 
 cmd_spawn() {
   local d; d=$(run_dir "${1:-}"); shift || true
-  local dry=0 wave=0 id="" round=1
+  local dry=0 wave=0 id="" round=1 budget=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) dry=1 ;;
       --wave) wave=1 ;;
       --round) round="$2"; shift ;;
+      --budget)
+        case "${2:-}" in ''|*[!0-9]*) die "--budget needs a number of tool calls" ;; esac
+        budget="$2"; shift ;;
       *) id="$1" ;;
     esac; shift
   done
@@ -482,8 +538,8 @@ cmd_spawn() {
     for t in $(cmd_ready "$(jq -r '.run' "$d/plan.json")"); do any=1; spawn_one "$d" "$t" "$dry" 1; done
     [ "$any" -eq 1 ] || echo "no ready task to spawn"
   else
-    [ -n "$id" ] || die "spawn <run> <task-id> [--round N] | --wave"
-    spawn_one "$d" "$id" "$dry" "$round"
+    [ -n "$id" ] || die "spawn <run> <task-id> [--round N] [--budget N] | --wave"
+    spawn_one "$d" "$id" "$dry" "$round" "$budget"
   fi
 }
 
@@ -494,13 +550,15 @@ cmd_status() {
   if [ "$live" -eq 1 ] && command -v claude >/dev/null 2>&1; then agents=$(claude agents --json --all 2>/dev/null || echo '[]'); fi
   printf '%-16s %-11s %-9s %-8s %-9s %-8s %s\n' NAME ROLE ID STATE HANDOFF CALLS LAST_EVENT
   jq -r '.[] | [.name, .role, .id, .sessionId, (.budget|tostring), .taskId] | @tsv' "$d/sessions.json" | while IFS="$(printf '\t')" read -r name role id sid budget taskid; do
-    local state calls last hs
+    local state calls last hs mark
     state=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .state // "?"' <<<"$agents" | head -1); [ -n "$state" ] || state="-"
     calls=$(grep -c "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$d/events.log" 2>/dev/null || true); calls=${calls:-0}
     # The last event of any kind, not the last block: a stale "Stop|no handoff" hid a handoff written afterwards.
     last=$(grep "^[^|]*|$sid|" "$d/events.log" 2>/dev/null | sed -n '$p' | cut -d'|' -f4,5,6 | cut -c1-58)
     hs=$(handoff_state "$d" "$name" "$taskid")
-    printf '%-16s %-11s %-9s %-8s %-9s %-8s %s\n' "$name" "$role" "$id" "$state" "$hs" "$calls/$budget" "${last:--}"
+    # "!" from 80% of the budget: time to look before the guard stops the session mid-thought.
+    mark=""; [ "$budget" -gt 0 ] 2>/dev/null && [ $((calls * 5)) -ge $((budget * 4)) ] && mark="!"
+    printf '%-16s %-11s %-9s %-8s %-9s %-8s %s\n' "$name" "$role" "$id" "$state" "$hs" "$calls/$budget$mark" "${last:--}"
   done
   [ -f "$d/PAUSE" ] && echo "RUN PAUSED: $(cat "$d/PAUSE")"
   local p; for p in "$d"/PAUSE-*; do [ -f "$p" ] && echo "PAUSED ${p##*/PAUSE-}: $(cat "$p")"; done
@@ -540,6 +598,42 @@ cmd_decide() {
   echo "recorded in $d/decisions.md — now message the parties"
 }
 
+# cmd_close: nothing here deletes a branch or a worktree. It proves which of the run's branches are
+# contained in the base branch (counting what it checked), drops the run's entries from the session
+# index and marks the run closed.
+cmd_close() {
+  local d; d=$(run_dir "${1:-}"); local force=0
+  [ "${2:-}" = --force ] && force=1
+  local open; open=$(jq -r --slurpfile acc "$d/accepted.json" '.tasks[].id as $id | select(($acc[0] | map(.taskId) | index($id)) == null) | $id' "$d/plan.json" | tr '\n' ' ')
+  if [ -n "$open" ] && [ "$force" -eq 0 ]; then
+    die "tasks not accepted: ${open}- accept them, or close anyway with: orch close ${1:-} --force"
+  fi
+  local root base h branch n=0 loose=0
+  root=$(repo_root); base=$(jq -r '.baseBranch' "$d/plan.json")
+  for h in "$d"/handoffs/*.md; do
+    [ -f "$h" ] || continue
+    branch=$(awk '/^## Branch/ {f=1; next} f && NF {print $1; exit}' "$h" | tr -d '`,')
+    [ -n "$branch" ] && [ "$branch" != "$base" ] || continue
+    git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null 2>&1 || continue
+    n=$((n+1))
+    if git -C "$root" merge-base --is-ancestor "$branch" "$base" 2>/dev/null; then
+      echo "contained in $base: $branch"
+    else
+      loose=$((loose+1)); echo "NOT contained in $base: $branch"
+    fi
+  done
+  echo "$n refs checked, $loose not contained in $base$([ "$n" -eq 0 ] && printf ' — zero refs checked proves nothing about any branch')"
+  local f dropped=0 real; real=$(cd "$d" && pwd -P)
+  for f in "$INDEX_DIR"/*; do
+    [ -f "$f" ] || continue
+    case "$(cat "$f")" in "$d"|"$real") rm -f "$f"; dropped=$((dropped+1)) ;; esac
+  done
+  echo "session index: $dropped entries of this run removed"
+  now > "$d/CLOSED"
+  printf '%s|orchestrator|%s|close|allow|%s refs checked, %s not contained\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1:-}" "$n" "$loose" >> "$d/events.log"
+  cmd_status "$1" --no-live
+}
+
 need jq " (brew install jq / apt install jq)"
 cmd="${1:-}"; shift || true
 case "$cmd" in
@@ -563,6 +657,7 @@ case "$cmd" in
   pause) cmd_pause "$@" ;;
   resume) cmd_resume "$@" ;;
   decide) cmd_decide "$@" ;;
+  close) cmd_close "$@" ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$cmd'"; ;;
 esac
