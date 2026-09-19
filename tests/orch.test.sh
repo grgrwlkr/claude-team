@@ -149,6 +149,9 @@ expect_exit 0 "tools inventory runs again" "$ORCH" tools
 expect_calls 1 "second run is served from the cache"
 expect_exit 0 "tools --refresh bypasses the cache" "$ORCH" tools --refresh
 expect_calls 2 "--refresh asked claude again"
+expect_exit 0 "tools survives a claude mcp list that hangs" env STUB_SLOW=1 ORCH_MCP_TIMEOUT=1 "$ORCH" tools --refresh
+expect_grep 'playwright MCP  *unknown' "$TMP_BASE/out" "a timed-out MCP list reads unknown, not missing"
+expect_grep 'did not finish' "$TMP_BASE/err" "the timeout is said out loud"
 expect_grep 'browser' "$TMP_BASE/out" "inventory covers browser automation"
 expect_grep 'screenshot' "$TMP_BASE/out" "inventory covers screenshots"
 expect_grep 'available' "$TMP_BASE/out" "inventory marks each tool"

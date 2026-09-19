@@ -11,12 +11,12 @@ The lead's job after a spawn is to wait cheaply and judge sharply. Nothing here 
 
 ## On every wake-up
 
-1. `orch status <run>` — one table: name, role, session state, handoff state (`none`, `partial`, `blocked`, `done`, `accepted`), tool calls used of budget, last event of any kind.
+1. `orch status <run>` — one table: name, role, session state, handoff state (`none`, `partial`, `blocked`, `done`, `accepted`), tool calls used of budget (`!` from 80%: look now, before the guard stops the session mid-thought), last event of any kind.
 2. `orch events <run> --since <last seen>` — guard blocks, budget hits, pauses. A block is a signal about the brief as much as about the session: a developer editing outside its paths usually means the paths were wrong or the task leaked.
 3. For every `done`: read `orch handoff <run> <name>`; for a tester, open its evidence files (screenshots, transcripts under `.scratch/evidence/` in its worktree) with the Read tool and compare them with the criteria yourself; then verify yourself — run the tests, read the diff (`git -C <worktree> diff <base>...HEAD`), open the spec. Then `orch accept <run> <task-id> "<why>"`, which unblocks the dependents. Acceptance is yours and lives outside the handoff on purpose: a teammate that finished the work but wrote `blocked` on something you have since resolved is accepted without anyone rewriting its handoff. Not accepting is equally explicit: message the session what is missing and spawn nothing new for that task.
 4. For every `blocked`: read `claude logs <id>`; answer through `SendMessage`; if the answer is the user's, ask the user, in one list, at the end of your turn.
 5. For every `ESCALATION:` message: read both positions and the spec; write the decision into `decisions.md` (`orch decide <run> "<text>"`); message both parties with it. Decide on the merits; the analyst's spec wins over a developer's preference, a measured fact wins over the spec.
-6. Spawn the next wave: tasks whose `dependsOn` are all `done`.
+6. Spawn the next wave: `orch ready` lists it. A developer task's `done` readies its reviewer, tester and QA; whatever builds on the code waits for your `orch accept`.
 
 ## Brakes
 
@@ -33,16 +33,16 @@ Correctness, completeness and safety are decided here, by you, on evidence you p
 
 Every gated action of the run is settled once, at plan approval, and written into the plan with `orch authorize <run> push-base|delete-merged|tag on`. The guard reads those flags, so an integrator authorized at approval time pushes without anyone asking again. Mid-run, a gate you did not collect is your mistake, not a reason to stop: finish everything else, leave the gated step for the end, and report it in one line with the exact command the user can run. Stop the run only when continuing would be unsafe or would waste the work.
 
-Deletion is authorized the same way and verified mechanically before it happens: every branch and worktree you delete must be contained in the base branch. Check it in one command, count what you checked, and refuse when the count is zero:
+Deletion is authorized the same way and verified mechanically before it happens: every branch and worktree you delete must be contained in the base branch. `orch close <run>` prints that report for the branches the run's handoffs name, with the count. For any other set of refs check it in one command, count what you checked, and refuse when the count is zero (`<prefix>` and `<base>` are yours to fill):
 
 ```bash
-bash -c 'n=0; for b in $(git branch --format="%(refname:short)" | grep "^ao/"); do
-  git merge-base --is-ancestor "$b" main || { echo "NOT contained: $b"; exit 1; }; n=$((n+1)); done
-  [ "$n" -gt 0 ] || { echo "zero refs checked — refusing"; exit 1; }; echo "$n refs contained in main"'
+bash -c 'n=0; for b in $(git branch --format="%(refname:short)" | grep "^<prefix>"); do
+  git merge-base --is-ancestor "$b" <base> || { echo "NOT contained: $b"; exit 1; }; n=$((n+1)); done
+  [ "$n" -gt 0 ] || { echo "zero refs checked — refusing"; exit 1; }; echo "$n refs contained in <base>"'
 ```
 
 Run such loops through `bash -c`: in zsh an unquoted `$(…)` does not word-split, so the loop runs once over one non-existent ref and prints a false all-clear.
 
 ## Closing a run
 
-When every task is accepted and the integrator's handoff shows the merged state green: `orch status` one last time, ask each live session to shut down (`SendMessage` "shutdown: run closed, thank you"), then report to the user: what landed, where (branches, PRs), what was verified and how, what remains. Leave the worktrees; the user removes sessions with `claude rm` after pushing.
+When every task is accepted and the integrator's handoff shows the merged state green: `orch close <run>` (containment report with its count, session index cleanup, final table; it deletes nothing, and `--force` closes a run with unaccepted tasks), ask each live session to shut down (`SendMessage` "shutdown: run closed, thank you"), then report to the user: what landed, where (branches, PRs), what was verified and how, what remains. Leave the worktrees; the user removes sessions with `claude rm` after pushing.

@@ -22,7 +22,7 @@ stub_claude() {
 echo "\$*" >> "$TMP_BASE/claude.calls"
 case "\$*" in
   --version) echo "0.0.0 (stub)" ;;
-  "mcp list") echo "playwright: npx -y @playwright/mcp@latest - ✓ Connected" ;;
+  "mcp list") [ -n "\${STUB_SLOW:-}" ] && sleep 5; echo "playwright: npx -y @playwright/mcp@latest - ✓ Connected" ;;
   agents*) echo '[]' ;;
 esac
 EOF

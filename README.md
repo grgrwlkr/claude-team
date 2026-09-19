@@ -56,7 +56,7 @@ Interactive verification is a choice the lead puts to you at plan approval, toge
 
 Review is mandatory and iterative: `orch plan` refuses a graph where a developer task has no reviewer, and the lead re-spawns the reviewer with `orch spawn <run> <id> --round N` after each round of fixes, up to three rounds by default. At plan approval you choose where review happens — on the branch, or on a pull/merge request where authors open the PR and reviewers comment in threads (`orch review <run> venue pr`).
 
-Handoffs travel through `orch handoff-put <run> <name>` on stdin, so a session isolated in a worktree can still deliver one; the file itself lives in the run directory, which sessions cannot write. The lead records its verdict with `orch accept <run> <task-id>`, which is what unblocks dependents — a teammate's handoff is never edited to change its status.
+Handoffs travel through `orch handoff-put <run> <name>` on stdin, so a session isolated in a worktree can still deliver one; the file itself lives in the run directory, which sessions cannot write. The lead records its verdict with `orch accept <run> <task-id>`, which is what unblocks dependents — a teammate's handoff is never edited to change its status. A developer's own `done` readies only its reviewer, tester and QA; the integrator and anything else that builds on the code wait for the lead's accept. `orch close <run>` ends a run: a containment report for its branches with the count of refs checked, session index cleanup, the final table — it deletes nothing.
 
 ## Guard rails (hooks, mechanical)
 
@@ -66,10 +66,10 @@ The plugin's `PreToolUse` hook watches every session registered in a run and blo
 - `git push --force`, `git reset --hard`, `git branch -D`, `git clean -f`, `sudo`, `curl … | sh`, `rm -r` on absolute paths;
 - pushing the base branch, and deleting branches or worktrees, unless the plan authorizes it and the session is the integrator; checkout of, or commits on, the base branch by anyone but the integrator;
 - package installs (`brew`, `apt`, `npm -g`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless the plan authorizes `install-tools`; a project-local `npm install` passes;
-- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`;
+- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`;
 - `claude stop|rm|kill|respawn` — sessions never stop each other;
-- every Bash/Edit/Write while the lead has paused the session or the run (`orch pause`); reading and messaging keep working;
-- every Bash/Edit/Write past the task's tool-call budget — the passive brake against drift.
+- every Bash/Edit/Write and MCP tool call while the lead has paused the session or the run (`orch pause`); reading and messaging keep working;
+- every Bash/Edit/Write and MCP tool call past the task's tool-call budget — the passive brake against drift. A tester drives a browser through MCP tools, so those calls are held and counted like the rest; `orch status` marks a session with `!` from 80%.
 
 The `Stop` hook refuses to let a registered session go idle without a handoff. Both hooks are inert for sessions that are not in a run. A session the guard has seen once stays under guard even after it changes directory out of the repository (index in `~/.claude/orchestrator-sessions/`); edit paths are canonicalised before the check, and Bash commands are matched with quotes stripped and git's global options tolerated.
 
@@ -77,7 +77,7 @@ The `Stop` hook refuses to let a registered session go idle without a handoff. B
 
 ## Run directory
 
-`<repo>/.orchestrator/<run>/` in the main checkout, excluded from git through `.git/info/exclude`: `plan.json` (graph, authorizations, review settings), `sessions.json`, `accepted.json`, `events.log`, `decisions.md`, `handoffs/<name>.md`, `PAUSE`, `PAUSE-<name>`. Sessions keep their scratch files in `.scratch/` inside their own worktree, never in `/tmp`.
+`<repo>/.orchestrator/<run>/` in the main checkout, excluded from git through `.git/info/exclude`: `plan.json` (graph, authorizations, review settings), `sessions.json`, `accepted.json`, `events.log`, `decisions.md`, `handoffs/<name>.md` (a later round hands off as `<name>-r<N>.md`), `PAUSE`, `PAUSE-<name>`, `CLOSED`; beside the runs, `tools-mcp.cache` keeps `orch tools`' MCP list for an hour (`orch tools --refresh`). Sessions keep their scratch files in `.scratch/` inside their own worktree, never in `/tmp`.
 
 ## Limits worth knowing
 
@@ -94,4 +94,4 @@ bash tests/guard.test.sh && bash tests/orch.test.sh
 shellcheck -s bash bin/orch scripts/*.sh tests/*.sh
 ```
 
-Tests never launch a real session; `orch spawn --dry-run` prints the command instead.
+Tests never reach the real `claude`: a stub stands first on PATH, and `orch spawn --dry-run` prints the command instead.

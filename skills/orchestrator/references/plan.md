@@ -44,7 +44,7 @@ Fields:
 | `pathsAllowed` | globs relative to the worktree root; `*` matches across `/`; the guard blocks edits elsewhere. Two tasks never share a path in the same wave |
 | `acceptance` | what the orchestrator will check itself before accepting |
 | `dependsOn` | ids whose handoffs are pasted into this task's brief; a task is ready when all are `done` |
-| `budget` | tool calls allowed for Bash/Edit/Write before the guard stops the session; the brake against drift |
+| `budget` | guarded tool calls (Bash, Edit, Write, every MCP tool) before the guard stops the session; the brake against drift. `orch spawn … --budget <n>` overrides it for one session, typically a later review round |
 | `model`, `effort` | optional per-task overrides; default `opus` / `high` |
 | `verifies` | tester tasks only: the id of the developer task whose build this interactive run checks. Required for every developer task when the plan has `interactive: true` |
 | `reviewOf` | reviewer tasks only: the id of the task whose code this review covers. `orch plan` refuses a graph where a developer task has no reviewer |
@@ -76,3 +76,5 @@ The lead writes them with `orch authorize <run> push-base|delete-merged|tag on|o
 ## Acceptance
 
 `accepted.json` beside the plan holds the lead's verdicts (`orch accept <run> <task-id> "<note>"`). A task counts as done when it is accepted **or** its handoff says `done`, so a teammate that finished the work but reported `blocked` on something the lead has since resolved does not stall its dependents, and nobody edits a handoff to change its status.
+
+Two refinements. The handoff's status is the first word under `## Status`, not a word found somewhere in it: `blocked — waiting until dev-1 is done` is blocked. And a **developer** task's own `done` opens the door only to the roles that verify it — reviewer, tester, QA; everything that builds on the code (the integrator, a later developer task) becomes ready only after `orch accept`, so review findings can actually hold a merge back.

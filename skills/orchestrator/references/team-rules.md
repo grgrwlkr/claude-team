@@ -47,8 +47,9 @@ The plugin's `PreToolUse` hook watches every registered team session. It blocks,
 - `git push --force`, `git reset --hard`, `git branch -D`, `rm -rf` outside your worktree, `sudo`, piping a download into a shell;
 - any commit or merge to the base branch by anyone but the integrator; pushing it, and deleting branches or worktrees, unless the run's plan authorizes it and you are the integrator (your brief says which authorizations this run carries);
 - `claude stop`, `claude rm`, `claude kill` — you never stop a teammate;
-- every Bash/Edit/Write call while the orchestrator has paused you (`PAUSE` or `PAUSE-<name>` in the run dir) — reading and messaging keep working, so answer the orchestrator;
-- every Bash/Edit/Write call after your tool-call budget is spent — write the handoff and stop.
+- installing tooling onto the machine (`brew`, `apt`, global `npm`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless your brief says the run authorizes it; a project-local `npm install` passes;
+- every Bash/Edit/Write and MCP tool call while the orchestrator has paused you (`PAUSE` or `PAUSE-<name>` in the run dir) — reading and messaging keep working, so answer the orchestrator;
+- every Bash/Edit/Write and MCP tool call after your tool-call budget is spent — write the handoff and stop.
 
 A block is logged to `events.log`; the orchestrator reads it. Don't look for a way around a block: report `BLOCKED:` with what you were trying to do and why.
 

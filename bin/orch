@@ -197,7 +197,7 @@ task_done() {
     case "${3:-}" in reviewer|tester|qa) ;; *) return 1 ;; esac
   fi
   local h="$1/handoffs/$name.md"
-  [ -f "$h" ] && [ "$(handoff_word "$h")" = done ]
+  [ -f "$h" ] && [ "$(handoff_word "$h")" = "done" ]
 }
 
 # handoff_state <run_dir> <name> <task-id>: accepted | done | partial | blocked | failed | none
@@ -297,11 +297,16 @@ cmd_interactive() {
 
 # tool_row <group> <name> <probe-command> <install hint>
 tool_row() {
-  local status="missing"
-  if eval "$3" >/dev/null 2>&1; then status="available"; fi
-  printf '%-11s %-24s %-10s %s\n' "$1" "$2" "$status" "$([ "$status" = missing ] && printf '%s' "$4")"
+  local status="missing" hint="$4"
+  if eval "$3" >/dev/null 2>&1; then status="available"; hint=""
+  else
+    # An MCP list that timed out proves nothing: a configured server must not read as missing.
+    case "$3" in has_mcp*) if has_mcp "$MCP_TIMED_OUT"; then status="unknown"; hint="claude mcp list timed out; check /mcp in a session"; fi ;; esac
+  fi
+  printf '%-11s %-24s %-10s %s\n' "$1" "$2" "$status" "$hint"
 }
 
+MCP_TIMED_OUT="orch: mcp list timed out"
 # mcp_list <refresh:0|1>: `claude mcp list` health-checks every configured server, so it is bounded
 # (ORCH_MCP_TIMEOUT seconds, default 45) and cached for an hour under <repo>/.orchestrator/.
 mcp_list() {
@@ -318,6 +323,7 @@ mcp_list() {
     kill "$pid" 2>/dev/null
     echo "note: claude mcp list did not finish in $limit s; MCP rows below may read missing (ORCH_MCP_TIMEOUT raises the limit)" >&2
     strip_ansi < "$tmp"
+    echo "$MCP_TIMED_OUT"
   else
     strip_ansi < "$tmp" | if [ -n "$cache" ]; then tee "$cache"; else cat; fi
   fi
