@@ -34,6 +34,10 @@ Roles message each other directly because a developer waiting on the lead to rel
 
 The guard is a tripwire against the mistakes a cooperative session makes, and a log the lead reads. It is not a sandbox: a session with an unrestricted Bash tool can reach any file the user can, so every filesystem check here (allowed paths, the run directory, the session index) can be defeated by a session that sets out to defeat it, through `sh -c`, `eval`, encoded commands, or an interpreter. Two commit security reviews (2026-09-15) found and we closed the cheap bypasses: cd out of the repository, `..` and symlinks in edit paths, quoting and global git options in the denylist, Bash writes into the run directory and the index, cwd inside those directories. The remaining class is closed only by Claude Code's own permission mode and sandbox on the worker sessions; run them in `acceptEdits` or with the sandbox on when the task is sensitive, and treat the guard as defence in depth, not as the boundary.
 
+## The handoff free pass
+
+One command shape skips the scan, the budget and the pause: nothing but `orch handoff-put <run> <own name>` fed by `< file` or by a quoted heredoc whose terminator comes once and last. It exists because a spent or paused session still owes a handoff the Stop hook demands, and because a handoff's prose names commands it never ran. The shape is anchored at both ends and the command word is the literal `orch` or this plugin's own `bin/orch`; a security review (2026-09-21) caught an earlier pattern that accepted any path ending in `orch`, which a session could have planted inside its allowed paths. `tests/guard.test.sh` pins the shapes that must not qualify. What remains is the class above, not a new one: the bare `orch` resolves through the session's PATH, exactly as `git` does for every denylist rule, and the shape leaves no room for a `PATH=` prefix.
+
 ## Known gaps
 
 - Quota exhaustion on the lead's model is not detected; fallback chains cover overload only.
