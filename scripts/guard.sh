@@ -46,9 +46,13 @@ allow_free() {
 # fed by a file or by a quoted heredoc whose terminator is the last line and appears once.
 # Only then is a heredoc body prose. A chained command, an unquoted delimiter (its body expands),
 # a second terminator line or a heredoc fed to anything else gets the full scan below.
+# The command word is bare `orch` or this plugin's own bin/orch, nothing else: a session can write
+# a file named orch inside its allowed paths, and a pattern-matched name would run it unscanned.
 sole_handoff_put() {
-  local cmd="$1" me="$2" first rest delim last
-  local head='^[[:space:]]*([^[:space:];&|<>$`()]*/)?orch[[:space:]]+handoff-put[[:space:]]+[A-Za-z0-9._-]+[[:space:]]+([A-Za-z0-9-]+)[[:space:]]*'
+  local cmd="$1" me="$2" first rest delim last own
+  own=$(cd "$(dirname "$0")/../bin" 2>/dev/null && pwd -P)/orch
+  own=$(printf '%s' "$own" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
+  local head="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+[A-Za-z0-9._-]+[[:space:]]+([A-Za-z0-9-]+)[[:space:]]*"
   local re_file="${head}<[[:space:]]*[A-Za-z0-9._/~-]+[[:space:]]*\$"
   local re_doc="${head}<<[[:space:]]*(['\"])([A-Za-z_][A-Za-z0-9_]*)['\"][[:space:]]*\$"
   first=${cmd%%$'\n'*}
