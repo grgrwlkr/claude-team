@@ -137,6 +137,23 @@ expect_exit 2 "a second terminator line ends the free pass" bash "$GUARD" <<< "$
 expect_exit 2 "an unquoted delimiter expands its body, so the body is scanned" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch handoff-put r1 int-1 <<HANDOFF${NL}\$(git reset --hard)${NL}HANDOFF")"
 expect_exit 2 "a heredoc fed to a shell is still scanned" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "bash <<'X'${NL}git push --force${NL}X")"
 
+echo "# security review: shapes that must not get the handoff free pass (int-1 paused: 0 = free, 2 = guarded)"
+touch "$RUN/PAUSE-int-1"
+free_pass() { expect_exit "$1" "$2" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "$3")"; }
+free_pass 2 "process substitution as the source" "orch handoff-put r1 int-1 < <(ls)"
+free_pass 2 "command substitution as the source" "orch handoff-put r1 int-1 < \$(ls)"
+free_pass 2 "newline-chained command after < file" "orch handoff-put r1 int-1 < f${NL}ls"
+free_pass 2 "background operator then a command" "orch handoff-put r1 int-1 < f & ls"
+free_pass 2 "here-string then a chained command" "orch handoff-put r1 int-1 <<<'x'; ls"
+free_pass 2 "pipe into a shell" "orch handoff-put r1 int-1 < f | sh"
+free_pass 2 "env prefix" "PATH=/tmp orch handoff-put r1 int-1 < f"
+free_pass 2 "command word with a suffix" "orchx handoff-put r1 int-1 < f"
+free_pass 2 "leading newline then another command" "${NL}ls${NL}orch handoff-put r1 int-1 < f"
+free_pass 2 "extra argument after the name" "orch handoff-put r1 int-1 extra < f"
+free_pass 2 "tab-stripping heredoc" "orch handoff-put r1 int-1 <<-'H'${NL}x${NL}H"
+free_pass 2 "output redirect added" "orch handoff-put r1 int-1 < f > /tmp/x"
+rm "$RUN/PAUSE-int-1"
+
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
 expect_exit 2 "stop: no handoff blocks" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
