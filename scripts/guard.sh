@@ -36,6 +36,38 @@ allow() {
   log_event "$run_dir" "$sid" "$name" "$tool" allow "${1:-}"
   exit 0
 }
+# The handoff channel is never counted against the budget: the budget check counts "allow" lines only.
+allow_free() {
+  log_event "$run_dir" "$sid" "$name" "$tool" allow-free "${1:-}"
+  exit 0
+}
+
+# sole_handoff_put <command> <own name>: the command is nothing but `orch handoff-put <run> <own name>`
+# fed by a file or by a quoted heredoc whose terminator is the last line and appears once.
+# Only then is a heredoc body prose. A chained command, an unquoted delimiter (its body expands),
+# a second terminator line or a heredoc fed to anything else gets the full scan below.
+# The command word is bare `orch` or this plugin's own bin/orch, nothing else: a session can write
+# a file named orch inside its allowed paths, and a pattern-matched name would run it unscanned.
+sole_handoff_put() {
+  local cmd="$1" me="$2" first rest delim last own
+  own=$(cd "$(dirname "$0")/../bin" 2>/dev/null && pwd -P)/orch
+  own=$(printf '%s' "$own" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
+  local head="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+[A-Za-z0-9._-]+[[:space:]]+([A-Za-z0-9-]+)[[:space:]]*"
+  local re_file="${head}<[[:space:]]*[A-Za-z0-9._/~-]+[[:space:]]*\$"
+  local re_doc="${head}<<[[:space:]]*(['\"])([A-Za-z_][A-Za-z0-9_]*)['\"][[:space:]]*\$"
+  first=${cmd%%$'\n'*}
+  if [ "$first" = "$cmd" ]; then
+    [[ "$cmd" =~ $re_file ]] && [ "${BASH_REMATCH[2]}" = "$me" ]
+    return
+  fi
+  [[ "$first" =~ $re_doc ]] || return 1
+  [ "${BASH_REMATCH[2]}" = "$me" ] || return 1
+  delim=${BASH_REMATCH[4]}
+  rest=${cmd#*$'\n'}
+  [ "$(printf '%s\n' "$rest" | grep -cx -- "$delim")" -eq 1 ] || return 1
+  last=$(printf '%s\n' "$rest" | awk 'NF {l=$0} END {print l}')
+  [ "$last" = "$delim" ]
+}
 
 file_path=""
 case "$tool" in
@@ -45,7 +77,7 @@ case "$tool" in
       file_path=$(norm_path "$file_path") || block "file path must be absolute and free of . or .. segments (got $(jq -r '.tool_input.file_path // .tool_input.notebook_path' <<<"$input"))"
     fi
     # Own handoff: always writable, never counted, even when paused or out of budget.
-    [ -n "$file_path" ] && [ "$file_path" = "$handoff" ] && allow "handoff"
+    [ -n "$file_path" ] && [ "$file_path" = "$handoff" ] && allow_free "handoff"
     ;;
 esac
 
@@ -58,6 +90,12 @@ cwd_real=$(cd "$cwd" && pwd -P)
 case "$cwd_real/" in
   "$run_dir"/*|"$INDEX_DIR"/*) block "your working directory is inside the orchestrator's directory ($cwd_real); cd back into your worktree" ;;
 esac
+
+# Handing off must always be possible: a session out of budget or paused is told to write its
+# handoff and stop, and the Stop hook demands one. Same standing as a Write of the handoff file.
+if [ "$tool" = Bash ] && sole_handoff_put "$(jq -r '.tool_input.command // empty' <<<"$input")" "$name"; then
+  allow_free "handoff-put"
+fi
 
 # Pause: the orchestrator stopped this session or the whole wave.
 if [ -f "$run_dir/PAUSE-$name" ]; then
@@ -72,7 +110,7 @@ if [ "$budget" -gt 0 ] 2>/dev/null; then
   used=$(grep -c "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$run_dir/events.log" 2>/dev/null || true)
   used=${used:-0}
   if [ "$used" -ge "$budget" ]; then
-    block "tool-call budget spent ($used of $budget). Write your handoff at $handoff with Status partial and stop; the orchestrator decides what happens next."
+    block "tool-call budget spent ($used of $budget). Send your handoff with Status partial — a command that is only 'orch handoff-put $(basename "$run_dir") $name' with a quoted heredoc or '< file' is outside the budget — and stop; the orchestrator decides what happens next."
   fi
 fi
 

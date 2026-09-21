@@ -60,6 +60,7 @@ orch review <run> venue <branch|pr>               where review happens: the bran
 orch review <run> rounds <n>                      how many review rounds a task may take (default 3)
 orch interactive <run> <on|off>                   require a tester task per developer task: run the app, verify visually
 orch tools [--refresh]                            inventory of the machine's means to run and watch an app; the MCP list is cached for an hour
+orch budget <run> <task-id|name> <n>              change a task's budget mid-run, in the plan and in the live session's record the guard reads
 orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
 orch resume <run> <name|all>
 orch decide <run> "<decision>"                    append to decisions.md
@@ -579,6 +580,22 @@ cmd_events() {
 
 cmd_handoff() { local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "handoff <run> <name>"; cat "$d/handoffs/$2.md"; }
 
+# cmd_budget: the guard reads a live session's budget from sessions.json, not from the plan,
+# so a mid-run change has to land in both.
+cmd_budget() {
+  local d; d=$(run_dir "${1:-}"); local who="${2:-}" n="${3:-}"
+  [ -n "$who" ] || die "budget <run> <task-id|name> <n>"
+  case "$n" in ''|*[!0-9]*) die "budget <run> <task-id|name> <n>  (n is a number of guarded tool calls)" ;; esac
+  local hits
+  hits=$(jq -r --arg w "$who" '[.tasks[] | select(.id == $w or .name == $w)] | length' "$d/plan.json")
+  hits=$((hits + $(jq -r --arg w "$who" '[.[] | select(.taskId == $w or .name == $w)] | length' "$d/sessions.json")))
+  [ "$hits" -gt 0 ] || die "no task or session '$who' in run ${1:-}"
+  jq --arg w "$who" --argjson n "$n" '.tasks |= map(if .id == $w or .name == $w then .budget = $n else . end)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
+  jq --arg w "$who" --argjson n "$n" 'map(if .taskId == $w or .name == $w then .budget = $n else . end)' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
+  printf '%s|orchestrator|%s|budget|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$who" "$n" >> "$d/events.log"
+  echo "budget of $who: $n guarded calls — the guard honours it from the session's next call"
+}
+
 cmd_pause() {
   local d; d=$(run_dir "${1:-}"); local who="${2:-}" reason="${3:-paused by the orchestrator}"
   [ -n "$who" ] || die "pause <run> <name|all> \"<reason>\""
@@ -610,17 +627,26 @@ cmd_decide() {
 cmd_close() {
   local d; d=$(run_dir "${1:-}"); local force=0
   [ "${2:-}" = --force ] && force=1
-  local open; open=$(jq -r --slurpfile acc "$d/accepted.json" '.tasks[].id as $id | select(($acc[0] | map(.taskId) | index($id)) == null) | $id' "$d/plan.json" | tr '\n' ' ')
+  # A reviewer or tester task is settled with the task it covers: the lead accepts the code and
+  # reads the review as its evidence.
+  local open; open=$(jq -r --slurpfile acc "$d/accepted.json" '
+    ($acc[0] | map(.taskId)) as $ok
+    | .tasks[]
+    | .id as $id
+    | select(($ok | index($id)) == null)
+    | select(((.reviewOf // .verifies // "") as $t | $t != "" and ($ok | index($t)) != null) | not)
+    | .id' "$d/plan.json") || die "could not work out which tasks are accepted; refusing to close"
+  open=$(printf '%s' "$open" | tr '\n' ' ')
   if [ -n "$open" ] && [ "$force" -eq 0 ]; then
     die "tasks not accepted: ${open}- accept them, or close anyway with: orch close ${1:-} --force"
   fi
-  local root base h branch n=0 loose=0
+  local root base h branch n=0 loose=0 gone=0
   root=$(repo_root); base=$(jq -r '.baseBranch' "$d/plan.json")
   for h in "$d"/handoffs/*.md; do
     [ -f "$h" ] || continue
     branch=$(awk '/^## Branch/ {f=1; next} f && NF {print $1; exit}' "$h" | tr -d '`,')
     [ -n "$branch" ] && [ "$branch" != "$base" ] || continue
-    git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null 2>&1 || continue
+    git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null 2>&1 || { gone=$((gone+1)); echo "already deleted: $branch"; continue; }
     n=$((n+1))
     if git -C "$root" merge-base --is-ancestor "$branch" "$base" 2>/dev/null; then
       echo "contained in $base: $branch"
@@ -628,7 +654,7 @@ cmd_close() {
       loose=$((loose+1)); echo "NOT contained in $base: $branch"
     fi
   done
-  echo "$n refs checked, $loose not contained in $base$([ "$n" -eq 0 ] && printf ' — zero refs checked proves nothing about any branch')"
+  echo "$n refs checked, $loose not contained in $base, $gone already deleted$([ "$n" -eq 0 ] && printf ' — zero refs checked proves nothing about any branch; close before the cleanup to get this report')"
   local f dropped=0 real; real=$(cd "$d" && pwd -P)
   for f in "$INDEX_DIR"/*; do
     [ -f "$f" ] || continue
@@ -660,6 +686,7 @@ case "$cmd" in
   review) cmd_review "$@" ;;
   interactive) cmd_interactive "$@" ;;
   tools) cmd_tools "$@" ;;
+  budget) cmd_budget "$@" ;;
   pause) cmd_pause "$@" ;;
   resume) cmd_resume "$@" ;;
   decide) cmd_decide "$@" ;;

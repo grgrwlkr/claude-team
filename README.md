@@ -66,10 +66,12 @@ The plugin's `PreToolUse` hook watches every session registered in a run and blo
 - `git push --force`, `git reset --hard`, `git branch -D`, `git clean -f`, `sudo`, `curl … | sh`, `rm -r` on absolute paths;
 - pushing the base branch, and deleting branches or worktrees, unless the plan authorizes it and the session is the integrator; checkout of, or commits on, the base branch by anyone but the integrator;
 - package installs (`brew`, `apt`, `npm -g`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless the plan authorizes `install-tools`; a project-local `npm install` passes;
-- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`;
+- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `budget`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`;
 - `claude stop|rm|kill|respawn` — sessions never stop each other;
 - every Bash/Edit/Write and MCP tool call while the lead has paused the session or the run (`orch pause`); reading and messaging keep working;
-- every Bash/Edit/Write and MCP tool call past the task's tool-call budget — the passive brake against drift. A tester drives a browser through MCP tools, so those calls are held and counted like the rest; `orch status` marks a session with `!` from 80%.
+- every Bash/Edit/Write and MCP tool call past the task's tool-call budget — the passive brake against drift. A tester drives a browser through MCP tools, so those calls are held and counted like the rest; `orch status` marks a session with `!` from 80%, and `orch budget` changes a live session's budget.
+
+One call is always open, paused or out of budget: a command that is nothing but `orch handoff-put <run> <own name>` fed by a quoted heredoc or `< file`. Its body is read as prose, so a handoff may describe commands it never ran; anything chained to it is guarded as usual.
 
 The `Stop` hook refuses to let a registered session go idle without a handoff. Both hooks are inert for sessions that are not in a run. A session the guard has seen once stays under guard even after it changes directory out of the repository (index in `~/.claude/orchestrator-sessions/`); edit paths are canonicalised before the check, and Bash commands are matched with quotes stripped and git's global options tolerated.
 

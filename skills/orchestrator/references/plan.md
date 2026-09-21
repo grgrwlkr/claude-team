@@ -44,7 +44,7 @@ Fields:
 | `pathsAllowed` | globs relative to the worktree root; `*` matches across `/`; the guard blocks edits elsewhere. Two tasks never share a path in the same wave |
 | `acceptance` | what the orchestrator will check itself before accepting |
 | `dependsOn` | ids whose handoffs are pasted into this task's brief; a task is ready when all are `done` |
-| `budget` | guarded tool calls (Bash, Edit, Write, every MCP tool) before the guard stops the session; the brake against drift. `orch spawn … --budget <n>` overrides it for one session, typically a later review round |
+| `budget` | guarded tool calls (Bash, Edit, Write, every MCP tool) before the guard stops the session; the brake against drift. `orch spawn … --budget <n>` overrides it for one session, typically a later review round; `orch budget <run> <task-id|name> <n>` changes it for a live one |
 | `model`, `effort` | optional per-task overrides; default `opus` / `high` |
 | `verifies` | tester tasks only: the id of the developer task whose build this interactive run checks. Required for every developer task when the plan has `interactive: true` |
 | `reviewOf` | reviewer tasks only: the id of the task whose code this review covers. `orch plan` refuses a graph where a developer task has no reviewer |
