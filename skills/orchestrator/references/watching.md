@@ -22,7 +22,7 @@ The lead's job after a spawn is to wait cheaply and judge sharply. Nothing here 
 
 - `orch pause <run> <name> "<reason>"` — the guard refuses every Bash/Edit/Write of that session from the next call; it can still read and message. Use it the moment you see danger (touching the base branch, deleting, network egress of private data) or drift (work on things the task never named, a rewrite where a fix was asked). Then message the session: what you saw, what to do instead. `orch resume` when it acknowledged.
 - `orch pause <run> all "<reason>"` — stop the whole wave, for example when the user changes the goal.
-- Budget is the passive brake: it is in `plan.json` and the guard enforces it. A session that hits budget writes its handoff and stops; you decide whether to respawn it with a narrower goal.
+- Budget is the passive brake: it is in `plan.json`, copied into the session's record at spawn, and the guard enforces the record. A session that hits budget sends its handoff (that one command stays open) and stops; you decide whether to respawn it with a narrower goal or, when the work is sound and merely bigger than planned, `orch budget <run> <task-id|name> <n>` — a hand edit of `plan.json` never reaches a live session.
 - `claude stop <id>` is the last resort, for a session that ignores a pause; only you and the user do this, never a teammate.
 
 ## What you never delegate
@@ -45,4 +45,4 @@ Run such loops through `bash -c`: in zsh an unquoted `$(…)` does not word-spli
 
 ## Closing a run
 
-When every task is accepted and the integrator's handoff shows the merged state green: `orch close <run>` (containment report with its count, session index cleanup, final table; it deletes nothing, and `--force` closes a run with unaccepted tasks), ask each live session to shut down (`SendMessage` "shutdown: run closed, thank you"), then report to the user: what landed, where (branches, PRs), what was verified and how, what remains. Leave the worktrees; the user removes sessions with `claude rm` after pushing.
+When every task is accepted and the integrator's handoff shows the merged state green: `orch close <run>` before any branch cleanup (containment report with its count, session index cleanup, final table; it deletes nothing; reviewer and tester tasks are settled by the acceptance of the task they cover; `--force` closes a run with unaccepted tasks), ask each live session to shut down (`SendMessage` "shutdown: run closed, thank you"), then report to the user: what landed, where (branches, PRs), what was verified and how, what remains. Leave the worktrees; the user removes sessions with `claude rm` after pushing.

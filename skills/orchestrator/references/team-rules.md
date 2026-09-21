@@ -18,6 +18,8 @@ You are one session in a team run by an orchestrator session. Your spawn brief n
   HANDOFF
   ```
 
+  Keep that command alone in its call, with the delimiter quoted, or feed a file: `orch handoff-put <run> <your name> < .scratch/handoff.md`. In exactly those two shapes the guard treats the body as prose — a handoff may describe a `git reset --hard` it never ran — and lets the call through when you are paused or out of budget, so the last thing you owe can always be delivered. Chain anything to it, or leave the delimiter unquoted, and it is an ordinary guarded command again.
+
   This works from inside your worktree, where the run directory is out of the harness's reach. Writing that file with the Write tool also works while you are still in the main checkout; a Bash redirect into the run directory is blocked.
 - Your code lives in your own git worktree under `.claude/worktrees/`. Before the first edit make sure you are in it; never edit the main checkout or another session's worktree.
 - Scratch files, logs and command output: `.scratch/` inside your own worktree. Never `/tmp` — every session on this machine shares it and parallel runs overwrite each other's files.
@@ -49,7 +51,7 @@ The plugin's `PreToolUse` hook watches every registered team session. It blocks,
 - `claude stop`, `claude rm`, `claude kill` — you never stop a teammate;
 - installing tooling onto the machine (`brew`, `apt`, global `npm`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless your brief says the run authorizes it; a project-local `npm install` passes;
 - every Bash/Edit/Write and MCP tool call while the orchestrator has paused you (`PAUSE` or `PAUSE-<name>` in the run dir) — reading and messaging keep working, so answer the orchestrator;
-- every Bash/Edit/Write and MCP tool call after your tool-call budget is spent — write the handoff and stop.
+- every Bash/Edit/Write and MCP tool call after your tool-call budget is spent — send the handoff (that one command stays open) and stop.
 
 A block is logged to `events.log`; the orchestrator reads it. Don't look for a way around a block: report `BLOCKED:` with what you were trying to do and why.
 
