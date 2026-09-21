@@ -69,6 +69,11 @@ hook_input() {
   printf '{"session_id":"%s","cwd":"%s","hook_event_name":"PreToolUse","tool_name":"%s","tool_input":%s}' "$1" "$2" "$3" "$4"
 }
 
+# hook_bash <session_id> <cwd> <command>: a Bash hook input built with jq, so the command may span lines
+hook_bash() {
+  jq -cn --arg s "$1" --arg c "$2" --arg cmd "$3" '{session_id:$s, cwd:$c, hook_event_name:"PreToolUse", tool_name:"Bash", tool_input:{command:$cmd}}'
+}
+
 # expect_exit <expected> <label> <cmd...>  — runs cmd with stdin already redirected by caller
 expect_exit() {
   local want="$1" label="$2"; shift 2

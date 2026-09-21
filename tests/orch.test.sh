@@ -233,4 +233,25 @@ expect_exit 1 "this run's index entry is gone" test -f "$CLAUDE_ORCH_STATE/sid-d
 expect_exit 0 "another run's index entry stays" test -f "$CLAUDE_ORCH_STATE/sid-other"
 expect_exit 0 "CLOSED marker written" test -f .orchestrator/r2/CLOSED
 
+echo "# wave 3: orch budget reaches the guard's copy"
+expect_exit 0 "budget raises a live session" "$ORCH" budget r2 d1 9
+expect_grep '"budget": 9' .orchestrator/r2/sessions.json "sessions.json, which the guard reads, carries the new budget"
+expect_grep '"budget": 9' .orchestrator/r2/plan.json "plan.json carries it too"
+expect_grep '|budget|' .orchestrator/r2/events.log "the change is logged"
+expect_exit 1 "budget refuses an unknown name" "$ORCH" budget r2 nobody 5
+expect_exit 1 "budget refuses a non-number" "$ORCH" budget r2 d1 lots
+
+echo "# wave 3: close settles a review with the task it reviews, and says when branches are already gone"
+expect_exit 0 "init third run" "$ORCH" init r3 --base main
+expect_exit 0 "plan for the third run" "$ORCH" plan r3 "$TMP_BASE/gate.json"
+printf '# d1\n## Status\ndone\n## Branch\ngone-branch at 0000000\n' > "$TMP_BASE/h4.md"
+expect_exit 0 "developer hands off a branch that was cleaned up since" sh -c "'$ORCH' handoff-put r3 d1 < '$TMP_BASE/h4.md'"
+"$ORCH" accept r3 impl ok > /dev/null
+expect_exit 1 "close still refuses: the integrator task is open" "$ORCH" close r3
+expect_no_grep 'not accepted:.* rev ' "$TMP_BASE/err" "the review of an accepted task is not listed as open"
+"$ORCH" accept r3 merge-task ok > /dev/null
+expect_exit 0 "close passes with the review task unaccepted" "$ORCH" close r3
+expect_grep '0 refs checked' "$TMP_BASE/out" "nothing left to check"
+expect_grep '1 already deleted' "$TMP_BASE/out" "close says the branch was deleted before it ran"
+
 summary
