@@ -75,6 +75,8 @@ case "$tool" in
     file_path=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' <<<"$input")
     if [ -n "$file_path" ]; then
       file_path=$(norm_path "$file_path") || block "file path must be absolute and free of . or .. segments (got $(jq -r '.tool_input.file_path // .tool_input.notebook_path' <<<"$input"))"
+      # norm_path resolves the directories, not the file itself: a write goes through a symlinked file to its target.
+      [ -L "$file_path" ] && block "$file_path is a symlink; edit its target by its own path"
     fi
     # Own handoff: always writable, never counted, even when paused or out of budget.
     [ -n "$file_path" ] && [ "$file_path" = "$handoff" ] && allow_free "handoff"

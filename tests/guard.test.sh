@@ -159,6 +159,12 @@ expect_exit 0 "a session may run orch tools" bash "$GUARD" <<< "$(hook_bash sid-
 jq 'map(if .name == "dev-1" then .budget = 10 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 : > "$RUN/events.log"
 expect_exit 0 "scratch is writable in your own worktree whatever the task's paths" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/.scratch/handoff.md"}')"
+mkdir -p "$WT/.scratch" "$TMP_BASE/outside"
+ln -sf "$TMP_BASE/outside/target.md" "$WT/.scratch/filelink.md"
+expect_exit 2 "security review: a symlinked file in scratch is not written through" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/.scratch/filelink.md"}')"
+ln -sf "$WT/README.md" "$WT/src/link.md"
+expect_exit 2 "security review: nor a symlinked file in an allowed path" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/src/link.md"}')"
+rm -f "$WT/.scratch/filelink.md" "$WT/src/link.md"
 expect_exit 2 "a look-alike directory is not scratch" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/.scratchpad/x.md"}')"
 for _ in 1 2 3 4 5 6 7; do echo "2026-09-23T00:00:00Z|sid-dev|dev-1|Bash|allow|ls" >> "$RUN/events.log"; done
 expect_exit 2 "at 80% the next call is held once" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
