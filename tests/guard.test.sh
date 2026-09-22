@@ -154,6 +154,20 @@ free_pass 2 "tab-stripping heredoc" "orch handoff-put r1 int-1 <<-'H'${NL}x${NL}
 free_pass 2 "output redirect added" "orch handoff-put r1 int-1 < f > /tmp/x"
 rm "$RUN/PAUSE-int-1"
 
+echo "# wave 4: tools is a session's command; 80% of the budget nudges once"
+expect_exit 0 "a session may run orch tools" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch tools")"
+jq 'map(if .name == "dev-1" then .budget = 10 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+: > "$RUN/events.log"
+expect_exit 0 "scratch is writable in your own worktree whatever the task's paths" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/.scratch/handoff.md"}')"
+expect_exit 2 "a look-alike directory is not scratch" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/.scratchpad/x.md"}')"
+for _ in 1 2 3 4 5 6 7; do echo "2026-09-23T00:00:00Z|sid-dev|dev-1|Bash|allow|ls" >> "$RUN/events.log"; done
+expect_exit 2 "at 80% the next call is held once" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
+expect_grep 'partial handoff' "$TMP_BASE/err" "the reason asks for a partial handoff"
+expect_grep 'sid-dev|dev-1|Bash|nudge|' "$RUN/events.log" "the nudge is logged"
+expect_exit 0 "the repeated call goes through" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
+expect_exit 0 "and the one after" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
+jq 'map(if .name == "dev-1" then .budget = 2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
 expect_exit 2 "stop: no handoff blocks" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"

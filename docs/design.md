@@ -38,6 +38,14 @@ The guard is a tripwire against the mistakes a cooperative session makes, and a 
 
 One command shape skips the scan, the budget and the pause: nothing but `orch handoff-put <run> <own name>` fed by `< file` or by a quoted heredoc whose terminator comes once and last. It exists because a spent or paused session still owes a handoff the Stop hook demands, and because a handoff's prose names commands it never ran. The shape is anchored at both ends and the command word is the literal `orch` or this plugin's own `bin/orch`; a security review (2026-09-21) caught an earlier pattern that accepted any path ending in `orch`, which a session could have planted inside its allowed paths. `tests/guard.test.sh` pins the shapes that must not qualify. What remains is the class above, not a new one: the bare `orch` resolves through the session's PATH, exactly as `git` does for every denylist rule, and the shape leaves no room for a `PATH=` prefix.
 
+## MCP servers are per task, not per machine
+
+A background session starts every MCP server configured for the user and the repository. In one wave that meant a dozen browser servers and headless Chrome instances and a load average past 60, while most roles needed none. `orch spawn` therefore passes `--mcp-config` with the servers the task names and `--strict-mcp-config`, so nothing else starts; a tester defaults to the repository's `.mcp.json` because that is where a project declares what its app is tested with. `"inherit"` is the escape hatch.
+
+## OpenSpec is an input, not a rival
+
+OpenSpec structures specifications and runs no agents; this plugin runs agents and structures no specifications beyond a handoff. Where a repository uses it, the analyst writes into its format and the lead reads a change's `tasks.md` and scenarios into the task graph, rather than the plugin growing a spec format of its own.
+
 ## Known gaps
 
 - Quota exhaustion on the lead's model is not detected; fallback chains cover overload only.

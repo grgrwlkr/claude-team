@@ -112,6 +112,12 @@ if [ "$budget" -gt 0 ] 2>/dev/null; then
   if [ "$used" -ge "$budget" ]; then
     block "tool-call budget spent ($used of $budget). Send your handoff with Status partial — a command that is only 'orch handoff-put $(basename "$run_dir") $name' with a quoted heredoc or '< file' is outside the budget — and stop; the orchestrator decides what happens next."
   fi
+  # From 80%, hold one call so the work lands in a partial handoff while the session can still write one.
+  if [ $((used * 5)) -ge $((budget * 4)) ] && ! grep -q "^[^|]*|$sid|[^|]*|[^|]*|nudge|" "$run_dir/events.log" 2>/dev/null; then
+    log_event "$run_dir" "$sid" "$name" "$tool" nudge "$used of $budget"
+    printf 'orchestrator guard for %s: %s of %s guarded calls used (80%%). Send a partial handoff now — orch handoff-put %s %s < .scratch/handoff.md — so the work survives if the budget runs out, then repeat this call. This reminder comes once.\n' "$name" "$used" "$budget" "$(basename "$run_dir")" "$name" >&2
+    exit 2
+  fi
 fi
 
 case "$tool" in
@@ -131,6 +137,8 @@ case "$tool" in
       "$wt"/*) rel=${file_path#"$wt"/} ;;
       *) block "path is outside your worktree ($wt)" ;;
     esac
+    # Scratch space the team rules send every session to, whatever its task's paths.
+    case "$rel" in .scratch/*) allow "$rel" ;; esac
     ok=0
     while IFS= read -r pat; do
       [ -n "$pat" ] || continue
@@ -156,8 +164,8 @@ case "$tool" in
         case "$sub" in
           handoff-put)
             [ "$arg2" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${arg2:-<missing>}; run is $_run" ;;
-          handoff|status|events|ready|doctor) ;;
-          *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor" ;;
+          handoff|status|events|ready|doctor|tools) ;;
+          *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools" ;;
         esac
       done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^.*orch +//')
     fi
