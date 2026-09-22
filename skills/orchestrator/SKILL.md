@@ -19,22 +19,26 @@ This invocation is the user's request for the whole run, including every session
 
 ## Preflight
 
-Run `orch doctor`, and `orch tools` when the task produces something a user runs or sees. `orch doctor` checks `claude`, `jq`, a git repository, the plugin's `bin/` on PATH and the background service. Fix or report what fails before anything else. Note your own model in the first line of your first reply: this skill is meant to run on Fable with Opus as fallback (`orch start` launches that way); if you are something else, say so and continue.
+Run `orch doctor`, and `orch tools` when the task produces something a user runs or sees. `orch doctor` checks `claude`, `jq`, a git repository, the plugin's `bin/` on PATH and the background service. Fix or report what fails before anything else. Note your own model in the first line of your first reply; `orch start` launches the lead on the latest Opus unless the user passed `--model`.
 
 ## 1. Understand and decompose
 
 Read `references/plan.md`. Read the user's task (`$ARGUMENTS`, or the file it names). Read the repository enough to know its stack, test command, base branch and layout; do not read everything.
 
+If the repository uses OpenSpec (`openspec/` at its root) and the task has a change under `openspec/changes/<id>/`, derive the graph from it: the groups of `tasks.md` become developer tasks, the scenarios in its `specs/` become their acceptance, and the analyst is needed only while the change is still a proposal.
+
 Write the plan as a task graph: roles, names, goals, allowed paths, acceptance, dependencies, budgets. Rules:
 
 - The analyst goes first when the task has any ambiguity a spec would remove. The researcher goes first or alongside when the task depends on a fact about the outside world (a library, an API, a price, a rule).
+- With OpenSpec in the repository the analyst writes the change there (`openspec/changes/<id>/**` as its paths) instead of `docs/specs/`.
 - The designer is in the plan only when something visual is produced: UI, game HUD, site, graphic, 3D asset. It delivers a design brief and assets the developer implements from.
 - Developers own disjoint paths in the same wave. Same files means sequence, not parallelism.
 - QA depends on the developer task it tests and owns the test paths; it does not touch source.
+- **MCP servers per task.** A session starts only the servers its task's `mcp` list names — `orch tools` lists them by scope. Default: none, and a tester gets the repository's `.mcp.json`; `"mcp": "inherit"` keeps the machine's full set. Every session starting every server is what pushed a wave's machine load into the dozens.
 - **Every developer task gets a reviewer task** with `reviewOf: <task-id>`; `orch plan` refuses a graph where code goes unreviewed. The reviewer owns no paths and delivers findings with cited lines.
 - **With interactive verification on, every developer task also gets a tester task** with `verifies: <task-id>`: it runs the application from the branch, exercises each acceptance criterion as a user would with the means the machine has (browser MCP, Playwright, screenshots, terminal capture), and hands over evidence per criterion. `orch plan` refuses the graph otherwise. Testers run in the same wave as reviewers and re-run per round like them.
 - The integrator depends on every branch it merges and is the only role allowed to merge into the base branch. Pushing the base branch stays with the user unless the user said otherwise in the task.
-- Budgets, in guarded tool calls (Bash, Edit, Write and every MCP tool): analyst 40–80, researcher 30–60, designer 50–100, developer 80–150, QA 80–120, reviewer 30–60, tester 80–150 (it drives the app through MCP calls, and they count), integrator 40–80. A brake that never engages is no brake: a budget several times what the work needs lets drift run that far. A session that runs out writes a handoff and you respawn narrower; `orch status` marks a session with `!` from 80%, and `orch budget <run> <task-id|name> <n>` raises a live session's budget when the work is sound and merely bigger than planned — editing `plan.json` by hand does not reach the guard.
+- Budgets, in guarded tool calls (Bash, Edit, Write and every MCP tool): analyst 40–80, researcher 30–60, designer 50–100, developer 80–150, QA 80–120, reviewer 30–60, tester 80–150 (it drives the app through MCP calls, and they count), integrator 40–80. A brake that never engages is no brake: a budget several times what the work needs lets drift run that far. At 80% the guard holds one call and asks for a partial handoff. A session that runs out writes a handoff and you respawn narrower; `orch status` marks a session with `!` from 80%, and `orch budget <run> <task-id|name> <n>` raises a live session's budget when the work is sound and merely bigger than planned — editing `plan.json` by hand does not reach the guard.
 
 ## 2. Ask once, and collect every gate in the same breath
 
@@ -46,6 +50,7 @@ In that same list, settle every action this run may need that a session cannot t
 - **delete merged branches and worktrees** at the end?
 - **tag or release?**
 - **interactive verification** — should a tester run the application after each developer round and check the result visually? Run `orch tools` first and quote its table: what is available on this machine, what is missing and how it installs. If the user wants it and tools are missing, ask in the same breath whether the run may install them (`orch authorize <run> install-tools on`); otherwise the tester reports `BLOCKED:` on the first criterion it cannot exercise. Record the answer with `orch interactive <run> on|off`.
+- **may the tester change development data** (sign-ups, invites, records)? `orch authorize <run> mutate-data on`; without it the tester uses fixtures or a throwaway database and reports `BLOCKED:` on a criterion that needs shared data written.
 - **where review happens** — on the branch (the reviewer reads `git diff base...HEAD` and files findings through you), or on a pull or merge request (everyone who changed code opens one, reviewers comment in threads, authors answer them). Say which forge tooling you actually found (`gh`, `glab`, a remote at all) so the choice is informed: `orch review <run> venue branch|pr`.
 
 Record each yes: `orch authorize <run> push-base on`, `delete-merged on`, `tag on`. The guard reads the plan, so an authorized integrator acts without another round trip; the plan is also where the answer survives your own compaction. A gate the user declined stays declined and the run ends with the exact command they can run themselves.
@@ -67,7 +72,7 @@ Then end your turn and wait for each session's `STARTED` message. Subscribe with
 
 ## 4. Watch and judge
 
-Follow `references/watching.md`. Short form: act on teammates' messages, read `orch status` and `orch events`, verify every `DONE` yourself (tests, diff, spec), record the verdict with `orch accept <run> <task-id> "<why>"`, answer every `BLOCKED`, decide every `ESCALATION:` into `decisions.md`, pause on danger or drift, spawn the next wave. Verdicts are yours; QA and the reviewer only propose. `orch accept` is what unblocks dependents — never edit a teammate's handoff to change its status. A developer's own `done` makes only its reviewer, tester and QA ready; the integrator and any developer task that builds on that code stay blocked until you accept it.
+Follow `references/watching.md`. Short form: act on teammates' messages, read `orch status` and `orch events`, verify every `DONE` yourself (tests, diff, spec), record the verdict with `orch accept <run> <task-id> "<why>"`, answer every `BLOCKED`, decide every `ESCALATION:` into `decisions.md`, pause on danger or drift, spawn the next wave. Verdicts are yours; QA and the reviewer only propose. `orch accept` (task id or session name) is what unblocks dependents — never edit a teammate's handoff to change its status. Mid-run changes go through the CLI, never a hand edit of `plan.json`, whose values are copied into each session's record at spawn: `orch task add|set`, `orch paths <run> <task> add <glob>`, `orch budget`, `orch cancel <run> <task> "<why>"`. `orch cost <run>` gives the tokens per session. A developer's own `done` makes only its reviewer, tester and QA ready; the integrator and any developer task that builds on that code stay blocked until you accept it.
 
 ## 4a. The review loop
 
@@ -88,7 +93,7 @@ Accept the reviewed task only after a clean round, or after you yourself confirm
 
 ## 5. Report
 
-After each wave and at the end: one table (task, session, state, branch/PR, verified how, next), then what the user must do (push, review, merge) and what you did not verify. To close the run: `orch close <run>`, **before** you or the user delete any branch — after a cleanup its containment report has nothing left to check and says so (`already deleted`); when the integrator deleted merged branches under `delete-merged`, its own counted check in its handoff is the record. It refuses while a task is unaccepted — a reviewer or tester task counts as settled once the task it covers is accepted, so you accept code, not reviews — reports which of the run's branches are contained in the base branch and how many it checked, clears the run's entries from the session index and prints the final table. It deletes nothing. Then tell live sessions to shut down and leave the worktrees in place.
+After each wave and at the end: one table (task, session, state, branch/PR, verified how, next), then what the user must do (push, review, merge) and what you did not verify. To close the run: `orch close <run>`, **before** you or the user delete any branch — after a cleanup its containment report has nothing left to check and says so (`already deleted`); when the integrator deleted merged branches under `delete-merged`, its own counted check in its handoff is the record. It refuses while a task is unaccepted — a reviewer or tester task counts as settled once the task it covers is accepted, so you accept code, not reviews — reports which of the run's branches are contained in the base branch and how many it checked, clears the run's entries from the session index and prints the final table. It deletes nothing. Then `orch stop <run> all` — an idle session keeps its MCP and dev servers running — after reading each handoff's `Left running`; the worktrees stay. When the run implemented an OpenSpec change, `openspec archive <change> --yes` comes last.
 
 ## Never
 

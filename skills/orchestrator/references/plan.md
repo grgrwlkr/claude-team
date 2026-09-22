@@ -46,6 +46,7 @@ Fields:
 | `dependsOn` | ids whose handoffs are pasted into this task's brief; a task is ready when all are `done` |
 | `budget` | guarded tool calls (Bash, Edit, Write, every MCP tool) before the guard stops the session; the brake against drift. `orch spawn … --budget <n>` overrides it for one session, typically a later review round; `orch budget <run> <task-id|name> <n>` changes it for a live one |
 | `model`, `effort` | optional per-task overrides; default `opus` / `high` |
+| `mcp` | the MCP servers the session starts: names from the scopes `orch tools` lists (local, the repository's `.mcp.json`, user), or `"inherit"` for the machine's full set. Default: a tester gets the repository's `.mcp.json`, every other role none. Launched with `--mcp-config <run dir>/mcp/<name>.json --strict-mcp-config` |
 | `verifies` | tester tasks only: the id of the developer task whose build this interactive run checks. Required for every developer task when the plan has `interactive: true` |
 | `reviewOf` | reviewer tasks only: the id of the task whose code this review covers. `orch plan` refuses a graph where a developer task has no reviewer |
 
@@ -64,14 +65,18 @@ Rules of thumb: a wave is the set of ready tasks; spawn them together, one sessi
 `plan.json` carries the user's standing answers for the whole run, collected once at plan approval and never asked again:
 
 ```json
-"authorize": { "pushBase": false, "deleteMerged": false, "tag": false }
+"authorize": { "pushBase": false, "deleteMerged": false, "tag": false, "installTools": false, "mutateData": false }
 ```
 
-The lead writes them with `orch authorize <run> push-base|delete-merged|tag on|off`, `orch plan` preserves them, and `scripts/guard.sh` reads them: with `pushBase` the integrator pushes the base branch, with `deleteMerged` it deletes merged branches and worktrees. No other role gains anything from either flag.
+The lead writes them with `orch authorize <run> push-base|delete-merged|tag on|off`, `orch plan` preserves them, and `scripts/guard.sh` reads them: with `pushBase` the integrator pushes the base branch, with `deleteMerged` it deletes merged branches and worktrees. No other role gains anything from either flag. `installTools` and `mutateData` (`orch authorize <run> mutate-data on`) reach the tester through its brief: installing the verification tooling, and creating or changing data in development databases and services.
 
 ## Interactive verification
 
 `"interactive": true` (set with `orch interactive <run> on`) means a `tester` task with `verifies` covers every developer task: it starts the application from the branch, drives every acceptance criterion the way a user would, and hands over evidence per criterion. `orch tools` lists the machine's means; the tester installs nothing unless `authorize.installTools` is on (`orch authorize <run> install-tools on`), and the guard blocks package installs otherwise.
+
+## Editing the plan mid-run
+
+A session's paths and budget are copied from the plan into `sessions.json` at spawn, and the guard reads that copy, so a hand edit of `plan.json` never reaches a live session. `orch task add <run> <file|->` and `orch task set <run> <task> <field> <json>` run the same validation as `orch plan` against the stored plan; `task set` of `budget` or `pathsAllowed`, `orch paths <run> <task> add <glob>…` and `orch budget` also update the live record. `orch cancel <run> <task> "<why>"` (undo with `--undo`) drops a task: `cancelled.json` keeps it out of `orch ready` and settles it for `orch close`; its dependents stay blocked until re-planned.
 
 ## Acceptance
 

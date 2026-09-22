@@ -254,4 +254,167 @@ expect_exit 0 "close passes with the review task unaccepted" "$ORCH" close r3
 expect_grep '0 refs checked' "$TMP_BASE/out" "nothing left to check"
 expect_grep '1 already deleted' "$TMP_BASE/out" "close says the branch was deleted before it ran"
 
+echo "# wave 4: the lead is not tied to one model"
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "start launches the lead" "$ORCH" start -- "do the thing"
+expect_grep '--model opus' "$TMP_BASE/claude.calls" "the lead defaults to the latest Opus"
+expect_no_grep 'fable' "$TMP_BASE/claude.calls" "no model is forced on the lead beyond the default"
+expect_no_grep 'fallback-model' "$TMP_BASE/claude.calls" "no fallback unless asked"
+expect_exit 0 "start with an explicit model and fallback" "$ORCH" start --model fable --fallback opus -- "x"
+expect_grep '--model fable --fallback-model opus' "$TMP_BASE/claude.calls" "explicit choices pass through"
+
+echo "# wave 4: run r4"
+ROOT_REAL=$(pwd -P)
+export ORCH_CLAUDE_JSON="$TMP_BASE/claude.json"
+jq -n --arg r "$ROOT_REAL" '{mcpServers:{userA:{command:"a"}, "playwright-local":{command:"p"}}, projects:{($r):{mcpServers:{localC:{command:"c"}}}}}' > "$ORCH_CLAUDE_JSON"
+echo '{"mcpServers":{"repoB":{"command":"b"}}}' > .mcp.json
+expect_exit 0 "init r4" "$ORCH" init r4 --base main
+cat > "$TMP_BASE/r4.json" <<'JSON'
+{"run":"r4","baseBranch":"main","tasks":[
+ {"id":"impl","role":"developer","name":"d4","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":20,"mcp":["userA"]},
+ {"id":"rev","role":"reviewer","name":"rev-4","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"reviewOf":"impl","budget":10},
+ {"id":"run","role":"tester","name":"test-4","goal":"run the app","pathsAllowed":[],"acceptance":["z"],"dependsOn":["impl"],"verifies":"impl","budget":10},
+ {"id":"merge-task","role":"integrator","name":"int-4","goal":"merge","pathsAllowed":["**"],"acceptance":["g"],"dependsOn":["impl","rev"],"budget":10},
+ {"id":"docs","role":"researcher","name":"res-4","goal":"facts","pathsAllowed":["docs/research/**"],"acceptance":["q"],"dependsOn":[],"budget":10,"mcp":"inherit"}
+]}
+JSON
+expect_exit 0 "plan r4" "$ORCH" plan r4 "$TMP_BASE/r4.json"
+
+echo "# wave 4: each session gets only the MCP servers its task names"
+expect_exit 0 "developer spawn with an MCP list" "$ORCH" spawn r4 impl --dry-run
+expect_grep '--strict-mcp-config' "$TMP_BASE/out" "strict MCP config on"
+expect_grep '--mcp-config [^ ]*mcp/d4.json' "$TMP_BASE/out" "the session's own MCP config file"
+jq -r '.mcpServers | keys | join(",")' .orchestrator/r4/mcp/d4.json > "$TMP_BASE/keys"
+expect_grep '^userA$' "$TMP_BASE/keys" "the developer gets exactly the user-scope server it names"
+ls -l .orchestrator/r4/mcp/d4.json > "$TMP_BASE/perm"
+expect_grep '^-rw-------' "$TMP_BASE/perm" "the config file is private: server definitions may carry keys"
+expect_exit 0 "researcher inherits the machine's MCP set" "$ORCH" spawn r4 docs --dry-run
+expect_no_grep 'strict-mcp-config' "$TMP_BASE/out" "inherit means no MCP flags"
+printf '# d4\n## Status\ndone\n## Branch\nw1 at 0000000\n' > "$TMP_BASE/h-d4.md"
+expect_exit 0 "developer hands off" sh -c "'$ORCH' handoff-put r4 d4 < '$TMP_BASE/h-d4.md'"
+expect_exit 0 "tester spawn defaults to the repository's .mcp.json" "$ORCH" spawn r4 run --dry-run
+jq -r '.mcpServers | keys | join(",")' .orchestrator/r4/mcp/test-4.json > "$TMP_BASE/keys"
+expect_grep '^repoB$' "$TMP_BASE/keys" "the tester gets the repository's servers, not the user's"
+expect_exit 0 "tester brief" "$ORCH" brief r4 run
+expect_grep 'MCP servers you have: repoB' "$TMP_BASE/out" "the tester brief names the servers it really has"
+expect_exit 0 "reviewer brief" "$ORCH" brief r4 rev
+expect_grep 'MCP servers: none' "$TMP_BASE/out" "a role without a list gets none, and is told so"
+
+echo "# wave 4: orch tools shows MCP servers by scope"
+expect_exit 0 "tools" "$ORCH" tools
+expect_grep 'repo (.mcp.json): repoB' "$TMP_BASE/out" "repo scope listed"
+expect_grep 'local: localC' "$TMP_BASE/out" "local scope listed"
+expect_grep 'user: playwright-local, userA' "$TMP_BASE/out" "user scope listed"
+
+echo "# wave 4: task add and task set go through the plan's validation"
+echo '{"id":"extra","role":"researcher","name":"res-x","goal":"g","pathsAllowed":["docs/x/**"],"acceptance":["a"],"dependsOn":["impl"],"budget":5}' > "$TMP_BASE/t1.json"
+expect_exit 0 "task add from a file" "$ORCH" task add r4 "$TMP_BASE/t1.json"
+expect_grep '"res-x"' .orchestrator/r4/plan.json "the task landed"
+echo '{"id":"dev2","role":"developer","name":"d5","goal":"g","pathsAllowed":["lib/**"],"dependsOn":[]}' > "$TMP_BASE/t2.json"
+expect_exit 1 "task add refuses a developer task nobody reviews" sh -c "'$ORCH' task add r4 - < '$TMP_BASE/t2.json'"
+expect_no_grep '"d5"' .orchestrator/r4/plan.json "a refused add leaves the plan untouched"
+expect_exit 0 "task set a field" "$ORCH" task set r4 extra budget 7
+jq -r '.tasks[] | select(.id == "extra") | .budget' .orchestrator/r4/plan.json > "$TMP_BASE/v"
+expect_grep '^7$' "$TMP_BASE/v" "task set changed the field"
+expect_exit 1 "task set refuses an unknown task" "$ORCH" task set r4 nosuch budget 1
+expect_exit 1 "task set refuses a value that is not JSON" "$ORCH" task set r4 extra budget seven
+expect_exit 0 "task set can name the servers" "$ORCH" task set r4 impl mcp '["localC"]'
+expect_exit 0 "developer spawn after the change" "$ORCH" spawn r4 impl --dry-run
+jq -r '.mcpServers | keys | join(",")' .orchestrator/r4/mcp/d4.json > "$TMP_BASE/keys"
+expect_grep '^localC$' "$TMP_BASE/keys" "local-scope servers resolve too"
+expect_exit 0 "task set to a missing server" "$ORCH" task set r4 impl mcp '["nope"]'
+expect_exit 1 "spawn refuses a server nobody configured" "$ORCH" spawn r4 impl --dry-run
+expect_grep 'nope' "$TMP_BASE/err" "the refusal names the server"
+"$ORCH" task set r4 impl mcp '["userA"]' > /dev/null
+
+echo "# wave 4: real spawns register, and the hint agrees with the skill"
+expect_exit 0 "spawn the developer" "$ORCH" spawn r4 impl
+expect_grep 'STARTED' "$TMP_BASE/err" "the hint says to wait for STARTED"
+expect_no_grep 'with notify_when_idle, then end your turn' "$TMP_BASE/err" "no subscribe-now advice"
+expect_exit 0 "spawn the researcher" "$ORCH" spawn r4 docs
+
+echo "# wave 4: accept takes a session name"
+expect_exit 0 "accept by session name" "$ORCH" accept r4 d4 "by name"
+jq -r '.[].taskId' .orchestrator/r4/accepted.json > "$TMP_BASE/v"
+expect_grep '^impl$' "$TMP_BASE/v" "the name resolved to its task"
+expect_exit 0 "accept a review round by its session name" "$ORCH" accept r4 rev-4-r2 "round name"
+jq -r '.[].taskId' .orchestrator/r4/accepted.json > "$TMP_BASE/v"
+expect_grep '^rev$' "$TMP_BASE/v" "rev-4-r2 resolved to rev"
+expect_exit 1 "accept still refuses an unknown name" "$ORCH" accept r4 nobody
+
+echo "# wave 4: a later round's brief carries the previous round's findings"
+printf '# rev-4\n## Status\ndone\n## What I did\nFINDING-ALPHA in src/a.ts:1\n' > "$TMP_BASE/h-r1.md"
+expect_exit 0 "round 1 hands off" sh -c "'$ORCH' handoff-put r4 rev-4 < '$TMP_BASE/h-r1.md'"
+expect_exit 0 "round 2 brief" "$ORCH" brief r4 rev 2
+expect_grep 'Previous round' "$TMP_BASE/out" "the brief has the previous round"
+expect_grep 'FINDING-ALPHA' "$TMP_BASE/out" "with its findings"
+printf '# rev-4-r2\n## Status\ndone\n## What I did\nFINDING-BETA\n' > "$TMP_BASE/h-r2.md"
+expect_exit 0 "round 2 hands off" sh -c "'$ORCH' handoff-put r4 rev-4-r2 < '$TMP_BASE/h-r2.md'"
+expect_exit 0 "round 3 brief" "$ORCH" brief r4 rev 3
+expect_grep 'FINDING-BETA' "$TMP_BASE/out" "round 3 reads round 2"
+
+echo "# wave 4: the integrator under venue pr opens no PR of its own"
+expect_exit 0 "venue pr" "$ORCH" review r4 venue pr
+expect_exit 0 "integrator brief" "$ORCH" brief r4 merge-task
+expect_no_grep 'gh pr create' "$TMP_BASE/out" "the integrator is not told to open a PR"
+expect_grep 'no PR of your own' "$TMP_BASE/out" "it is told it merges the task PRs"
+expect_grep '< .scratch/handoff.md' "$TMP_BASE/out" "briefs lead with the file form of handoff-put"
+
+echo "# wave 4: paths of a live session"
+expect_exit 0 "paths add" "$ORCH" paths r4 d4 add knip.json 'config/**'
+jq -r '.tasks[] | select(.id == "impl") | .pathsAllowed | join(",")' .orchestrator/r4/plan.json > "$TMP_BASE/v"
+expect_grep 'src/\*\*,knip.json,config/\*\*' "$TMP_BASE/v" "the plan has the new paths"
+jq -r '.[] | select(.name == "d4") | .pathsAllowed | join(",")' .orchestrator/r4/sessions.json > "$TMP_BASE/v"
+expect_grep 'knip.json' "$TMP_BASE/v" "the live session's record, which the guard reads, has them"
+expect_exit 1 "paths refuses an unknown task" "$ORCH" paths r4 nobody add x
+expect_exit 1 "paths needs at least one glob" "$ORCH" paths r4 d4 add
+
+echo "# wave 4: tester may or may not change dev data"
+expect_exit 0 "tester brief before" "$ORCH" brief r4 run
+expect_grep 'NOT authorized: creating or changing' "$TMP_BASE/out" "the default forbids writing shared dev data"
+expect_exit 0 "authorize mutate-data" "$ORCH" authorize r4 mutate-data on
+expect_exit 0 "tester brief after" "$ORCH" brief r4 run
+expect_grep 'authorized for this run: creating or changing' "$TMP_BASE/out" "the authorization reaches the brief"
+
+echo "# wave 4: cancel a task"
+expect_exit 0 "ready before" "$ORCH" ready r4
+expect_grep '^extra$' "$TMP_BASE/out" "extra is ready"
+expect_exit 0 "cancel extra" "$ORCH" cancel r4 extra "not needed after all"
+expect_exit 0 "ready after" "$ORCH" ready r4
+expect_no_grep '^extra$' "$TMP_BASE/out" "a cancelled task is never ready"
+expect_exit 0 "status after cancel" "$ORCH" status r4 --no-live
+expect_grep 'cancelled: extra' "$TMP_BASE/out" "status names it with the reason"
+expect_exit 0 "undo" "$ORCH" cancel r4 extra --undo
+expect_exit 0 "ready after undo" "$ORCH" ready r4
+expect_grep '^extra$' "$TMP_BASE/out" "undo brings it back"
+"$ORCH" cancel r4 extra "not needed after all" > /dev/null
+
+echo "# wave 4: stop sessions"
+: > "$TMP_BASE/claude.calls"
+RES_ID=$(jq -r '.[] | select(.name == "res-4") | .id' .orchestrator/r4/sessions.json)
+expect_exit 0 "stop one" "$ORCH" stop r4 res-4
+expect_grep "^stop $RES_ID\$" "$TMP_BASE/claude.calls" "claude stop ran with the session's id"
+expect_exit 0 "stop all" "$ORCH" stop r4 all
+[ "$(grep -c '^stop ' "$TMP_BASE/claude.calls")" -eq 3 ] && { PASS=$((PASS+1)); echo "ok   stop all reached every registered session"; } || { FAIL=$((FAIL+1)); echo "FAIL stop all: $(grep -c '^stop ' "$TMP_BASE/claude.calls") stop calls, want 3"; }
+expect_exit 1 "stop refuses an unknown name" "$ORCH" stop r4 nobody
+
+echo "# wave 4: cost per session from the transcripts, one count per message"
+export ORCH_PROJECTS_DIR="$TMP_BASE/projects"
+RES_SID=$(jq -r '.[] | select(.name == "res-4") | .sessionId' .orchestrator/r4/sessions.json)
+mkdir -p "$ORCH_PROJECTS_DIR/-some-worktree"
+{
+  echo '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}'
+  echo '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}'
+  echo '{"type":"user","message":{"content":"hi"}}'
+  echo '{"type":"assistant","message":{"id":"m2","usage":{"input_tokens":5,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}'
+} > "$ORCH_PROJECTS_DIR/-some-worktree/$RES_SID.jsonl"
+expect_exit 0 "cost" "$ORCH" cost r4
+expect_grep 'res-4  *120  *15  *1000  *50' "$TMP_BASE/out" "output, input, cache read, cache write, a duplicated message counted once"
+expect_grep 'd4  *-' "$TMP_BASE/out" "a session without a transcript reads -"
+expect_grep 'TOTAL  *120' "$TMP_BASE/out" "total line"
+
+echo "# wave 4: close treats a cancelled task as settled"
+for t in impl rev merge-task docs run; do "$ORCH" accept r4 "$t" ok > /dev/null; done
+expect_exit 0 "close with a cancelled task" "$ORCH" close r4
+
 summary

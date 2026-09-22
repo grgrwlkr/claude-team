@@ -20,10 +20,16 @@ stub_claude() {
   cat > "$TMP_BASE/bin/claude" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$TMP_BASE/claude.calls"
+bg=0; for a in "\$@"; do [ "\$a" = --bg ] && bg=1; done
+if [ "\$bg" = 1 ]; then
+  n=\$(( \$(wc -l < "$TMP_BASE/claude.bg" 2>/dev/null || echo 0) + 1 ))
+  id=\$(printf '%08x' "\$n"); echo "\$id" >> "$TMP_BASE/claude.bg"
+  echo "session backgrounded · \$id"; exit 0
+fi
 case "\$*" in
   --version) echo "0.0.0 (stub)" ;;
   "mcp list") [ -n "\${STUB_SLOW:-}" ] && sleep 5; echo "playwright: npx -y @playwright/mcp@latest - ✓ Connected" ;;
-  agents*) echo '[]' ;;
+  agents*) [ -f "$TMP_BASE/claude.bg" ] && jq -R '{id: ., sessionId: ("sess-" + .), state: "working"}' "$TMP_BASE/claude.bg" | jq -s . || echo '[]' ;;
 esac
 EOF
   chmod +x "$TMP_BASE/bin/claude"

@@ -15,7 +15,7 @@ A handoff whose "What I checked" section is a table: acceptance criterion · sce
 
 ## Means
 
-1. Run `orch tools` first. It lists what this machine can do: browser automation (a browser MCP, Playwright, Puppeteer), screenshots and screen recording, terminal capture (tmux, expect), HTTP clients, simulators, containers.
+1. Your brief names the MCP servers this session actually has; the rest of the machine's are off. Run `orch tools` for the non-MCP means. It lists what this machine can do: browser automation (a browser MCP, Playwright, Puppeteer), screenshots and screen recording, terminal capture (tmux, expect), HTTP clients, simulators, containers.
 2. Pick by target. Web UI: drive a real browser through the MCP that is available, or Playwright; capture a screenshot per criterion at the state that proves it. CLI or TUI: run under tmux or `script`, keep the transcript. Desktop or game: launch, drive with the screenshot or computer-use tool present, record a short clip for anything that moves. API or service: `curl` with the full request and response saved.
 3. **Nothing suitable available: you do not install it.** Report `BLOCKED:` to the orchestrator with the exact tool and the install hint `orch tools` printed. The orchestrator asks the user. When your brief says installing is authorized for this run, install only what `orch tools` listed as missing and note it in the handoff. The guard blocks package installs otherwise.
 
@@ -26,7 +26,7 @@ A handoff whose "What I checked" section is a table: acceptance criterion · sce
 - One criterion, one scenario, one piece of evidence, named by the criterion id: `.scratch/evidence/<criterion>-<step>.png`, `.log`, `.txt`, `.mp4`. Look at each screenshot yourself before citing it; an empty page saved as evidence is a false pass.
 - Anything visual you judge by eye (layout, contrast, alignment, motion) is stated as an observation with the screenshot, not as a defect, unless the spec or the design brief names the expectation.
 - A failure goes to the developer as `Q:` with the scenario, the evidence and the exact steps; the developer fixes, the orchestrator re-runs you for the next round. A disagreement about whether it is a bug goes to the orchestrator after two rounds, `ESCALATION:` from both.
-- Stop the application and any recording you started before you finish; leave no server running in the background.
+- Stop the application and any recording you started before you finish; leave no server running in the background. Your brief says whether you may create or change development data; anything you could not stop and any data you created goes under `Left running` in the handoff.
 
 ## Rounds
 

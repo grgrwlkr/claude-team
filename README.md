@@ -20,7 +20,7 @@ cd your-repo
 orch start -- "Add dark mode to Settings; spec first, then implementation, tests and a PR"
 ```
 
-`orch start` launches the lead on Fable with Opus as the fallback chain, effort `high`, Concise output style, and hands it `/orchestrator <task>`. Inside an existing session you can type `/orchestrator <task>` directly; the lead then notes which model it is running on.
+`orch start` launches the lead on the latest Opus (`--model` picks another, `--fallback` adds a fallback model), effort `high`, Concise output style, and hands it `/orchestrator <task>`. Inside an existing session you can type `/orchestrator <task>` directly; the lead then notes which model it is running on.
 
 The lead:
 
@@ -66,10 +66,12 @@ The plugin's `PreToolUse` hook watches every session registered in a run and blo
 - `git push --force`, `git reset --hard`, `git branch -D`, `git clean -f`, `sudo`, `curl … | sh`, `rm -r` on absolute paths;
 - pushing the base branch, and deleting branches or worktrees, unless the plan authorizes it and the session is the integrator; checkout of, or commits on, the base branch by anyone but the integrator;
 - package installs (`brew`, `apt`, `npm -g`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless the plan authorizes `install-tools`; a project-local `npm install` passes;
-- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `budget`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`;
+- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `budget`, `task`, `paths`, `cancel`, `stop`, `cost`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`;
 - `claude stop|rm|kill|respawn` — sessions never stop each other;
 - every Bash/Edit/Write and MCP tool call while the lead has paused the session or the run (`orch pause`); reading and messaging keep working;
 - every Bash/Edit/Write and MCP tool call past the task's tool-call budget — the passive brake against drift. A tester drives a browser through MCP tools, so those calls are held and counted like the rest; `orch status` marks a session with `!` from 80%, and `orch budget` changes a live session's budget.
+
+At 80% of the budget the guard holds one call, once, and asks for a partial handoff. `.scratch/` in a session's own worktree is always writable.
 
 One call is always open, paused or out of budget: a command that is nothing but `orch handoff-put <run> <own name>` fed by a quoted heredoc or `< file`. Its body is read as prose, so a handoff may describe commands it never ran; anything chained to it is guarded as usual.
 
@@ -77,14 +79,18 @@ The `Stop` hook refuses to let a registered session go idle without a handoff. B
 
 **The guard is a tripwire, not a sandbox.** It catches the mistakes a well-meaning session makes and logs them for the lead; a session determined to escape a denylist can. The hard boundary is Claude Code's own permission mode and sandbox; the lead's reading of diffs and handoffs is the second line.
 
+## MCP servers and cost
+
+Each session starts only the MCP servers its task's `mcp` list names, through `--mcp-config` and `--strict-mcp-config`; a tester defaults to the repository's `.mcp.json`, every other role to none, and `"mcp": "inherit"` keeps the machine's full set. A wave where every session started every configured server drove a machine's load average past 60. `orch tools` lists the servers by scope. `orch cost <run>` sums the tokens of each session from its transcript, counting each message once — the transcript repeats a message's usage on several lines, and a naive sum reads about double.
+
 ## Run directory
 
-`<repo>/.orchestrator/<run>/` in the main checkout, excluded from git through `.git/info/exclude`: `plan.json` (graph, authorizations, review settings), `sessions.json`, `accepted.json`, `events.log`, `decisions.md`, `handoffs/<name>.md` (a later round hands off as `<name>-r<N>.md`), `PAUSE`, `PAUSE-<name>`, `CLOSED`; beside the runs, `tools-mcp.cache` keeps `orch tools`' MCP list for an hour (`orch tools --refresh`). Sessions keep their scratch files in `.scratch/` inside their own worktree, never in `/tmp`.
+`<repo>/.orchestrator/<run>/` in the main checkout, excluded from git through `.git/info/exclude`: `plan.json` (graph, authorizations, review settings), `sessions.json`, `accepted.json`, `events.log`, `decisions.md`, `handoffs/<name>.md` (a later round hands off as `<name>-r<N>.md`), `cancelled.json`, `mcp/<name>.json` (each session's MCP config, mode 600), `PAUSE`, `PAUSE-<name>`, `CLOSED`; beside the runs, `tools-mcp.cache` keeps `orch tools`' MCP list for an hour (`orch tools --refresh`). Sessions keep their scratch files in `.scratch/` inside their own worktree, never in `/tmp`.
 
 ## Limits worth knowing
 
 - Every session spends your subscription quota independently: a wave of four is roughly four times the burn.
-- `--fallback-model` switches only when a model is overloaded or unavailable, per turn; an exhausted weekly window on Fable is not caught. Relaunch with `orch start --model opus` in that case.
+- `--fallback-model` switches only when a model is overloaded or unavailable, per turn; an exhausted weekly window is not caught. Relaunch with another `orch start --model` in that case.
 - Background sessions live on this machine and stop on shutdown; they survive sleep.
 - Deleting a session in `claude agents` deletes the worktree Claude created for it. Push first.
 - Hooks in this plugin run in every session where the plugin is enabled and exit immediately for sessions not registered in a run; measured cost is one `jq` per guarded tool call.

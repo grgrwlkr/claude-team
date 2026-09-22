@@ -7,6 +7,7 @@ The lead's job after a spawn is to wait cheaply and judge sharply. Nothing here 
 - **Teammates report with messages.** `STARTED` when they begin, `DONE` or `BLOCKED` when they finish or stop. Those messages, not idleness, are what you act on.
 - `notify_when_idle` is a cheap extra alarm, not the signal. Subscribe **once, after the session's `STARTED` arrives**, and never re-subscribe to the same session: subscribing to an already-idle session fires immediately and replays the old turn, so a loop of resubscribes wakes you forever while the teammate is merely waiting on its own background command. `SendMessage` requires `message`; for a pure subscription pass `message: ""`.
 - On a wake-up with no `DONE`/`BLOCKED` message: check `orch status` once. If the session is `working` or its handoff is `none`, end your turn without re-subscribing.
+- A message to a session running in another permission mode can sit queued without waking it (seen in a run; not documented by Claude Code). If a message gets no reaction, send it once more, and keep every session on one mode with `ORCH_PERMISSION_MODE`.
 - Do not `sleep`, do not re-run `orch status` in a loop. The user sees everything in `claude agents` anyway.
 
 ## On every wake-up
@@ -22,7 +23,7 @@ The lead's job after a spawn is to wait cheaply and judge sharply. Nothing here 
 
 - `orch pause <run> <name> "<reason>"` — the guard refuses every Bash/Edit/Write of that session from the next call; it can still read and message. Use it the moment you see danger (touching the base branch, deleting, network egress of private data) or drift (work on things the task never named, a rewrite where a fix was asked). Then message the session: what you saw, what to do instead. `orch resume` when it acknowledged.
 - `orch pause <run> all "<reason>"` — stop the whole wave, for example when the user changes the goal.
-- Budget is the passive brake: it is in `plan.json`, copied into the session's record at spawn, and the guard enforces the record. A session that hits budget sends its handoff (that one command stays open) and stops; you decide whether to respawn it with a narrower goal or, when the work is sound and merely bigger than planned, `orch budget <run> <task-id|name> <n>` — a hand edit of `plan.json` never reaches a live session.
+- Budget is the passive brake: it is in `plan.json`, copied into the session's record at spawn, and the guard enforces the record. At 80% the guard holds one call and asks the session for a partial handoff, so the work survives a spent budget. A session that hits budget sends its handoff (that one command stays open) and stops; you decide whether to respawn it with a narrower goal or, when the work is sound and merely bigger than planned, `orch budget <run> <task-id|name> <n>` — a hand edit of `plan.json` never reaches a live session.
 - `claude stop <id>` is the last resort, for a session that ignores a pause; only you and the user do this, never a teammate.
 
 ## What you never delegate
@@ -45,4 +46,4 @@ Run such loops through `bash -c`: in zsh an unquoted `$(…)` does not word-spli
 
 ## Closing a run
 
-When every task is accepted and the integrator's handoff shows the merged state green: `orch close <run>` before any branch cleanup (containment report with its count, session index cleanup, final table; it deletes nothing; reviewer and tester tasks are settled by the acceptance of the task they cover; `--force` closes a run with unaccepted tasks), ask each live session to shut down (`SendMessage` "shutdown: run closed, thank you"), then report to the user: what landed, where (branches, PRs), what was verified and how, what remains. Leave the worktrees; the user removes sessions with `claude rm` after pushing.
+When every task is accepted and the integrator's handoff shows the merged state green: `orch close <run>` before any branch cleanup (containment report with its count, session index cleanup, final table; it deletes nothing; reviewer and tester tasks are settled by the acceptance of the task they cover; `--force` closes a run with unaccepted tasks), read each handoff's `Left running` and clean up or report what it lists, `orch stop <run> all`, then report to the user: what landed, where (branches, PRs), what was verified and how, what remains. Leave the worktrees; the user removes sessions with `claude rm` after pushing.

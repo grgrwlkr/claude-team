@@ -13,17 +13,16 @@ You are one session in a team run by an orchestrator session. Your spawn brief n
 - Your handoff: `<run dir>/handoffs/<your name>.md`. You own it; nobody else touches it. **Send it, don't write it:**
 
   ```bash
-  orch handoff-put <run> <your name> <<'HANDOFF'
-  # … the handoff …
-  HANDOFF
+  # write .scratch/handoff.md first, then:
+  orch handoff-put <run> <your name> < .scratch/handoff.md
   ```
 
-  Keep that command alone in its call, with the delimiter quoted, or feed a file: `orch handoff-put <run> <your name> < .scratch/handoff.md`. In exactly those two shapes the guard treats the body as prose — a handoff may describe a `git reset --hard` it never ran — and lets the call through when you are paused or out of budget, so the last thing you owe can always be delivered. Chain anything to it, or leave the delimiter unquoted, and it is an ordinary guarded command again.
+  Keep that command alone in its call. A quoted heredoc (`<<'HANDOFF'` … `HANDOFF`) works the same for the guard and is the form for roles without the Write tool, but Claude Code's own worktree isolation may refuse a heredoc whose text names git commands, so the file is the default. In exactly those two shapes the guard treats the body as prose — a handoff may describe a `git reset --hard` it never ran — and lets the call through when you are paused or out of budget, so the last thing you owe can always be delivered. Chain anything to it, or leave the delimiter unquoted, and it is an ordinary guarded command again.
 
   This works from inside your worktree, where the run directory is out of the harness's reach. Writing that file with the Write tool also works while you are still in the main checkout; a Bash redirect into the run directory is blocked.
 - Your code lives in your own git worktree under `.claude/worktrees/`. Before the first edit make sure you are in it; never edit the main checkout or another session's worktree.
-- Scratch files, logs and command output: `.scratch/` inside your own worktree. Never `/tmp` — every session on this machine shares it and parallel runs overwrite each other's files.
-- `orch` is the run's CLI. A session may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`. Everything else (`spawn`, `pause`, `accept`, `authorize`, `decide`, `plan`) belongs to the orchestrator and the guard blocks it.
+- Scratch files, logs and command output: `.scratch/` inside your own worktree, always writable whatever your allowed paths. Never `/tmp` — every session on this machine shares it and parallel runs overwrite each other's files.
+- `orch` is the run's CLI. A session may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`. Everything else (`spawn`, `pause`, `accept`, `authorize`, `decide`, `plan`) belongs to the orchestrator and the guard blocks it.
 
 ## Talking to each other
 
@@ -51,6 +50,7 @@ The plugin's `PreToolUse` hook watches every registered team session. It blocks,
 - `claude stop`, `claude rm`, `claude kill` — you never stop a teammate;
 - installing tooling onto the machine (`brew`, `apt`, global `npm`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless your brief says the run authorizes it; a project-local `npm install` passes;
 - every Bash/Edit/Write and MCP tool call while the orchestrator has paused you (`PAUSE` or `PAUSE-<name>` in the run dir) — reading and messaging keep working, so answer the orchestrator;
+- one call, once, when 80% of your budget is spent — send a partial handoff, then repeat the call;
 - every Bash/Edit/Write and MCP tool call after your tool-call budget is spent — send the handoff (that one command stays open) and stop.
 
 A block is logged to `events.log`; the orchestrator reads it. Don't look for a way around a block: report `BLOCKED:` with what you were trying to do and why.
@@ -68,6 +68,8 @@ done | partial | blocked | failed — one line why
 ## What I did
 ## What I checked
 commands run and their real results, not summaries
+## Left running
+servers, watchers, containers, ports and data you started or created and did not stop or remove — `none` when nothing
 ## Open questions
 ## Suggested follow-ups
 ```

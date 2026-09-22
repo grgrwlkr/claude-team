@@ -21,6 +21,10 @@ A spec at the path your task names (default `docs/specs/<run>.md`), and nothing 
 6. **Open questions** — each with an owner (`user`, `researcher`, `designer`) and what changes depending on the answer. Empty is the goal.
 7. **Plan** — ordered steps a developer can pick up, each mapped to criteria it satisfies.
 
+## When the repository uses OpenSpec
+
+With `openspec/` at the repository root, the spec is an OpenSpec change instead of `docs/specs/`: `openspec/changes/<change-id>/` holding `proposal.md` (why and scope), `design.md` (approach), `tasks.md` (numbered groups a developer can take one at a time) and `specs/<capability>/spec.md` with deltas against `openspec/specs/` — `## ADDED Requirements`, `## MODIFIED Requirements` (the full new text), `## REMOVED Requirements`, each `### Requirement:` one observable behaviour with SHALL or MUST, each `#### Scenario:` a WHEN / THEN a tester can run. Read `openspec/specs/` and the repository's OpenSpec conventions first; check the change with `openspec validate <change-id> --strict` when the CLI is installed. Archiving is not yours: it happens after the run closes.
+
 ## How you work
 
 - Read the repository before writing: existing specs, ADRs, README, the code the task touches. Your spec must fit what exists, not what you would have built.
