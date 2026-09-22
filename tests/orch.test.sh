@@ -51,6 +51,9 @@ expect_grep '--model opus' "$TMP_BASE/out" "spawn pins the model"
 expect_grep '--effort high' "$TMP_BASE/out" "spawn pins effort high"
 expect_grep 'CLAUDE_CODE_CHILD_SESSION' "$TMP_BASE/out" "spawn strips the child-session marker"
 expect_grep 'outputStyle' "$TMP_BASE/out" "spawn pins the Concise output style"
+expect_grep '"disableRemoteControl":true' "$TMP_BASE/out" "team sessions start without Remote Control, so no mirror shares their name"
+expect_exit 0 "spawn with Remote Control kept" env ORCH_REMOTE_CONTROL=1 "$ORCH" spawn r1 spec --dry-run
+expect_no_grep 'disableRemoteControl' "$TMP_BASE/out" "ORCH_REMOTE_CONTROL=1 keeps it"
 
 echo "# pause / resume / decide"
 expect_exit 0 "pause one" "$ORCH" pause r1 analyst-spec "drifting into code"
@@ -260,6 +263,7 @@ expect_exit 0 "start launches the lead" "$ORCH" start -- "do the thing"
 expect_grep '--model opus' "$TMP_BASE/claude.calls" "the lead defaults to the latest Opus"
 expect_no_grep 'fable' "$TMP_BASE/claude.calls" "no model is forced on the lead beyond the default"
 expect_no_grep 'fallback-model' "$TMP_BASE/claude.calls" "no fallback unless asked"
+expect_no_grep 'disableRemoteControl' "$TMP_BASE/claude.calls" "the lead keeps Remote Control"
 expect_exit 0 "start with an explicit model and fallback" "$ORCH" start --model fable --fallback opus -- "x"
 expect_grep '--model fable --fallback-model opus' "$TMP_BASE/claude.calls" "explicit choices pass through"
 

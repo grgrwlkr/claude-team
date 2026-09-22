@@ -39,7 +39,7 @@ Fields:
 |---|---|
 | `id` | stable task id, used in `dependsOn` |
 | `role` | one of `analyst`, `developer`, `designer`, `qa`, `tester`, `reviewer`, `integrator`, `researcher` |
-| `name` | the session's team name (`--name`); unique within the run; letters, digits, hyphens |
+| `name` | the session's team name (`--name`); unique within the run and not reused from an earlier run on this machine, whose Remote Control mirrors keep the name; letters, digits, hyphens |
 | `goal` | one paragraph, verbatim into the brief |
 | `pathsAllowed` | globs relative to the worktree root; `*` matches across `/`; the guard blocks edits elsewhere. Two tasks never share a path in the same wave |
 | `acceptance` | what the orchestrator will check itself before accepting |
