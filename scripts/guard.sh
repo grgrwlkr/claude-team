@@ -222,12 +222,14 @@ case "$tool" in
     allow "$(printf '%s' "$cmd" | cut -c1-120)"
     ;;
   Agent|Task)
-    # A team session starts no subagent but the MCP helpers orch spawn passed it with --agents.
+    # A team session starts no subagent but the MCP helpers orch spawn gave this very session:
+    # the names in its helper file, not anything that merely looks like one.
     st=$(jq -r '.tool_input.subagent_type // empty' <<<"$input")
-    case "$st" in
-      mcp-*) allow "helper $st" ;;
-      *) block "a team session starts only MCP helper agents (subagent_type mcp-<server>, listed in your brief), not ${st:-a general-purpose agent}; ask a teammate instead" ;;
-    esac
+    helpers="$run_dir/mcp/$name.agents.json"
+    if [ -n "$st" ] && [ -f "$helpers" ] && jq -e --arg s "$st" 'has($s)' "$helpers" >/dev/null 2>&1; then
+      allow "helper $st"
+    fi
+    block "a team session starts only the MCP helper agents orch spawn gave it (listed in your brief), not ${st:-a general-purpose agent}; ask a teammate instead"
     ;;
   *)
     allow

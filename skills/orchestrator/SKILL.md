@@ -101,7 +101,7 @@ Accept the reviewed task only after a clean round, or after you yourself confirm
 In a staged run `orch ready` holds back every task of a stage until the user has approved all earlier ones. When a stage's tasks are accepted:
 
 1. `orch stage-report <run> <stage>` writes `<run dir>/stages/<stage>/index.html` with every task's state, status, branch and what it did, and the screenshots its handoff names (copied to `img/`, only from inside the repository).
-2. Show it to the user: publish the page with its `img/` files as an artifact when your harness offers one, otherwise open the file. Add in chat what you verified yourself and what you did not.
+2. Read the page before anyone else does: it carries handoff text and screenshots verbatim, and a session may have pasted a key or personal data into them. Then show it to the user: publish the page with its `img/` files as an artifact when your harness offers one, otherwise open the file. Add in chat what you verified yourself and what you did not.
 3. End your turn and wait. On the user's go, `orch approve <run> <stage> "<their words>"` — it refuses while a task of the stage is open, or an earlier stage is not approved — then spawn the next wave. A change of direction goes into `decisions.md` and the plan (`orch task add|set`, `orch cancel`) before anything is spawned.
 
 ## 5. Report

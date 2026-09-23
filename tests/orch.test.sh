@@ -551,6 +551,13 @@ expect_grep 'img/des-5-shot.png' .orchestrator/r6/stages/design/index.html "evid
 expect_exit 0 "the image was copied" test -f .orchestrator/r6/stages/design/img/des-5-shot.png
 expect_exit 1 "an image outside the repository is not copied" test -f .orchestrator/r6/stages/design/img/des-5-outside.png
 expect_grep 'prefers-color-scheme: dark' .orchestrator/r6/stages/design/index.html "the page has a dark theme"
+printf 'PNG' > "$TMP_BASE/outside2.png"
+ln "$TMP_BASE/outside2.png" "$REPO/.claude/worktrees/w1/.scratch/evidence/hl.png"
+printf '# des-5\n## Status\ndone\n## What I did\nScreens: %s and %s\n' "$REPO/.claude/worktrees/w1/.scratch/evidence/shot.png" "$REPO/.claude/worktrees/w1/.scratch/evidence/hl.png" > "$TMP_BASE/h-des2.md"
+"$ORCH" handoff-put r6 des-5 < "$TMP_BASE/h-des2.md" > /dev/null
+expect_exit 0 "stage report again" "$ORCH" stage-report r6 design
+expect_exit 1 "security review: a hard link to a file outside the repository is not copied" test -f .orchestrator/r6/stages/design/img/des-5-hl.png
+expect_exit 0 "an ordinary file still is" test -f .orchestrator/r6/stages/design/img/des-5-shot.png
 
 echo "# security review: names that reach the filesystem, and the event log"
 jq '.stages = ["design", "../b"] | .tasks |= map(if .stage == "build" then .stage = "../b" else . end)' "$TMP_BASE/r5.json" > "$TMP_BASE/r5v.json"

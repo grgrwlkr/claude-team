@@ -1037,6 +1037,8 @@ cmd_stage_report() {
       for p in $(grep -oE '[^][:space:]()`"<>'"'"'[]+\.(png|jpe?g|gif|webp)' "$h" | sort -u); do
         case "$p" in /*) f="$p" ;; *) [ -n "$cwd" ] || continue; f="$cwd/$p" ;; esac
         [ -f "$f" ] && [ ! -L "$f" ] || continue
+        # A hard link inside the repository can name a file outside it; one link means it is the file itself.
+        [ "$(ls -ln "$f" | awk '{print $2}')" = 1 ] || continue
         rf="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)/$(basename "$f")"
         case "$rf" in "$root"/*) ;; *) continue ;; esac
         cp "$rf" "$img/$name-$(basename "$rf")" && n=$((n + 1))
