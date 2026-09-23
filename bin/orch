@@ -40,7 +40,20 @@ repo_root() {
   case "$common" in /*) ;; *) common="$(cd "$common" && pwd -P)";; esac
   dirname "$common"
 }
+# plain_name <s>: safe as one path component — run and stage names become directories.
+plain_name() { case "$1" in ''|.*|-*|*..*|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
+
+# ev <run_dir> <field>...: one event line. Newlines and pipes in a field become spaces, so the text
+# of a note can never forge a line the guard counts (allow lines are the budget, nudge lines the reminder).
+ev() {
+  local d="$1" line f; shift
+  line=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  for f in "$@"; do line="$line|$(printf '%s' "$f" | tr '\n|' '  ')"; done
+  printf '%s\n' "$line" >> "$d/events.log"
+}
+
 run_dir() {
+  plain_name "$1" || die "run name '$1' must be letters, digits, dots, hyphens and underscores, without '..'"
   local r; r="$(repo_root)/.orchestrator/$1"
   [ -d "$r" ] || die "run '$1' does not exist; orch init $1 --base <branch>"
   printf '%s' "$r"
@@ -131,6 +144,7 @@ cmd_start() {
 cmd_init() {
   local run="${1:-}" base="" orch_name="orchestrator"; shift || true
   [ -n "$run" ] || die "init needs a run name"
+  plain_name "$run" || die "run name '$run' must be letters, digits, dots, hyphens and underscores, without '..'"
   while [ $# -gt 0 ]; do
     case "$1" in
       --base) base="$2"; shift 2 ;;
@@ -198,6 +212,8 @@ cmd_plan() {
     + ( if (.mode // "single") == "staged" then
           (.stages // []) as $s
           | (if ($s | length) == 0 then [bad("mode staged needs a stages list, in order")] else [] end)
+            + [ $s[] | select(if type != "string" then true else ((test("^[A-Za-z0-9][A-Za-z0-9._-]*$") | not) or test("[.][.]")) end)
+                | bad("stage name \(.) must be letters, digits, dots, hyphens and underscores, without ..") ]
             + [ .tasks[] | select((.stage // "") as $g | ($s | index($g)) == null) | bad("task \(.id): stage \(.stage // "missing") is not one of \($s | join(", "))") ]
             + ( . as $p | [ $p.tasks[] as $t | ($t.dependsOn // [])[] as $dep | ($p.tasks[] | select(.id == $dep)) as $x
                 | select(($s | index($x.stage // "")) != null and ($s | index($t.stage // "")) != null)
@@ -352,7 +368,7 @@ cmd_accept() {
   [ -f "$d/accepted.json" ] || echo '[]' > "$d/accepted.json"
   jq --arg id "$id" --arg note "$note" --arg t "$(now)" \
      'map(select(.taskId != $id)) + [{taskId:$id, at:$t, note:$note}]' "$d/accepted.json" > "$d/accepted.tmp" && mv "$d/accepted.tmp" "$d/accepted.json"
-  printf '%s|orchestrator|%s|accept|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$id" "$note" >> "$d/events.log"
+  ev "$d" orchestrator "$id" accept allow "$note"
   echo "accepted $id — dependents are unblocked; orch ready shows what to spawn next"
 }
 
@@ -375,7 +391,7 @@ cmd_authorize() {
   esac
   case "$value" in on|true|yes) value=true ;; off|false|no) value=false ;; *) die "value must be on or off" ;; esac
   jq --arg k "$key" --argjson v "$value" '.authorize = ((.authorize // {}) | .[$k] = $v)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
-  printf '%s|orchestrator|%s|authorize|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$flag" "$value" >> "$d/events.log"
+  ev "$d" orchestrator "$flag" authorize allow "$value"
   echo "authorize $flag=$value — the guard honours it for this run"
 }
 
@@ -543,7 +559,7 @@ cmd_handoff_put() {
   cat > "$tmp" || die "could not read stdin"
   [ -s "$tmp" ] || { rm -f "$tmp"; die "empty handoff refused"; }
   mv "$tmp" "$d/handoffs/$name.md"
-  printf '%s|handoff-put|%s|handoff|allow|%s bytes\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name" "$(wc -c < "$d/handoffs/$name.md" | tr -d ' ')" >> "$d/events.log"
+  ev "$d" handoff-put "$name" handoff allow "$(wc -c < "$d/handoffs/$name.md" | tr -d ' ') bytes"
   echo "handoff stored: $d/handoffs/$name.md"
 }
 
@@ -837,7 +853,7 @@ cmd_budget() {
   [ "$hits" -gt 0 ] || die "no task or session '$who' in run ${1:-}"
   jq --arg w "$who" --argjson n "$n" '.tasks |= map(if .id == $w or .name == $w then .budget = $n else . end)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
   jq --arg w "$who" --argjson n "$n" 'map(if .taskId == $w or .name == $w then .budget = $n else . end)' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
-  printf '%s|orchestrator|%s|budget|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$who" "$n" >> "$d/events.log"
+  ev "$d" orchestrator "$who" budget allow "$n"
   echo "budget of $who: $n guarded calls — the guard honours it from the session's next call"
 }
 
@@ -848,7 +864,7 @@ cmd_pause() {
     jq -e --arg n "$who" 'map(select(.name == $n)) | length > 0' "$d/sessions.json" >/dev/null || jq -e --arg n "$who" '.tasks | map(select(.name == $n)) | length > 0' "$d/plan.json" >/dev/null || die "no session or task named '$who'"
     printf '%s\n' "$reason" > "$d/PAUSE-$who"
   fi
-  printf '%s|orchestrator|%s|pause|%s|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$who" "$who" "$reason" >> "$d/events.log"
+  ev "$d" orchestrator "$who" pause "$who" "$reason"
   echo "paused $who: $reason — now message the session what to do instead"
 }
 
@@ -856,7 +872,7 @@ cmd_resume() {
   local d; d=$(run_dir "${1:-}"); local who="${2:-}"
   [ -n "$who" ] || die "resume <run> <name|all>"
   if [ "$who" = all ]; then rm -f "$d/PAUSE"; else rm -f "$d/PAUSE-$who"; fi
-  printf '%s|orchestrator|%s|resume|%s|\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$who" "$who" >> "$d/events.log"
+  ev "$d" orchestrator "$who" resume "$who" ""
   echo "resumed $who"
 }
 
@@ -897,7 +913,7 @@ cmd_task() {
       jq --arg id "$id" --arg f "$field" --argjson v "$3" 'map(if .taskId == $id then .[$f] = $v else . end)' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
       echo "live sessions of $id carry the new $field" ;;
   esac
-  printf '%s|orchestrator|%s|task-%s|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${id:-new}" "$sub" "$field" >> "$d/events.log"
+  ev "$d" orchestrator "${id:-new}" "task-$sub" allow "$field"
 }
 
 cmd_paths() {
@@ -908,7 +924,7 @@ cmd_paths() {
   local globs; globs=$(printf '%s\n' "$@" | jq -R . | jq -sc .)
   jq --arg id "$id" --argjson g "$globs" '.tasks |= map(if .id == $id then (.pathsAllowed // []) as $p | .pathsAllowed = $p + ($g - $p) else . end)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
   jq --arg id "$id" --argjson g "$globs" 'map(if .taskId == $id then (.pathsAllowed // []) as $p | .pathsAllowed = $p + ($g - $p) else . end)' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
-  printf '%s|orchestrator|%s|paths|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$id" "$*" >> "$d/events.log"
+  ev "$d" orchestrator "$id" paths allow "$*"
   echo "paths of $id now: $(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .pathsAllowed | join(", ")' "$d/plan.json") — the guard honours them from the session's next call"
 }
 
@@ -919,12 +935,12 @@ cmd_cancel() {
   [ -f "$d/cancelled.json" ] || echo '[]' > "$d/cancelled.json"
   if [ "$note" = --undo ]; then
     jq --arg id "$id" 'map(select(.taskId != $id))' "$d/cancelled.json" > "$d/cancelled.tmp" && mv "$d/cancelled.tmp" "$d/cancelled.json"
-    printf '%s|orchestrator|%s|uncancel|allow|\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$id" >> "$d/events.log"
+    ev "$d" orchestrator "$id" uncancel allow ""
     echo "$id is back in the run"; return 0
   fi
   [ -n "$note" ] || die "cancel needs a reason: orch cancel <run> $who \"<why>\""
   jq --arg id "$id" --arg note "$note" --arg t "$(now)" 'map(select(.taskId != $id)) + [{taskId:$id, at:$t, note:$note}]' "$d/cancelled.json" > "$d/cancelled.tmp" && mv "$d/cancelled.tmp" "$d/cancelled.json"
-  printf '%s|orchestrator|%s|cancel|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$id" "$note" >> "$d/events.log"
+  ev "$d" orchestrator "$id" cancel allow "$note"
   echo "cancelled $id: $note — never ready, settled for close; its dependents stay blocked until you re-plan them (orch task set <id> dependsOn …)"
 }
 
@@ -943,7 +959,7 @@ cmd_stop() {
     claude stop "$id" >/dev/null 2>&1 || echo "note: claude stop $id failed; it may have stopped already" >&2
     n=$((n + 1))
   done
-  printf '%s|orchestrator|%s|stop|allow|%s sessions\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$who" "$n" >> "$d/events.log"
+  ev "$d" orchestrator "$who" stop allow "$n sessions"
   echo "stopped $n session(s) — worktrees stay; each handoff's 'Left running' says what the session left behind"
 }
 
@@ -969,6 +985,7 @@ cmd_approve() {
   local d; d=$(run_dir "${1:-}"); local stage="${2:-}" note="${3:-}"
   [ "$(jq -r '.mode // "single"' "$d/plan.json")" = staged ] || die "run ${1:-} is not staged; approve applies to mode staged"
   [ -n "$stage" ] || die "approve <run> <stage> \"<the user's words>\""
+  plain_name "$stage" || die "stage name '$stage' is not a plain name"
   jq -e --arg s "$stage" '(.stages // []) | index($s) != null' "$d/plan.json" >/dev/null || die "no stage '$stage'; stages: $(jq -r '.stages | join(", ")' "$d/plan.json")"
   local gate; gate=$(stage_gate "$d" "$stage")
   [ -z "$gate" ] || die "stage $gate comes first and is not approved yet"
@@ -976,7 +993,7 @@ cmd_approve() {
   [ -z "$open" ] || die "stage $stage has tasks not accepted: ${open}- accept or cancel them first"
   [ -n "$note" ] || die "approve needs the user's words: orch approve ${1:-} $stage \"<what the user said>\""
   jq --arg s "$stage" --arg note "$note" --arg t "$(now)" 'map(select(.stage != $s)) + [{stage:$s, at:$t, note:$note}]' "$d/approved.json" > "$d/approved.tmp" && mv "$d/approved.tmp" "$d/approved.json"
-  printf '%s|orchestrator|%s|approve|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$stage" "$note" >> "$d/events.log"
+  ev "$d" orchestrator "$stage" approve allow "$note"
   echo "stage $stage approved — orch ready shows what the next stage starts with"
 }
 
@@ -989,6 +1006,7 @@ section() { awk -v h="$2" '$0 == "## " h {f=1; next} /^## / && f {exit} f' "$1";
 cmd_stage_report() {
   local d; d=$(run_dir "${1:-}"); local stage="${2:-}"
   [ -n "$stage" ] || die "stage-report <run> <stage>"
+  plain_name "$stage" || die "stage name '$stage' is not a plain name"
   jq -e --arg s "$stage" '[.tasks[] | select(.stage == $s)] | length > 0' "$d/plan.json" >/dev/null || die "no task in stage '$stage'"
   local root out img agents='[]'
   root=$(cd "$(repo_root)" && pwd -P); out="$d/stages/$stage"; img="$out/img"
@@ -1138,7 +1156,7 @@ cmd_close() {
   done
   echo "session index: $dropped entries of this run removed"
   now > "$d/CLOSED"
-  printf '%s|orchestrator|%s|close|allow|%s refs checked, %s not contained\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1:-}" "$n" "$loose" >> "$d/events.log"
+  ev "$d" orchestrator "${1:-}" close allow "$n refs checked, $loose not contained"
   cmd_status "$1" --no-live
 }
 

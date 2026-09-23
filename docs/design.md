@@ -46,6 +46,10 @@ A background session starts every MCP server configured for the user and the rep
 
 OpenSpec structures specifications and runs no agents; this plugin runs agents and structures no specifications beyond a handoff. Where a repository uses it, the analyst writes into its format and the lead reads a change's `tasks.md` and scenarios into the task graph, rather than the plugin growing a spec format of its own.
 
+## Names and notes that reach the disk
+
+A security review (2026-09-23) of 0.6.0 found that a stage name became a path under `rm -rf` and that a note could carry a newline into `events.log`, where the guard counts `allow` lines as budget and a `nudge` line as the reminder given. Run and stage names are now plain single path components, and every event line goes through one helper that turns newlines and pipes into spaces. `orch stage-report` copies only images a handoff names from inside the repository and never a symlink; a session that swaps a file for a symlink between that check and the copy belongs to the class above.
+
 ## Known gaps
 
 - Quota exhaustion on the lead's model is not detected; fallback chains cover overload only.
