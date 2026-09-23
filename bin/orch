@@ -503,32 +503,22 @@ cmd_tools() {
   git rev-parse --git-dir >/dev/null 2>&1 || return 0
   local r; r=$(repo_root)
   echo
-  echo "MCP servers by scope (none starts with a session; a task's \"mcp\" list narrows which ones its helpers may start, default all):"
+  echo "MCP servers by scope (none starts with a session; by default its helpers may start the repo's, and user or local ones only when the task's \"mcp\" list names them):"
   echo "  repo (.mcp.json): $([ -f "$r/.mcp.json" ] && jq -r '(.mcpServers // {}) | keys | join(", ")' "$r/.mcp.json")"
   echo "  local: $([ -f "$CLAUDE_JSON" ] && jq -r --arg r "$r" '(.projects[$r].mcpServers // {}) | keys | join(", ")' "$CLAUDE_JSON")"
   echo "  user: $([ -f "$CLAUDE_JSON" ] && jq -r '(.mcpServers // {}) | keys | join(", ")' "$CLAUDE_JSON")"
   echo "A session starts a server by calling its helper agent, mcp-<server>; 'orch tools' itself reports the whole machine."
 }
 
-# all_mcp_names: every server configured in local scope, the repository's .mcp.json and user scope.
-all_mcp_names() {
-  local r repo='[]' loc='[]' usr='[]'; r=$(repo_root)
-  [ -f "$r/.mcp.json" ] && repo=$(jq -c '(.mcpServers // {}) | keys' "$r/.mcp.json")
-  if [ -f "$CLAUDE_JSON" ]; then
-    loc=$(jq -c --arg r "$r" '(.projects[$r].mcpServers // {}) | keys' "$CLAUDE_JSON")
-    usr=$(jq -c '(.mcpServers // {}) | keys' "$CLAUDE_JSON")
-  fi
-  jq -nc --argjson a "$repo" --argjson b "$loc" --argjson c "$usr" '$a + $b + $c | unique'
-}
-
 # task_mcp <task json>: the MCP servers a session may start on demand — a JSON array of names, or
-# "inherit". Default: every server configured for this machine and repository. None of them runs at
-# session start; every session starting every server is what drove a wave's load into the dozens.
+# "inherit". Default: the repository's .mcp.json, which the project declares for its own work and
+# keeps in git. User- and local-scope servers (mail, routers, cloud billing) carry personal
+# credentials and are reachable only when the task names them. None runs at session start.
 task_mcp() {
   case "$(jq -r '.mcp | type' <<<"$1")" in
     string) jq -r '.mcp' <<<"$1" ;;
     array) jq -c '.mcp' <<<"$1" ;;
-    *) all_mcp_names ;;
+    *) if [ -f "$(repo_root)/.mcp.json" ]; then jq -c '(.mcpServers // {}) | keys' "$(repo_root)/.mcp.json"; else echo '[]'; fi ;;
   esac
 }
 
@@ -550,6 +540,10 @@ mcp_launch() {
     '{mcpServers: (reduce $names[] as $n ({}; . + {($n): ($s.local[$n] // $repo[$n] // $s.user[$n])}))}')
   missing=$(jq -r '.mcpServers | to_entries[] | select(.value == null) | .key' <<<"$out" | tr '\n' ' ')
   [ -z "$missing" ] || die "MCP server not configured in local scope, .mcp.json or user scope: $missing"
+  # --agents takes JSON on the command line (a file only with --print), so these definitions are
+  # visible to ps on this machine; say so for any that carry env or headers.
+  local exposed; exposed=$(jq -r '.mcpServers | to_entries[] | select((.value.env // {} | length) > 0 or (.value.headers // {} | length) > 0) | .key' <<<"$out" | tr '\n' ' ')
+  [ -z "$exposed" ] || echo "note: the definitions of ${exposed}carry env or headers and reach the session as a command-line argument, visible to ps on this machine; prefer servers that read their keys from the environment" >&2
   mkdir -p "$d/mcp"
   (umask 077; printf '{"mcpServers":{}}\n' > "$d/mcp/$name.json")
   rm -f "$f"

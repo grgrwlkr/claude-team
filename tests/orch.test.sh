@@ -277,7 +277,7 @@ expect_grep '--model fable --fallback-model opus' "$TMP_BASE/claude.calls" "expl
 echo "# wave 4: run r4"
 ROOT_REAL=$(pwd -P)
 export ORCH_CLAUDE_JSON="$TMP_BASE/claude.json"
-jq -n --arg r "$ROOT_REAL" '{mcpServers:{userA:{command:"a"}, "playwright-local":{command:"p"}}, projects:{($r):{mcpServers:{localC:{command:"c"}}}}}' > "$ORCH_CLAUDE_JSON"
+jq -n --arg r "$ROOT_REAL" '{mcpServers:{userA:{command:"a", env:{TOKEN:"t"}}, "playwright-local":{command:"p"}}, projects:{($r):{mcpServers:{localC:{command:"c"}}}}}' > "$ORCH_CLAUDE_JSON"
 echo '{"mcpServers":{"repoB":{"command":"b"}}}' > .mcp.json
 expect_exit 0 "init r4" "$ORCH" init r4 --base main
 "$ORCH" acceptance r4 off > /dev/null
@@ -306,13 +306,14 @@ jq -r '."mcp-userA".mcpServers[0].userA.command' .orchestrator/r4/mcp/d4.agents.
 expect_grep '^a$' "$TMP_BASE/keys" "the helper carries the server's own definition"
 ls -l .orchestrator/r4/mcp/d4.agents.json > "$TMP_BASE/perm"
 expect_grep '^-rw-------' "$TMP_BASE/perm" "the helper file is private: server definitions may carry keys"
+expect_grep 'command-line argument' "$TMP_BASE/err" "a named server whose definition carries env is flagged: it travels in argv"
 expect_exit 0 "researcher inherits the machine's MCP set" "$ORCH" spawn r4 docs --dry-run
 expect_no_grep 'strict-mcp-config' "$TMP_BASE/out" "inherit means no MCP flags"
 printf '# d4\n## Status\ndone\n## Branch\nw1 at 0000000\n' > "$TMP_BASE/h-d4.md"
 expect_exit 0 "developer hands off" sh -c "'$ORCH' handoff-put r4 d4 < '$TMP_BASE/h-d4.md'"
-expect_exit 0 "a task without a list may start any configured server" "$ORCH" spawn r4 run --dry-run
+expect_exit 0 "a task without a list gets the repository's servers" "$ORCH" spawn r4 run --dry-run
 jq -r 'keys | join(",")' .orchestrator/r4/mcp/test-4.agents.json > "$TMP_BASE/keys"
-expect_grep '^mcp-localC,mcp-playwright-local,mcp-repoB,mcp-userA$' "$TMP_BASE/keys" "local, repository and user scopes, one helper each"
+expect_grep '^mcp-repoB$' "$TMP_BASE/keys" "only .mcp.json by default: user and local servers carry personal credentials and need naming"
 expect_exit 0 "tester brief" "$ORCH" brief r4 run
 expect_grep 'MCP servers start on demand' "$TMP_BASE/out" "the brief says how servers start"
 expect_grep 'mcp-repoB' "$TMP_BASE/out" "and names the helpers"
