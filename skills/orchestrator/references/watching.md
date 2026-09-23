@@ -8,6 +8,7 @@ The lead's job after a spawn is to wait cheaply and judge sharply. Nothing here 
 - `notify_when_idle` is a cheap extra alarm, not the signal. Subscribe **once, after the session's `STARTED` arrives**, and never re-subscribe to the same session: subscribing to an already-idle session fires immediately and replays the old turn, so a loop of resubscribes wakes you forever while the teammate is merely waiting on its own background command. `SendMessage` requires `message`; for a pure subscription pass `message: ""`.
 - On a wake-up with no `DONE`/`BLOCKED` message: check `orch status` once. If the session is `working` or its handoff is `none`, end your turn without re-subscribing.
 - A message to a session running in another permission mode can sit queued without waking it (seen in a run; not documented by Claude Code). If a message gets no reaction, send it once more, and keep every session on one mode with `ORCH_PERMISSION_MODE`.
+- If `SendMessage` refuses a name because several sessions carry it (`N agents are named …`), run `ListAgents` and resend to `<name> [ref]` of the row marked `bg`; the others are offline Remote Control mirrors or sessions of earlier runs. Team sessions start without Remote Control for this reason; a name reused from an earlier run still collides with that run's leftover mirrors.
 - Do not `sleep`, do not re-run `orch status` in a loop. The user sees everything in `claude agents` anyway.
 
 ## On every wake-up
