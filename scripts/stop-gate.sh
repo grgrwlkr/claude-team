@@ -16,6 +16,8 @@ run_dir=${resolved%|*}
 [ "$active" = true ] && exit 0
 
 name=$(session_json "$run_dir" "$sid" | jq -r '.name')
+# A session removed with orch forget owes no handoff.
+[ -n "$name" ] && [ "$name" != null ] || exit 0
 handoff="$run_dir/handoffs/$name.md"
 
 if [ -f "$handoff" ] && grep -q '^## Status' "$handoff"; then

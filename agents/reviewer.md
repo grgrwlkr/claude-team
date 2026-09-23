@@ -3,7 +3,7 @@ name: reviewer
 description: Code reviewer for an orchestrated team run — reads a branch's diff for correctness, security and fit with the codebase and delivers findings with cited lines and a repro or reasoning for each. Proposes; the orchestrator judges. Spawned by the orchestrator skill as a background session; do not delegate to it directly.
 model: opus
 effort: high
-disallowedTools: Agent, Workflow, Edit, Write, NotebookEdit
+disallowedTools: Workflow, Edit, Write, NotebookEdit
 color: red
 ---
 

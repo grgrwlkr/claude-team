@@ -16,6 +16,13 @@ resolved=$(resolve_run "$cwd" "$sid") || exit 0
 run_dir=${resolved%|*}
 in_repo=${resolved##*|}
 rec=$(session_json "$run_dir" "$sid")
+if [ -z "$rec" ] || [ "$rec" = null ]; then
+  # Removed from the run with orch forget and still running: held, never set free.
+  gone=$(jq -r --arg s "$sid" "$MINE"' first(.[] | select(mine($s)) | .name) // "unknown"' "$run_dir/forgotten.json" 2>/dev/null)
+  log_event "$run_dir" "$sid" "${gone:-unknown}" "$tool" block "forgotten session"
+  printf 'orchestrator guard: this session (%s) was removed from run %s with orch forget and may not act in it any more; stop here.\n' "${gone:-unknown}" "$(basename "$run_dir")" >&2
+  exit 2
+fi
 name=$(jq -r '.name' <<<"$rec")
 role=$(jq -r '.role' <<<"$rec")
 budget=$(jq -r '.budget // 0' <<<"$rec")
@@ -147,7 +154,7 @@ case "$tool" in
       # shellcheck disable=SC2053  # the glob must stay unquoted to act as a pattern
       if [[ "$rel" == $pat ]]; then ok=1; break; fi
     done < <(jq -r '.pathsAllowed[]?' <<<"$rec")
-    [ "$ok" -eq 1 ] || block "path $rel is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it."
+    [ "$ok" -eq 1 ] || block "path $rel is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it: it grants a path with orch paths $(basename "$run_dir") $name add <glob>, never by editing sessions.json."
     allow "$rel"
     ;;
   Bash)
@@ -166,8 +173,8 @@ case "$tool" in
         case "$sub" in
           handoff-put)
             [ "$arg2" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${arg2:-<missing>}; run is $_run" ;;
-          handoff|status|events|ready|doctor|tools) ;;
-          *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools" ;;
+          handoff|status|events|ready|doctor|tools|architecture) ;;
+          *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools, architecture" ;;
         esac
       done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^.*orch +//')
     fi
@@ -220,6 +227,16 @@ case "$tool" in
       fi
     fi
     allow "$(printf '%s' "$cmd" | cut -c1-120)"
+    ;;
+  Agent|Task)
+    # A team session starts no subagent but the MCP helpers orch spawn gave this very session:
+    # the names in its helper file, not anything that merely looks like one.
+    st=$(jq -r '.tool_input.subagent_type // empty' <<<"$input")
+    helpers="$run_dir/mcp/$name.agents.json"
+    if [ -n "$st" ] && [ -f "$helpers" ] && jq -e --arg s "$st" 'has($s)' "$helpers" >/dev/null 2>&1; then
+      allow "helper $st"
+    fi
+    block "a team session starts only the MCP helper agents orch spawn gave it (listed in your brief), not ${st:-a general-purpose agent}; ask a teammate instead"
     ;;
   *)
     allow

@@ -3,7 +3,7 @@ name: researcher
 description: Researcher for an orchestrated team run — answers questions about the outside world (library and API behaviour, versions, standards, prices, rules) from live sources with verbatim quotes, and stages the findings in a file for the analyst and developer. Spawned by the orchestrator skill as a background session; do not delegate to it directly.
 model: opus
 effort: high
-disallowedTools: Agent, Workflow
+disallowedTools: Workflow
 color: cyan
 ---
 

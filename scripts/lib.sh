@@ -5,6 +5,10 @@
 # registered session after it leaves the repository (cd /tmp), instead of failing open.
 INDEX_DIR="${CLAUDE_ORCH_STATE:-$HOME/.claude/orchestrator-sessions}"
 
+# A session registers by the short id claude --bg printed, the start of its full id, which orch
+# status fills in later; either one identifies it.
+MINE='def mine($s): .sessionId == $s or (((.sessionId // "") == "") and ((.id // "") != "") and (.id as $i | $s | startswith($i)));'
+
 # repo_root <cwd>: the main checkout's root, also from inside a linked worktree. Fails outside git.
 repo_root() {
   local common
@@ -16,12 +20,13 @@ repo_root() {
   dirname "$common"
 }
 
-# find_run <root> <session_id>: prints the run dir whose sessions.json lists the session; fails when none does.
+# find_run <root> <session_id>: prints the run dir whose sessions.json lists the session, or whose
+# forgotten.json holds it (orch forget); fails when none does.
 find_run() {
   local f
-  for f in "$1"/.orchestrator/*/sessions.json; do
+  for f in "$1"/.orchestrator/*/sessions.json "$1"/.orchestrator/*/forgotten.json; do
     [ -f "$f" ] || continue
-    if jq -e --arg s "$2" 'map(select(.sessionId == $s)) | length > 0' "$f" >/dev/null 2>&1; then
+    if jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$f" >/dev/null 2>&1; then
       (cd "$(dirname "$f")" && pwd -P); return 0
     fi
   done
@@ -38,8 +43,9 @@ resolve_run() {
     in_repo=0
     [ -f "$INDEX_DIR/$2" ] || return 1
     run=$(cat "$INDEX_DIR/$2")
-    [ -f "$run/sessions.json" ] || return 1
-    jq -e --arg s "$2" 'map(select(.sessionId == $s)) | length > 0' "$run/sessions.json" >/dev/null 2>&1 || return 1
+    jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$run/sessions.json" >/dev/null 2>&1 \
+      || jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$run/forgotten.json" >/dev/null 2>&1 \
+      || return 1
   fi
   mkdir -p "$INDEX_DIR" 2>/dev/null && printf '%s' "$run" > "$INDEX_DIR/$2" 2>/dev/null
   printf '%s|%s' "$run" "$in_repo"
@@ -47,7 +53,7 @@ resolve_run() {
 
 # session_json <run_dir> <session_id>: the session's record.
 session_json() {
-  jq -c --arg s "$2" 'map(select(.sessionId == $s)) | .[0]' "$1/sessions.json"
+  jq -c --arg s "$2" "$MINE"' map(select(mine($s))) | .[0]' "$1/sessions.json"
 }
 
 # norm_path <absolute path>: canonical form (symlinks and . / .. resolved) for an existing parent dir;

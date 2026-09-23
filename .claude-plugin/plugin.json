@@ -5,6 +5,6 @@
     "name": "grgrwlkr"
   },
   "homepage": "https://github.com/grgrwlkr/claude-team#readme",
-  "version": "0.5.1",
+  "version": "0.7.1",
   "keywords": ["orchestration", "multi-agent", "background-sessions", "worktrees", "team"]
 }

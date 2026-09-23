@@ -40,13 +40,18 @@ You can attach to any session (`claude agents`, `Enter`), message any of them, o
 | analyst | `docs/specs/**` | spec with testable acceptance criteria, plan, docs after implementation |
 | developer | its task's source and test paths | code on its branch, tests with the three runs shown, draft PR |
 | designer | `docs/design/**`, `design/`, `assets/` | design brief, tokens, states, assets; self-contained guidance for UI, game HUD, graphics, 3D |
-| qa | test paths | test cases, automated tests, coverage matrix per criterion, proposed verdict |
+| architect (optional) | `docs/architecture/**` | the architecture map — modules, dependency graphs, coupling, data flow — built once and kept current; the change's design; answers structure questions |
+| qa | its cases' paths, per developer task | TDD cases before the code, then an audit for skipped, weakened or hollow tests and runs that were never real |
+| qa-lead | acceptance test paths | acceptance tests for the whole change right after the spec; at the end runs them on the integrated result and proposes the verdict |
+| design-reviewer | nothing (read-only) | compares the running implementation with the designer's brief and tokens by screenshots, in rounds |
 | tester | nothing (read-only; evidence in its worktree's `.scratch/evidence/`) | runs the app from the branch, exercises every criterion as a user would with the means the machine has, hands over screenshots, recordings and transcripts per criterion; re-runs each round |
 | reviewer | nothing (read-only) | findings with cited lines, severity, confidence; re-reviews each round until clean |
 | integrator | integration branch | dependency-ordered merges, green suite, version and changelog; the only role allowed to merge into the base branch |
 | researcher | `docs/research/**` | facts from live sources with verbatim quotes and dates |
 
-All roles run on Opus at effort `high` (per-task override in the plan). Roles never spawn subagents or workflows; they ask a teammate.
+All roles run on Opus at effort `high` (per-task override in the plan). Roles spawn no workflows and no subagents but the `mcp-<server>` helpers that start an MCP server on demand; for anything else they ask a teammate.
+
+A run is one pass or staged: with `"mode": "staged"` the lead stops after every stage (architecture, spec, each development stage), shows a page of the stage's handoffs and screenshots (`orch stage-report`), and opens the next stage only on your word (`orch approve`).
 
 ## How they talk
 
@@ -66,7 +71,7 @@ The plugin's `PreToolUse` hook watches every session registered in a run and blo
 - `git push --force`, `git reset --hard`, `git branch -D`, `git clean -f`, `sudo`, `curl … | sh`, `rm -r` on absolute paths;
 - pushing the base branch, and deleting branches or worktrees, unless the plan authorizes it and the session is the integrator; checkout of, or commits on, the base branch by anyone but the integrator;
 - package installs (`brew`, `apt`, `npm -g`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless the plan authorizes `install-tools`; a project-local `npm install` passes;
-- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `budget`, `task`, `paths`, `cancel`, `stop`, `cost`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`;
+- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `budget`, `task`, `paths`, `grant`, `cancel`, `stop`, `forget`, `cost`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`;
 - `claude stop|rm|kill|respawn` — sessions never stop each other;
 - every Bash/Edit/Write and MCP tool call while the lead has paused the session or the run (`orch pause`); reading and messaging keep working;
 - every Bash/Edit/Write and MCP tool call past the task's tool-call budget — the passive brake against drift. A tester drives a browser through MCP tools, so those calls are held and counted like the rest; `orch status` marks a session with `!` from 80%, and `orch budget` changes a live session's budget.
@@ -81,7 +86,7 @@ The `Stop` hook refuses to let a registered session go idle without a handoff. B
 
 ## MCP servers and cost
 
-Each session starts only the MCP servers its task's `mcp` list names, through `--mcp-config` and `--strict-mcp-config`; a tester defaults to the repository's `.mcp.json`, every other role to none, and `"mcp": "inherit"` keeps the machine's full set. A wave where every session started every configured server drove a machine's load average past 60. `orch tools` lists the servers by scope. `orch cost <run>` sums the tokens of each session from its transcript, counting each message once — the transcript repeats a message's usage on several lines, and a naive sum reads about double.
+No session starts with an MCP server running: `orch spawn` launches it with an empty `--mcp-config` and `--strict-mcp-config`, and passes one helper agent per server through `--agents`. A session that needs a browser calls `mcp-playwright` (or whichever server it needs) with a self-contained task; the server starts with that helper and stops when it answers. By default a session may start the repository's `.mcp.json` servers; user- and local-scope servers, which carry personal credentials, only when the task's `mcp` list names them (`[]` allows none); `"mcp": "inherit"` starts the machine's full set at launch. A wave where every session started every configured server drove a machine's load average past 60. `orch tools` lists the servers by scope. `orch cost <run>` sums the tokens of each session from its transcript, counting each message once — the transcript repeats a message's usage on several lines, and a naive sum reads about double.
 
 ## Run directory
 

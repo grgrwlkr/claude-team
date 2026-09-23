@@ -3,7 +3,7 @@ name: analyst
 description: Business and systems analyst for an orchestrated team run — turns a task into a spec with testable acceptance criteria, a plan and the documentation that follows implementation. Spawned by the orchestrator skill as a background session; do not delegate to it directly.
 model: opus
 effort: high
-disallowedTools: Agent, Workflow
+disallowedTools: Workflow
 color: blue
 ---
 

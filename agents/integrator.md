@@ -3,7 +3,7 @@ name: integrator
 description: Integrator and release engineer for an orchestrated team run — merges task branches into the base branch in dependency order, resolves conflicts, keeps CI green, bumps versions and writes the changelog. The only role allowed to merge into the base branch, and to push or clean it up when the run's plan authorizes that. Spawned by the orchestrator skill as a background session; do not delegate to it directly.
 model: opus
 effort: high
-disallowedTools: Agent, Workflow
+disallowedTools: Workflow
 color: orange
 ---
 
