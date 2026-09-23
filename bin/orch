@@ -980,7 +980,9 @@ cmd_cancel() {
 }
 
 # cmd_forget: a run moved to another machine keeps the records of sessions that machine does not
-# run, and orch ready never offers a task that has one. Handoffs, worktrees and branches stay.
+# run, and orch ready never offers a task that has one. Handoffs, worktrees and branches stay. A
+# forgotten session goes to forgotten.json, where the guard still finds it and refuses its every
+# call: forgetting a session that is still alive holds it rather than setting it free.
 cmd_forget() {
   local d; d=$(run_dir "${1:-}"); local who="${2:-}" gone
   [ -n "$who" ] || die "forget <run> <name|--dead>"
@@ -995,15 +997,10 @@ cmd_forget() {
   fi
   [ "$(jq 'length' <<<"$gone")" -gt 0 ] || { echo "every session of run ${1:-} runs on this machine"; return 0; }
   lock_run "$d"
+  [ -f "$d/forgotten.json" ] || echo '[]' > "$d/forgotten.json"
+  jq --argjson g "$gone" '. + $g' "$d/forgotten.json" > "$d/forgotten.tmp" && mv "$d/forgotten.tmp" "$d/forgotten.json"
   jq --argjson g "$gone" '[.[] | select(.name as $n | ($g | map(.name) | index($n)) == null)]' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
   unlock_run "$d"
-  local id f real; real=$(cd "$d" && pwd -P)
-  for id in $(jq -r '.[].id' <<<"$gone"); do
-    for f in "$INDEX_DIR/$id"*; do
-      [ -f "$f" ] || continue
-      case "$(cat "$f")" in "$d"|"$real") rm -f "$f" ;; esac
-    done
-  done
   ev "$d" orchestrator "$who" forget allow "$(jq -r 'map(.name) | join(" ")' <<<"$gone")"
   echo "forgot $(jq -r 'map(.name) | join(", ")' <<<"$gone") — their tasks can be spawned again; handoffs, worktrees and branches stay"
 }

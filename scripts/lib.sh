@@ -20,10 +20,11 @@ repo_root() {
   dirname "$common"
 }
 
-# find_run <root> <session_id>: prints the run dir whose sessions.json lists the session; fails when none does.
+# find_run <root> <session_id>: prints the run dir whose sessions.json lists the session, or whose
+# forgotten.json holds it (orch forget); fails when none does.
 find_run() {
   local f
-  for f in "$1"/.orchestrator/*/sessions.json; do
+  for f in "$1"/.orchestrator/*/sessions.json "$1"/.orchestrator/*/forgotten.json; do
     [ -f "$f" ] || continue
     if jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$f" >/dev/null 2>&1; then
       (cd "$(dirname "$f")" && pwd -P); return 0
@@ -42,8 +43,9 @@ resolve_run() {
     in_repo=0
     [ -f "$INDEX_DIR/$2" ] || return 1
     run=$(cat "$INDEX_DIR/$2")
-    [ -f "$run/sessions.json" ] || return 1
-    jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$run/sessions.json" >/dev/null 2>&1 || return 1
+    jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$run/sessions.json" >/dev/null 2>&1 \
+      || jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$run/forgotten.json" >/dev/null 2>&1 \
+      || return 1
   fi
   mkdir -p "$INDEX_DIR" 2>/dev/null && printf '%s' "$run" > "$INDEX_DIR/$2" 2>/dev/null
   printf '%s|%s' "$run" "$in_repo"

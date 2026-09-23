@@ -16,6 +16,13 @@ resolved=$(resolve_run "$cwd" "$sid") || exit 0
 run_dir=${resolved%|*}
 in_repo=${resolved##*|}
 rec=$(session_json "$run_dir" "$sid")
+if [ -z "$rec" ] || [ "$rec" = null ]; then
+  # Removed from the run with orch forget and still running: held, never set free.
+  gone=$(jq -r --arg s "$sid" "$MINE"' first(.[] | select(mine($s)) | .name) // "unknown"' "$run_dir/forgotten.json" 2>/dev/null)
+  log_event "$run_dir" "$sid" "${gone:-unknown}" "$tool" block "forgotten session"
+  printf 'orchestrator guard: this session (%s) was removed from run %s with orch forget and may not act in it any more; stop here.\n' "${gone:-unknown}" "$(basename "$run_dir")" >&2
+  exit 2
+fi
 name=$(jq -r '.name' <<<"$rec")
 role=$(jq -r '.role' <<<"$rec")
 budget=$(jq -r '.budget // 0' <<<"$rec")

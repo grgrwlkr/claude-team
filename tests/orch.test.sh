@@ -604,6 +604,8 @@ expect_exit 0 "forget by name" "$ORCH" forget r7 qa-7
 jq -r 'length' .orchestrator/r7/sessions.json > "$TMP_BASE/v"
 expect_grep '^0$' "$TMP_BASE/v" "no session left"
 expect_exit 1 "forget refuses an unknown name" "$ORCH" forget r7 nobody
+jq -r '[.[].name] | sort | join(",")' .orchestrator/r7/forgotten.json > "$TMP_BASE/v"
+expect_grep '^d7,qa-7$' "$TMP_BASE/v" "forgotten sessions are kept as tombstones the guard holds"
 expect_exit 0 "grant is paths add" "$ORCH" grant r7 d7 'lib/**'
 jq -r '.tasks[] | select(.id == "impl") | .pathsAllowed | join(",")' .orchestrator/r7/plan.json > "$TMP_BASE/v"
 expect_grep 'lib/\*\*' "$TMP_BASE/v" "the grant reached the plan"

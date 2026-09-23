@@ -191,6 +191,13 @@ jq '. + [{"taskId":"impl","name":"dev-x","role":"developer","id":"cccc3333","ses
 expect_exit 2 "an edit outside its paths is refused" bash "$GUARD" <<< "$(hook_input cccc3333-1111-4222-8333-444455556666 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"
 expect_grep 'orch paths' "$TMP_BASE/err" "the refusal names the command that grants a path"
 expect_exit 0 "an edit inside its paths passes" bash "$GUARD" <<< "$(hook_input cccc3333-1111-4222-8333-444455556666 "$WT" Edit '{"file_path":"'"$WT"'/src/a.ts"}')"
+echo "# security review: a forgotten session is held, not released"
+echo '[{"taskId":"impl","name":"dev-gone","role":"developer","id":"eeee5555","sessionId":"eeee5555-0000-4000-8000-000000000000"}]' > "$RUN/forgotten.json"
+expect_exit 2 "a forgotten session may not act" bash "$GUARD" <<< "$(hook_input eeee5555-0000-4000-8000-000000000000 "$WT" Bash '{"command":"ls"}')"
+expect_grep 'orch forget' "$TMP_BASE/err" "and is told why"
+expect_exit 0 "a forgotten session may stop" bash "$STOP" <<< "$(printf '{"session_id":"eeee5555-0000-4000-8000-000000000000","cwd":"%s","stop_hook_active":false}' "$WT")"
+expect_exit 2 "a session may not run orch forget" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch forget r1 dev-1")"
+rm "$RUN/forgotten.json"
 expect_exit 0 "an unregistered session stays unguarded" bash "$GUARD" <<< "$(hook_input dddd4444-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"
 
 echo "# stop gate"

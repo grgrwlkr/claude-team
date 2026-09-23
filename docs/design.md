@@ -52,7 +52,7 @@ A security review (2026-09-23) of 0.6.0 found that a stage name became a path un
 
 ## Sessions register by their short id
 
-`claude --bg` prints an 8-character id, the start of the session's full id. `orch spawn` used to poll `claude agents --json` until the full id appeared, and under a load average near 100 each poll took seconds, so a wave spent minutes per session. Now a session is registered by the short id at once, the guard recognises it by that prefix, `orch status` fills in the full id when it next lists the agents, and the sessions of a wave launch in parallel with `sessions.json` written under a lock. Two sessions of one run whose full ids share their first 8 characters would confuse the guard; the odds are 1 in 4 billion per pair.
+`claude --bg` prints an 8-character id, the start of the session's full id. `orch spawn` used to poll `claude agents --json` until the full id appeared, and under a load average near 100 each poll took seconds, so a wave spent minutes per session. Now a session is registered by the short id at once, the guard recognises it by that prefix, `orch status` fills in the full id when it next lists the agents, and the sessions of a wave launch in parallel with `sessions.json` written under a lock. Two sessions of one run whose full ids share their first 8 characters would confuse the guard; the odds are 1 in 4 billion per pair. `orch forget` moves a record to `forgotten.json` rather than deleting it: a security review (2026-09-24) pointed out that forgetting a session still alive would take it out of the guard's sight, so the guard now finds forgotten sessions and refuses their every call.
 
 ## Known gaps
 
