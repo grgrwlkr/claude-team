@@ -293,25 +293,35 @@ cat > "$TMP_BASE/r4.json" <<'JSON'
 JSON
 expect_exit 0 "plan r4" "$ORCH" plan r4 "$TMP_BASE/r4.json"
 
-echo "# wave 4: each session gets only the MCP servers its task names"
+echo "# every session starts without MCP servers and starts one on demand through a helper agent"
 expect_exit 0 "developer spawn with an MCP list" "$ORCH" spawn r4 impl --dry-run
 expect_grep '--strict-mcp-config' "$TMP_BASE/out" "strict MCP config on"
 expect_grep '--mcp-config [^ ]*mcp/d4.json' "$TMP_BASE/out" "the session's own MCP config file"
-jq -r '.mcpServers | keys | join(",")' .orchestrator/r4/mcp/d4.json > "$TMP_BASE/keys"
-expect_grep '^userA$' "$TMP_BASE/keys" "the developer gets exactly the user-scope server it names"
-ls -l .orchestrator/r4/mcp/d4.json > "$TMP_BASE/perm"
-expect_grep '^-rw-------' "$TMP_BASE/perm" "the config file is private: server definitions may carry keys"
+jq -r '.mcpServers | length' .orchestrator/r4/mcp/d4.json > "$TMP_BASE/keys"
+expect_grep '^0$' "$TMP_BASE/keys" "the session starts with no MCP server at all"
+expect_grep '--agents @[^ ]*mcp/d4.agents.json' "$TMP_BASE/out" "helper agents are passed with --agents"
+jq -r 'keys | join(",")' .orchestrator/r4/mcp/d4.agents.json > "$TMP_BASE/keys"
+expect_grep '^mcp-userA$' "$TMP_BASE/keys" "one helper per server the task may use"
+jq -r '."mcp-userA".mcpServers[0].userA.command' .orchestrator/r4/mcp/d4.agents.json > "$TMP_BASE/keys"
+expect_grep '^a$' "$TMP_BASE/keys" "the helper carries the server's own definition"
+ls -l .orchestrator/r4/mcp/d4.agents.json > "$TMP_BASE/perm"
+expect_grep '^-rw-------' "$TMP_BASE/perm" "the helper file is private: server definitions may carry keys"
 expect_exit 0 "researcher inherits the machine's MCP set" "$ORCH" spawn r4 docs --dry-run
 expect_no_grep 'strict-mcp-config' "$TMP_BASE/out" "inherit means no MCP flags"
 printf '# d4\n## Status\ndone\n## Branch\nw1 at 0000000\n' > "$TMP_BASE/h-d4.md"
 expect_exit 0 "developer hands off" sh -c "'$ORCH' handoff-put r4 d4 < '$TMP_BASE/h-d4.md'"
-expect_exit 0 "tester spawn defaults to the repository's .mcp.json" "$ORCH" spawn r4 run --dry-run
-jq -r '.mcpServers | keys | join(",")' .orchestrator/r4/mcp/test-4.json > "$TMP_BASE/keys"
-expect_grep '^repoB$' "$TMP_BASE/keys" "the tester gets the repository's servers, not the user's"
+expect_exit 0 "a task without a list may start any configured server" "$ORCH" spawn r4 run --dry-run
+jq -r 'keys | join(",")' .orchestrator/r4/mcp/test-4.agents.json > "$TMP_BASE/keys"
+expect_grep '^mcp-localC,mcp-playwright-local,mcp-repoB,mcp-userA$' "$TMP_BASE/keys" "local, repository and user scopes, one helper each"
 expect_exit 0 "tester brief" "$ORCH" brief r4 run
-expect_grep 'MCP servers you have: repoB' "$TMP_BASE/out" "the tester brief names the servers it really has"
+expect_grep 'MCP servers start on demand' "$TMP_BASE/out" "the brief says how servers start"
+expect_grep 'mcp-repoB' "$TMP_BASE/out" "and names the helpers"
+expect_exit 0 "a task can be given none" "$ORCH" task set r4 rev mcp '[]'
 expect_exit 0 "reviewer brief" "$ORCH" brief r4 rev
-expect_grep 'MCP servers: none' "$TMP_BASE/out" "a role without a list gets none, and is told so"
+expect_grep 'MCP servers: none' "$TMP_BASE/out" "a task given none is told so"
+expect_exit 0 "reviewer spawn with none" "$ORCH" spawn r4 rev --dry-run
+expect_grep '--strict-mcp-config' "$TMP_BASE/out" "none still starts strict"
+expect_no_grep '--agents' "$TMP_BASE/out" "and with no helpers"
 
 echo "# wave 4: orch tools shows MCP servers by scope"
 expect_exit 0 "tools" "$ORCH" tools
@@ -333,8 +343,8 @@ expect_exit 1 "task set refuses an unknown task" "$ORCH" task set r4 nosuch budg
 expect_exit 1 "task set refuses a value that is not JSON" "$ORCH" task set r4 extra budget seven
 expect_exit 0 "task set can name the servers" "$ORCH" task set r4 impl mcp '["localC"]'
 expect_exit 0 "developer spawn after the change" "$ORCH" spawn r4 impl --dry-run
-jq -r '.mcpServers | keys | join(",")' .orchestrator/r4/mcp/d4.json > "$TMP_BASE/keys"
-expect_grep '^localC$' "$TMP_BASE/keys" "local-scope servers resolve too"
+jq -r 'keys | join(",")' .orchestrator/r4/mcp/d4.agents.json > "$TMP_BASE/keys"
+expect_grep '^mcp-localC$' "$TMP_BASE/keys" "local-scope servers resolve too"
 expect_exit 0 "task set to a missing server" "$ORCH" task set r4 impl mcp '["nope"]'
 expect_exit 1 "spawn refuses a server nobody configured" "$ORCH" spawn r4 impl --dry-run
 expect_grep 'nope' "$TMP_BASE/err" "the refusal names the server"

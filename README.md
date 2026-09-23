@@ -49,7 +49,7 @@ You can attach to any session (`claude agents`, `Enter`), message any of them, o
 | integrator | integration branch | dependency-ordered merges, green suite, version and changelog; the only role allowed to merge into the base branch |
 | researcher | `docs/research/**` | facts from live sources with verbatim quotes and dates |
 
-All roles run on Opus at effort `high` (per-task override in the plan). Roles never spawn subagents or workflows; they ask a teammate.
+All roles run on Opus at effort `high` (per-task override in the plan). Roles spawn no workflows and no subagents but the `mcp-<server>` helpers that start an MCP server on demand; for anything else they ask a teammate.
 
 A run is one pass or staged: with `"mode": "staged"` the lead stops after every stage (architecture, spec, each development stage), shows a page of the stage's handoffs and screenshots (`orch stage-report`), and opens the next stage only on your word (`orch approve`).
 
@@ -86,7 +86,7 @@ The `Stop` hook refuses to let a registered session go idle without a handoff. B
 
 ## MCP servers and cost
 
-Each session starts only the MCP servers its task's `mcp` list names, through `--mcp-config` and `--strict-mcp-config`; a tester defaults to the repository's `.mcp.json`, every other role to none, and `"mcp": "inherit"` keeps the machine's full set. A wave where every session started every configured server drove a machine's load average past 60. `orch tools` lists the servers by scope. `orch cost <run>` sums the tokens of each session from its transcript, counting each message once — the transcript repeats a message's usage on several lines, and a naive sum reads about double.
+No session starts with an MCP server running: `orch spawn` launches it with an empty `--mcp-config` and `--strict-mcp-config`, and passes one helper agent per server through `--agents`. A session that needs a browser calls `mcp-playwright` (or whichever server it needs) with a self-contained task; the server starts with that helper and stops when it answers. A task's `mcp` list narrows the servers it may start (default all, `[]` none); `"mcp": "inherit"` starts the machine's full set at launch. A wave where every session started every configured server drove a machine's load average past 60. `orch tools` lists the servers by scope. `orch cost <run>` sums the tokens of each session from its transcript, counting each message once — the transcript repeats a message's usage on several lines, and a naive sum reads about double.
 
 ## Run directory
 

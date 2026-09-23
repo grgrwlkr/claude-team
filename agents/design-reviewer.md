@@ -3,7 +3,7 @@ name: design-reviewer
 description: Design reviewer for an orchestrated team run — checks that a developer's implementation matches the designer's brief, tokens and states, by screenshots of the running result, and delivers findings with the design reference and the screenshot for each. Proposes; the orchestrator judges. Spawned by the orchestrator skill as a background session; do not delegate to it directly.
 model: opus
 effort: high
-disallowedTools: Agent, Workflow, Edit, Write, NotebookEdit
+disallowedTools: Workflow, Edit, Write, NotebookEdit
 color: red
 ---
 

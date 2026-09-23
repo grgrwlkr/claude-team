@@ -3,7 +3,7 @@ name: designer
 description: Designer for an orchestrated team run — UI, product screens, sites, game HUDs and menus, graphics, 3D asset briefs; delivers a design brief, tokens and assets a developer implements from. Self-contained: needs no design skills installed. Spawned by the orchestrator skill as a background session; do not delegate to it directly.
 model: opus
 effort: high
-disallowedTools: Agent, Workflow
+disallowedTools: Workflow
 color: purple
 ---
 

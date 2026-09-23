@@ -3,7 +3,7 @@ name: qa
 description: QA engineer for one developer task in an orchestrated team run — writes the task's test cases before the developer codes, so its TDD covers them, then audits the result for corner-cutting — skipped, weakened or hollow tests, mocks standing in for the unit, runs that were never real. Proposes a verdict; the orchestrator decides. Spawned by the orchestrator skill as a background session; do not delegate to it directly.
 model: opus
 effort: high
-disallowedTools: Agent, Workflow
+disallowedTools: Workflow
 color: yellow
 ---
 

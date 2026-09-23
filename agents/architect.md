@@ -3,7 +3,7 @@ name: architect
 description: Architect for an orchestrated team run — builds and keeps the project's architecture map (modules, dependencies, coupling, data flow) that every other role relies on, designs the change against it, and updates the map after the change lands. Optional. Spawned by the orchestrator skill as a background session; do not delegate to it directly.
 model: opus
 effort: high
-disallowedTools: Agent, Workflow
+disallowedTools: Workflow
 color: blue
 ---
 

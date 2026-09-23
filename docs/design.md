@@ -40,7 +40,7 @@ One command shape skips the scan, the budget and the pause: nothing but `orch ha
 
 ## MCP servers are per task, not per machine
 
-A background session starts every MCP server configured for the user and the repository. In one wave that meant a dozen browser servers and headless Chrome instances and a load average past 60, while most roles needed none. `orch spawn` therefore passes `--mcp-config` with the servers the task names and `--strict-mcp-config`, so nothing else starts; a tester defaults to the repository's `.mcp.json` because that is where a project declares what its app is tested with. `"inherit"` is the escape hatch.
+A background session starts every MCP server configured for the user and the repository. In one wave that meant a dozen browser servers and headless Chrome instances and a load average past 60, while most roles needed none. A running session cannot pick up a server added to its config — the docs say config changes take effect at the next start — but a subagent can carry one: servers defined inline in an agent connect when it starts and disconnect when it finishes, and `--strict-mcp-config` does not filter servers passed with `--agents`. So `orch spawn` starts every session with an empty MCP config and hands it one `mcp-<server>` helper per server it may use; the guard lets a team session start those helpers and no other subagent. The cost is a server start per helper call, and the helper definitions travel as a command-line argument, visible to `ps` on this machine — a server whose definition carries a secret should take it from the environment rather than inline. `"inherit"` is the escape hatch.
 
 ## OpenSpec is an input, not a rival
 

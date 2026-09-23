@@ -3,7 +3,7 @@ name: qa-lead
 description: QA lead for an orchestrated team run — writes the acceptance tests for the whole change right after the spec, before any code, and at the end runs them on the integrated result and proposes whether the change is accepted. Owns the acceptance test paths; developers make them pass and never edit them. Spawned by the orchestrator skill as a background session; do not delegate to it directly.
 model: opus
 effort: high
-disallowedTools: Agent, Workflow
+disallowedTools: Workflow
 color: yellow
 ---
 

@@ -503,35 +503,47 @@ cmd_tools() {
   git rev-parse --git-dir >/dev/null 2>&1 || return 0
   local r; r=$(repo_root)
   echo
-  echo "MCP servers by scope (a task's \"mcp\" list picks from these; a tester without one gets the repo's, every other role none):"
+  echo "MCP servers by scope (none starts with a session; a task's \"mcp\" list narrows which ones its helpers may start, default all):"
   echo "  repo (.mcp.json): $([ -f "$r/.mcp.json" ] && jq -r '(.mcpServers // {}) | keys | join(", ")' "$r/.mcp.json")"
   echo "  local: $([ -f "$CLAUDE_JSON" ] && jq -r --arg r "$r" '(.projects[$r].mcpServers // {}) | keys | join(", ")' "$CLAUDE_JSON")"
   echo "  user: $([ -f "$CLAUDE_JSON" ] && jq -r '(.mcpServers // {}) | keys | join(", ")' "$CLAUDE_JSON")"
-  echo "A session given a list sees only those servers; 'orch tools' itself reports the whole machine."
+  echo "A session starts a server by calling its helper agent, mcp-<server>; 'orch tools' itself reports the whole machine."
 }
 
-# task_mcp <task json>: the MCP servers a session gets — a JSON array of names, or "inherit".
-# Default: a tester gets the repository's .mcp.json servers, every other role none. Every session
-# starting every server on the machine is what drove the load of a wave into the dozens.
+# all_mcp_names: every server configured in local scope, the repository's .mcp.json and user scope.
+all_mcp_names() {
+  local r repo='[]' loc='[]' usr='[]'; r=$(repo_root)
+  [ -f "$r/.mcp.json" ] && repo=$(jq -c '(.mcpServers // {}) | keys' "$r/.mcp.json")
+  if [ -f "$CLAUDE_JSON" ]; then
+    loc=$(jq -c --arg r "$r" '(.projects[$r].mcpServers // {}) | keys' "$CLAUDE_JSON")
+    usr=$(jq -c '(.mcpServers // {}) | keys' "$CLAUDE_JSON")
+  fi
+  jq -nc --argjson a "$repo" --argjson b "$loc" --argjson c "$usr" '$a + $b + $c | unique'
+}
+
+# task_mcp <task json>: the MCP servers a session may start on demand — a JSON array of names, or
+# "inherit". Default: every server configured for this machine and repository. None of them runs at
+# session start; every session starting every server is what drove a wave's load into the dozens.
 task_mcp() {
   case "$(jq -r '.mcp | type' <<<"$1")" in
     string) jq -r '.mcp' <<<"$1" ;;
     array) jq -c '.mcp' <<<"$1" ;;
-    *)
-      if [ "$(jq -r '.role' <<<"$1")" = tester ] && [ -f "$(repo_root)/.mcp.json" ]; then
-        jq -c '(.mcpServers // {}) | keys' "$(repo_root)/.mcp.json"
-      else
-        echo '[]'
-      fi ;;
+    *) all_mcp_names ;;
   esac
 }
 
-# mcp_config <run_dir> <session name> <names json>: writes the session's MCP config (private: server
-# definitions can carry keys) and prints its path. Lookup follows Claude Code's precedence:
-# local scope, then the repository's .mcp.json, then user scope.
-mcp_config() {
+# helper_names <names json>: the helper agent for each server, as the Agent tool's subagent_type.
+helper_names() { jq -r 'map("mcp-" + gsub("[^A-Za-z0-9_-]"; "-")) | join(", ")' <<<"$1"; }
+
+# mcp_launch <run_dir> <session name> <names json>: the session starts with an empty MCP config
+# (<name>.json) and gets one helper agent per server it may use (<name>.agents.json, passed with
+# --agents): the helper carries the server inline, so it starts when the helper does and stops when
+# the helper finishes; --strict-mcp-config does not filter servers passed that way. Both files are
+# private — server definitions can carry keys. Lookup follows Claude Code's precedence: local scope,
+# then the repository's .mcp.json, then user scope.
+mcp_launch() {
   local d="$1" name="$2" names="$3" r f repo='{}' scoped='{"local":{},"user":{}}' out missing
-  r=$(repo_root); f="$d/mcp/$name.json"
+  r=$(repo_root); f="$d/mcp/$name.agents.json"
   [ -f "$r/.mcp.json" ] && repo=$(jq -c '.mcpServers // {}' "$r/.mcp.json")
   [ -f "$CLAUDE_JSON" ] && scoped=$(jq -c --arg r "$r" '{local: (.projects[$r].mcpServers // {}), user: (.mcpServers // {})}' "$CLAUDE_JSON")
   out=$(jq -n --argjson names "$names" --argjson repo "$repo" --argjson s "$scoped" \
@@ -539,9 +551,15 @@ mcp_config() {
   missing=$(jq -r '.mcpServers | to_entries[] | select(.value == null) | .key' <<<"$out" | tr '\n' ' ')
   [ -z "$missing" ] || die "MCP server not configured in local scope, .mcp.json or user scope: $missing"
   mkdir -p "$d/mcp"
-  (umask 077; printf '%s\n' "$out" > "$f")
+  (umask 077; printf '{"mcpServers":{}}\n' > "$d/mcp/$name.json")
+  rm -f "$f"
+  [ "$(jq 'length' <<<"$names")" -gt 0 ] || return 0
+  (umask 077; jq '.mcpServers | to_entries | map({key: ("mcp-" + (.key | gsub("[^A-Za-z0-9_-]"; "-"))), value: {
+      description: ("Carries the " + .key + " MCP server, which starts with this agent and stops when it finishes. Hand it a self-contained task that needs " + .key + "'"'"'s tools; it returns the result and the paths of anything it saved."),
+      prompt: ("You carry the " + .key + " MCP server for a teammate in an orchestrated team run. Do exactly the task you are given with that server'"'"'s tools, save screenshots and other files under .scratch/ in the current worktree, and answer with the result, the evidence paths and anything that failed. You change no source files."),
+      mcpServers: [{(.key): .value}],
+      disallowedTools: ["Agent", "Workflow"]}}) | from_entries' <<<"$out" > "$f")
   chmod 600 "$f"
-  printf '%s' "$f"
 }
 
 cmd_handoff_put() {
@@ -670,7 +688,7 @@ stage: $(jq -r '.stage' <<<"$task") of $(jq -r '.stages | join(" → ")' "$d/pla
   case "$mcp" in
     inherit) mcp_line="MCP servers: inherited — every server configured on this machine and in the repository" ;;
     '[]') mcp_line="MCP servers: none — this task was given none; ask the orchestrator if the work needs one" ;;
-    *) mcp_line="MCP servers you have: $(jq -r 'join(", ")' <<<"$mcp") — only these; the machine's other servers are off for this session" ;;
+    *) mcp_line="MCP servers start on demand: none runs in this session. When the work needs one, call the Agent tool with subagent_type mcp-<server> and a self-contained task; the server runs only while that helper works. Helpers: $(helper_names "$mcp")" ;;
   esac
   local base_line auth_line
   if [ "$role" = integrator ]; then
@@ -752,23 +770,25 @@ spawn_one() {
   local brief; brief=$(render_brief "$d" "$id" "$round" "$budget") || exit 1
   local extra=""
   [ -n "${ORCH_PERMISSION_MODE:-}" ] && extra="--permission-mode $ORCH_PERMISSION_MODE"
-  local mcp mcp_file=""
+  local mcp agents_file=""
   mcp=$(task_mcp "$task")
   case "$mcp" in
     inherit) ;;
-    '['*) mcp_file=$(mcp_config "$d" "$name" "$mcp") || exit 1
-          extra="$extra --mcp-config $mcp_file --strict-mcp-config" ;;
+    '['*) mcp_launch "$d" "$name" "$mcp"
+          extra="$extra --mcp-config $d/mcp/$name.json --strict-mcp-config"
+          [ -f "$d/mcp/$name.agents.json" ] && agents_file="$d/mcp/$name.agents.json" ;;
     *) die "task '$id': mcp must be a list of server names or \"inherit\", got $mcp" ;;
   esac
-  local cmdline="env -u CLAUDE_CODE_CHILD_SESSION claude --agent orchestrator:$role --bg --name $name --model $model --effort $effort --settings '$SPAWN_SETTINGS' $extra"
+  local cmdline="env -u CLAUDE_CODE_CHILD_SESSION claude --agent orchestrator:$role --bg --name $name --model $model --effort $effort --settings '$SPAWN_SETTINGS' $extra${agents_file:+ --agents @$agents_file}"
   if [ "$dry" -eq 1 ]; then
     printf '%s "<brief, %s bytes>" budget=%s\n' "$cmdline" "$(printf '%s' "$brief" | wc -c | tr -d ' ')" "$(jq -r '.budget' <<<"$task")"
     return 0
   fi
   need claude
-  local out sid_short
+  local out sid_short agents_args=()
+  [ -n "$agents_file" ] && agents_args=(--agents "$(cat "$agents_file")")
   # shellcheck disable=SC2086  # $extra is deliberately word-split
-  out=$(env -u CLAUDE_CODE_CHILD_SESSION claude --agent "orchestrator:$role" --bg --name "$name" --model "$model" --effort "$effort" --settings "$SPAWN_SETTINGS" $extra "$brief" 2>&1 | strip_ansi)
+  out=$(env -u CLAUDE_CODE_CHILD_SESSION claude --agent "orchestrator:$role" --bg --name "$name" --model "$model" --effort "$effort" --settings "$SPAWN_SETTINGS" $extra ${agents_args[@]+"${agents_args[@]}"} "$brief" 2>&1 | strip_ansi)
   sid_short=$(printf '%s\n' "$out" | sed -n 's/.*backgrounded · \([0-9a-f]\{8\}\).*/\1/p' | head -1)
   [ -n "$sid_short" ] || die "could not parse the session id from claude --bg output:
 $out"

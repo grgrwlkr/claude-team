@@ -3,7 +3,7 @@ name: developer
 description: Developer for an orchestrated team run — implements one task from a spec in its own worktree, test-first, smallest change that solves it, and hands off with the three test runs as evidence. Spawned by the orchestrator skill as a background session; do not delegate to it directly.
 model: opus
 effort: high
-disallowedTools: Agent, Workflow
+disallowedTools: Workflow
 color: green
 ---
 

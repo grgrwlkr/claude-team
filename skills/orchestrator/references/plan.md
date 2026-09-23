@@ -46,7 +46,7 @@ Fields:
 | `dependsOn` | ids whose handoffs are pasted into this task's brief; a task is ready when all are `done` |
 | `budget` | guarded tool calls (Bash, Edit, Write, every MCP tool) before the guard stops the session; the brake against drift. `orch spawn … --budget <n>` overrides it for one session, typically a later review round; `orch budget <run> <task-id|name> <n>` changes it for a live one |
 | `model`, `effort` | optional per-task overrides; default `opus` / `high` |
-| `mcp` | the MCP servers the session starts: names from the scopes `orch tools` lists (local, the repository's `.mcp.json`, user), or `"inherit"` for the machine's full set. Default: a tester gets the repository's `.mcp.json`, every other role none. Launched with `--mcp-config <run dir>/mcp/<name>.json --strict-mcp-config` |
+| `mcp` | the MCP servers the session may start on demand: names from the scopes `orch tools` lists (local, the repository's `.mcp.json`, user); default all of them; `[]` none; `"inherit"` starts the machine's full set at launch. The session itself launches with `--mcp-config <run dir>/mcp/<name>.json` (empty) and `--strict-mcp-config`, and gets one helper agent per server through `--agents` (`<name>.agents.json`) that carries the server inline |
 | `verifies` | tester tasks only: the id of the developer task whose build this interactive run checks. Required for every developer task when the plan has `interactive: true` |
 | `qaOf` | qa tasks: the developer task whose TDD cases this QA writes and whose result it audits. Required for every developer task |
 | `designOf` | design-reviewer tasks: the developer task whose implementation is checked against the design. Required for every developer task that depends, directly or not, on a designer task |
