@@ -40,13 +40,18 @@ You can attach to any session (`claude agents`, `Enter`), message any of them, o
 | analyst | `docs/specs/**` | spec with testable acceptance criteria, plan, docs after implementation |
 | developer | its task's source and test paths | code on its branch, tests with the three runs shown, draft PR |
 | designer | `docs/design/**`, `design/`, `assets/` | design brief, tokens, states, assets; self-contained guidance for UI, game HUD, graphics, 3D |
-| qa | test paths | test cases, automated tests, coverage matrix per criterion, proposed verdict |
+| architect (optional) | `docs/architecture/**` | the architecture map — modules, dependency graphs, coupling, data flow — built once and kept current; the change's design; answers structure questions |
+| qa | its cases' paths, per developer task | TDD cases before the code, then an audit for skipped, weakened or hollow tests and runs that were never real |
+| qa-lead | acceptance test paths | acceptance tests for the whole change right after the spec; at the end runs them on the integrated result and proposes the verdict |
+| design-reviewer | nothing (read-only) | compares the running implementation with the designer's brief and tokens by screenshots, in rounds |
 | tester | nothing (read-only; evidence in its worktree's `.scratch/evidence/`) | runs the app from the branch, exercises every criterion as a user would with the means the machine has, hands over screenshots, recordings and transcripts per criterion; re-runs each round |
 | reviewer | nothing (read-only) | findings with cited lines, severity, confidence; re-reviews each round until clean |
 | integrator | integration branch | dependency-ordered merges, green suite, version and changelog; the only role allowed to merge into the base branch |
 | researcher | `docs/research/**` | facts from live sources with verbatim quotes and dates |
 
 All roles run on Opus at effort `high` (per-task override in the plan). Roles never spawn subagents or workflows; they ask a teammate.
+
+A run is one pass or staged: with `"mode": "staged"` the lead stops after every stage (architecture, spec, each development stage), shows a page of the stage's handoffs and screenshots (`orch stage-report`), and opens the next stage only on your word (`orch approve`).
 
 ## How they talk
 

@@ -166,8 +166,8 @@ case "$tool" in
         case "$sub" in
           handoff-put)
             [ "$arg2" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${arg2:-<missing>}; run is $_run" ;;
-          handoff|status|events|ready|doctor|tools) ;;
-          *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools" ;;
+          handoff|status|events|ready|doctor|tools|architecture) ;;
+          *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools, architecture" ;;
         esac
       done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^.*orch +//')
     fi

@@ -31,6 +31,10 @@ The lead's job after a spawn is to wait cheaply and judge sharply. Nothing here 
 
 Correctness, completeness and safety are decided here, by you, on evidence you produced or re-ran. QA proposes a verdict with a coverage report; the reviewer proposes findings with cited lines; you confirm both against the code. Merging into the base branch is the integrator's task, and the go for a merge is yours.
 
+## Staged runs
+
+When every task of a stage is accepted, follow SKILL.md 4b: `orch stage-report`, show the page, end the turn, and `orch approve` only on the user's word. This is the one pause the run takes on purpose; nothing else waits for the user.
+
 ## Never park the run on the user
 
 Every gated action of the run is settled once, at plan approval, and written into the plan with `orch authorize <run> push-base|delete-merged|tag on`. The guard reads those flags, so an integrator authorized at approval time pushes without anyone asking again. Mid-run, a gate you did not collect is your mistake, not a reason to stop: finish everything else, leave the gated step for the end, and report it in one line with the exact command the user can run. Stop the run only when continuing would be unsafe or would waste the work.

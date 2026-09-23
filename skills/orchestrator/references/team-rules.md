@@ -28,7 +28,7 @@ You are one session in a team run by an orchestrator session. Your spawn brief n
 
 Peer to peer, no permission needed, one message per question:
 
-- `Q: <question>` — a question to a specific role. The developer asks the analyst about the spec, the analyst asks the researcher for a fact, QA asks the developer where a behaviour lives. Read the handoff and the task file first; ask only what they don't answer.
+- `Q: <question>` — a question to a specific role. Structure questions — where something lives, what depends on it — go to the architect when the run has one, after you read the map in `docs/architecture/`. The developer asks the analyst about the spec, the analyst asks the researcher for a fact, QA asks the developer where a behaviour lives. Read the handoff and the task file first; ask only what they don't answer.
 - `A: <answer>` — the reply. Quote the line of the spec, the file, or the source that settles it.
 - `FYI: <fact>` — something a teammate must know now: an interface changed, a file moved, a spec line was corrected.
 - `BLOCKED: <what you need, from whom>` — to the orchestrator, when you cannot proceed.

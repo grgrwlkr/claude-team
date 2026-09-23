@@ -155,6 +155,7 @@ free_pass 2 "output redirect added" "orch handoff-put r1 int-1 < f > /tmp/x"
 rm "$RUN/PAUSE-int-1"
 
 echo "# wave 4: tools is a session's command; 80% of the budget nudges once"
+expect_exit 0 "a session may run orch architecture" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch architecture")"
 expect_exit 0 "a session may run orch tools" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch tools")"
 jq 'map(if .name == "dev-1" then .budget = 10 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 : > "$RUN/events.log"

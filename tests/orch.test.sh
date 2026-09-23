@@ -17,12 +17,14 @@ expect_exit 0 "init creates run" "$ORCH" init r1 --base main
 [ -d .orchestrator/r1/handoffs ] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL handoffs dir missing"; }
 expect_grep '^\.orchestrator/$' .git/info/exclude "init excludes .orchestrator from git"
 expect_exit 1 "init refuses an existing run" "$ORCH" init r1 --base main
+"$ORCH" acceptance r1 off > /dev/null
 
 echo "# plan"
 cat > "$TMP_BASE/plan.json" <<'JSON'
 {"run":"r1","goal":"Add dark mode","baseBranch":"main","tasks":[
  {"id":"spec","role":"analyst","name":"analyst-spec","goal":"Write the spec.","pathsAllowed":["docs/**"],"acceptance":["testable"],"dependsOn":[],"budget":80},
  {"id":"impl","role":"developer","name":"dev-impl","goal":"Implement it.","pathsAllowed":["src/**"],"acceptance":["tests green"],"dependsOn":["spec"],"budget":200},
+ {"id":"qa-impl","role":"qa","name":"qa-impl","goal":"Cases and audit.","pathsAllowed":["docs/qa/**"],"acceptance":["cases"],"dependsOn":["spec"],"qaOf":"impl","budget":60},
  {"id":"rev-impl","role":"reviewer","name":"rev-impl","goal":"Review the implementation.","pathsAllowed":[],"acceptance":["findings cited"],"dependsOn":["impl"],"reviewOf":"impl","budget":60},
  {"id":"merge-task","role":"integrator","name":"int-1","goal":"Merge the branches.","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":[],"budget":90}
 ]}
@@ -113,6 +115,7 @@ expect_grep 'reviewer' "$TMP_BASE/err" "the refusal names the missing reviewer"
 cat > "$TMP_BASE/reviewed.json" <<'JSON'
 {"run":"r1","baseBranch":"main","tasks":[
  {"id":"impl","role":"developer","name":"d1","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":50},
+ {"id":"qa","role":"qa","name":"qa-1","goal":"cases and audit","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":[],"qaOf":"impl","budget":40},
  {"id":"rev","role":"reviewer","name":"rev-1","goal":"review impl","pathsAllowed":[],"acceptance":["findings cited"],"dependsOn":["impl"],"reviewOf":"impl","budget":40},
  {"id":"merge-task","role":"integrator","name":"int-1","goal":"merge","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":["rev"],"budget":60}
 ]}
@@ -165,6 +168,7 @@ expect_grep 'tester' "$TMP_BASE/err" "the refusal names the tester role"
 cat > "$TMP_BASE/tested.json" <<'JSON'
 {"run":"r1","baseBranch":"main","tasks":[
  {"id":"impl","role":"developer","name":"d1","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":50},
+ {"id":"qa","role":"qa","name":"qa-1","goal":"cases and audit","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":[],"qaOf":"impl","budget":40},
  {"id":"rev","role":"reviewer","name":"rev-1","goal":"review impl","pathsAllowed":[],"acceptance":["findings cited"],"dependsOn":["impl"],"reviewOf":"impl","budget":40},
  {"id":"run","role":"tester","name":"tester-1","goal":"run the app and exercise the criteria","pathsAllowed":[],"acceptance":["every criterion has evidence"],"dependsOn":["impl"],"verifies":"impl","budget":80},
  {"id":"merge-task","role":"integrator","name":"int-1","goal":"merge","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":["rev","run"],"budget":60}
@@ -184,9 +188,11 @@ expect_exit 0 "plan without testers is accepted again when interactive is off" "
 
 echo "# acceptance gates what builds on code; verification roles start on the developer's done"
 expect_exit 0 "init second run" "$ORCH" init r2 --base main
+"$ORCH" acceptance r2 off > /dev/null
 cat > "$TMP_BASE/gate.json" <<'JSON'
 {"run":"r2","baseBranch":"main","tasks":[
  {"id":"impl","role":"developer","name":"d1","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":5},
+ {"id":"qa","role":"qa","name":"qa-2","goal":"cases and audit","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":[],"qaOf":"impl","budget":10},
  {"id":"rev","role":"reviewer","name":"rev-1","goal":"review impl","pathsAllowed":[],"acceptance":["findings cited"],"dependsOn":["impl"],"reviewOf":"impl","budget":40},
  {"id":"merge-task","role":"integrator","name":"int-1","goal":"merge","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":["impl","rev"],"budget":60}
 ]}
@@ -246,6 +252,7 @@ expect_exit 1 "budget refuses a non-number" "$ORCH" budget r2 d1 lots
 
 echo "# wave 3: close settles a review with the task it reviews, and says when branches are already gone"
 expect_exit 0 "init third run" "$ORCH" init r3 --base main
+"$ORCH" acceptance r3 off > /dev/null
 expect_exit 0 "plan for the third run" "$ORCH" plan r3 "$TMP_BASE/gate.json"
 printf '# d1\n## Status\ndone\n## Branch\ngone-branch at 0000000\n' > "$TMP_BASE/h4.md"
 expect_exit 0 "developer hands off a branch that was cleaned up since" sh -c "'$ORCH' handoff-put r3 d1 < '$TMP_BASE/h4.md'"
@@ -273,9 +280,11 @@ export ORCH_CLAUDE_JSON="$TMP_BASE/claude.json"
 jq -n --arg r "$ROOT_REAL" '{mcpServers:{userA:{command:"a"}, "playwright-local":{command:"p"}}, projects:{($r):{mcpServers:{localC:{command:"c"}}}}}' > "$ORCH_CLAUDE_JSON"
 echo '{"mcpServers":{"repoB":{"command":"b"}}}' > .mcp.json
 expect_exit 0 "init r4" "$ORCH" init r4 --base main
+"$ORCH" acceptance r4 off > /dev/null
 cat > "$TMP_BASE/r4.json" <<'JSON'
 {"run":"r4","baseBranch":"main","tasks":[
  {"id":"impl","role":"developer","name":"d4","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":20,"mcp":["userA"]},
+ {"id":"qa4","role":"qa","name":"qa-4","goal":"cases and audit","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":[],"qaOf":"impl","budget":10},
  {"id":"rev","role":"reviewer","name":"rev-4","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"reviewOf":"impl","budget":10},
  {"id":"run","role":"tester","name":"test-4","goal":"run the app","pathsAllowed":[],"acceptance":["z"],"dependsOn":["impl"],"verifies":"impl","budget":10},
  {"id":"merge-task","role":"integrator","name":"int-4","goal":"merge","pathsAllowed":["**"],"acceptance":["g"],"dependsOn":["impl","rev"],"budget":10},
@@ -420,5 +429,116 @@ expect_grep 'TOTAL  *120' "$TMP_BASE/out" "total line"
 echo "# wave 4: close treats a cancelled task as settled"
 for t in impl rev merge-task docs run; do "$ORCH" accept r4 "$t" ok > /dev/null; done
 expect_exit 0 "close with a cancelled task" "$ORCH" close r4
+
+echo "# wave 6: run r5 — qa per developer task, qa-lead, design review, architect, staged"
+expect_exit 0 "init r5" "$ORCH" init r5 --base main
+cat > "$TMP_BASE/r5.json" <<'JSON'
+{"run":"r5","baseBranch":"main","mode":"staged","stages":["design","build"],"tasks":[
+ {"id":"arch","role":"architect","name":"arch-5","phase":"design","goal":"map and design","pathsAllowed":["docs/architecture/**"],"acceptance":["map"],"dependsOn":[],"budget":60,"stage":"design"},
+ {"id":"spec","role":"analyst","name":"spec-5","goal":"spec","pathsAllowed":["docs/specs/**"],"acceptance":["s"],"dependsOn":["arch"],"budget":20,"stage":"design"},
+ {"id":"design","role":"designer","name":"des-5","goal":"design","pathsAllowed":["docs/design/**"],"acceptance":["d"],"dependsOn":["spec"],"budget":20,"stage":"design"},
+ {"id":"qal-a","role":"qa-lead","name":"qal-5a","phase":"author","goal":"acceptance tests","pathsAllowed":["tests/acceptance/**"],"acceptance":["red"],"dependsOn":["spec"],"budget":20,"stage":"design"},
+ {"id":"impl","role":"developer","name":"dev-5","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":["design","qal-a"],"budget":20,"stage":"build"},
+ {"id":"qa","role":"qa","name":"qa-5","qaOf":"impl","goal":"cases and audit","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":["design","qal-a"],"budget":20,"stage":"build"},
+ {"id":"rev","role":"reviewer","name":"rev-5","reviewOf":"impl","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"budget":10,"stage":"build"},
+ {"id":"drev","role":"design-reviewer","name":"drev-5","designOf":"impl","goal":"design review","pathsAllowed":[],"acceptance":["z"],"dependsOn":["impl","design"],"budget":10,"stage":"build"},
+ {"id":"qal-b","role":"qa-lead","name":"qal-5b","phase":"accept","goal":"accept","pathsAllowed":["tests/acceptance/**"],"acceptance":["green"],"dependsOn":["impl","rev"],"budget":20,"stage":"build"},
+ {"id":"arch-up","role":"architect","name":"arch-5u","phase":"update","goal":"update the map","pathsAllowed":["docs/architecture/**"],"acceptance":["map current"],"dependsOn":["qal-b"],"budget":20,"stage":"build"}
+]}
+JSON
+variant() { jq "$1" "$TMP_BASE/r5.json" > "$TMP_BASE/r5v.json"; }
+variant 'del(.tasks[] | select(.id == "qa"))'
+expect_exit 1 "a developer task without its qa task is refused" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
+expect_grep 'qaOf' "$TMP_BASE/err" "the refusal names qaOf"
+variant 'del(.tasks[] | select(.id == "drev"))'
+expect_exit 1 "a developer task built on a design, with no design reviewer, is refused" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
+expect_grep 'design-reviewer' "$TMP_BASE/err" "the refusal names the design-reviewer"
+variant 'del(.tasks[] | select(.role == "qa-lead")) | .tasks |= map(.dependsOn |= map(select(. != "qal-a" and . != "qal-b")) | if .id == "arch-up" then .dependsOn = ["rev"] else . end)'
+expect_exit 1 "acceptance on and no qa-lead is refused" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
+expect_grep 'qa-lead' "$TMP_BASE/err" "the refusal names the qa-lead"
+variant '.tasks |= map(if .id == "qal-b" then .dependsOn = ["design"] else . end)'
+expect_exit 1 "an accept task that does not come after every developer task is refused" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
+expect_grep 'impl' "$TMP_BASE/err" "the refusal names the developer task it misses"
+variant '.tasks |= map(if .id == "qal-a" then .phase = "later" else . end)'
+expect_exit 1 "a qa-lead phase other than author/accept is refused" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
+variant '.tasks |= map(if .id == "arch" then .phase = "sometime" else . end)'
+expect_exit 1 "an architect phase other than design/update is refused" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
+variant '.tasks |= map(if .id == "spec" then del(.stage) else . end)'
+expect_exit 1 "a staged plan refuses a task without a stage" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
+expect_grep 'stage' "$TMP_BASE/err" "the refusal names the stage"
+variant '.tasks |= map(if .id == "spec" then .dependsOn = ["impl"] else . end)'
+expect_exit 1 "a task may not depend on a later stage" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
+expect_grep 'later stage' "$TMP_BASE/err" "the refusal says why"
+expect_exit 0 "the full plan is stored" "$ORCH" plan r5 "$TMP_BASE/r5.json"
+expect_exit 0 "acceptance off" "$ORCH" acceptance r5 off
+variant 'del(.tasks[] | select(.role == "qa-lead")) | .tasks |= map(.dependsOn |= map(select(. != "qal-a" and . != "qal-b")) | if .id == "arch-up" then .dependsOn = ["rev"] else . end)'
+expect_exit 0 "with acceptance off a plan needs no qa-lead" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
+expect_exit 0 "acceptance back on" "$ORCH" acceptance r5 on
+expect_exit 0 "the full plan again" "$ORCH" plan r5 "$TMP_BASE/r5.json"
+
+echo "# wave 6: briefs"
+for t in arch spec design qal-a; do "$ORCH" accept r5 "$t" ok > /dev/null; done
+expect_exit 0 "approve the design stage" "$ORCH" approve r5 design "user: looks right, go on"
+expect_exit 0 "developer brief" "$ORCH" brief r5 impl
+expect_grep 'qa-5' "$TMP_BASE/out" "the developer is told who writes its TDD cases"
+expect_grep 'tests/acceptance/\*\*' "$TMP_BASE/out" "and which acceptance tests it must not edit"
+expect_grep 'arch-5' "$TMP_BASE/out" "and whom to ask about the architecture"
+expect_grep 'stage: build' "$TMP_BASE/out" "the brief names the stage"
+expect_exit 0 "qa brief" "$ORCH" brief r5 qa
+expect_grep 'dev-5' "$TMP_BASE/out" "qa names its developer"
+expect_grep 'before' "$TMP_BASE/out" "cases come before the code"
+expect_grep 'audit' "$TMP_BASE/out" "and an audit after"
+"$ORCH" accept r5 impl ok > /dev/null
+expect_exit 0 "design reviewer brief" "$ORCH" brief r5 drev
+expect_grep 'des-5' "$TMP_BASE/out" "the design reviewer names the designer whose brief it checks"
+expect_exit 0 "qa-lead author brief" "$ORCH" brief r5 qal-a
+expect_grep 'acceptance tests for the whole change' "$TMP_BASE/out" "author phase"
+expect_exit 0 "architect brief" "$ORCH" brief r5 arch
+expect_grep 'architecture map: none yet' "$TMP_BASE/out" "the architect is told there is no map"
+
+echo "# wave 6: orch architecture"
+expect_exit 0 "architecture without a map" "$ORCH" architecture
+expect_grep 'none yet' "$TMP_BASE/out" "no map reported"
+expect_grep 'tracked files' "$TMP_BASE/out" "size of the job"
+expect_grep 'git history' "$TMP_BASE/out" "co-change from git history is always available"
+mkdir -p docs/architecture
+printf '# Architecture\n\nbuilt-at: %s\n' "$(git rev-parse HEAD)" > docs/architecture/README.md
+expect_exit 0 "architecture with a map" "$ORCH" architecture
+expect_grep '0 commits behind' "$TMP_BASE/out" "a current map reads 0 commits behind"
+rm -rf docs/architecture
+
+echo "# wave 6: staged mode"
+expect_exit 0 "init r6" "$ORCH" init r6 --base main
+expect_exit 0 "plan r6" "$ORCH" plan r6 "$TMP_BASE/r5.json"
+expect_exit 0 "ready at the start" "$ORCH" ready r6
+expect_grep '^arch$' "$TMP_BASE/out" "the first stage's first task is ready"
+expect_exit 1 "approve refuses a stage whose tasks are open" "$ORCH" approve r6 design "go"
+expect_grep 'arch' "$TMP_BASE/err" "and lists them"
+expect_exit 1 "approve refuses a later stage first" "$ORCH" approve r6 build "go"
+expect_grep 'design' "$TMP_BASE/err" "the earlier stage is named"
+for t in arch spec design qal-a; do "$ORCH" accept r6 "$t" ok > /dev/null; done
+expect_exit 0 "ready with the design stage done but not approved" "$ORCH" ready r6
+expect_no_grep '^impl$' "$TMP_BASE/out" "the build stage waits for approval"
+expect_exit 1 "brief refuses a task of an unapproved stage" "$ORCH" brief r6 impl
+expect_exit 1 "approve needs the user's words" "$ORCH" approve r6 design
+expect_exit 0 "approve design" "$ORCH" approve r6 design "user: approved in chat"
+expect_exit 0 "ready after approval" "$ORCH" ready r6
+expect_grep '^impl$' "$TMP_BASE/out" "the build stage opens"
+expect_grep '^qa$' "$TMP_BASE/out" "with the developer's qa in the same wave"
+
+echo "# wave 6: stage report"
+mkdir -p "$REPO/.claude/worktrees/w1/.scratch/evidence"
+printf 'PNG' > "$REPO/.claude/worktrees/w1/.scratch/evidence/shot.png"
+printf 'PNG' > "$TMP_BASE/outside.png"
+printf '# des-5\n## Status\ndone <b>bold</b>\n## What I did\nScreens: %s and %s\n' "$REPO/.claude/worktrees/w1/.scratch/evidence/shot.png" "$TMP_BASE/outside.png" > "$TMP_BASE/h-des.md"
+"$ORCH" handoff-put r6 des-5 < "$TMP_BASE/h-des.md" > /dev/null
+expect_exit 0 "stage report" "$ORCH" stage-report r6 design
+expect_grep 'stages/design/index.html' "$TMP_BASE/out" "the report path is printed"
+expect_grep 'des-5' .orchestrator/r6/stages/design/index.html "the report has the stage's tasks"
+expect_grep '&lt;b&gt;bold' .orchestrator/r6/stages/design/index.html "handoff text is escaped"
+expect_grep 'img/des-5-shot.png' .orchestrator/r6/stages/design/index.html "evidence inside the repository is embedded"
+expect_exit 0 "the image was copied" test -f .orchestrator/r6/stages/design/img/des-5-shot.png
+expect_exit 1 "an image outside the repository is not copied" test -f .orchestrator/r6/stages/design/img/des-5-outside.png
+expect_grep 'prefers-color-scheme: dark' .orchestrator/r6/stages/design/index.html "the page has a dark theme"
 
 summary

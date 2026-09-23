@@ -38,7 +38,7 @@ Fields:
 | Field | Meaning |
 |---|---|
 | `id` | stable task id, used in `dependsOn` |
-| `role` | one of `analyst`, `developer`, `designer`, `qa`, `tester`, `reviewer`, `integrator`, `researcher` |
+| `role` | one of `analyst`, `architect`, `developer`, `designer`, `qa`, `qa-lead`, `tester`, `reviewer`, `design-reviewer`, `integrator`, `researcher` |
 | `name` | the session's team name (`--name`); unique within the run and not reused from an earlier run on this machine, whose Remote Control mirrors keep the name; letters, digits, hyphens |
 | `goal` | one paragraph, verbatim into the brief |
 | `pathsAllowed` | globs relative to the worktree root; `*` matches across `/`; the guard blocks edits elsewhere. Two tasks never share a path in the same wave |
@@ -48,6 +48,10 @@ Fields:
 | `model`, `effort` | optional per-task overrides; default `opus` / `high` |
 | `mcp` | the MCP servers the session starts: names from the scopes `orch tools` lists (local, the repository's `.mcp.json`, user), or `"inherit"` for the machine's full set. Default: a tester gets the repository's `.mcp.json`, every other role none. Launched with `--mcp-config <run dir>/mcp/<name>.json --strict-mcp-config` |
 | `verifies` | tester tasks only: the id of the developer task whose build this interactive run checks. Required for every developer task when the plan has `interactive: true` |
+| `qaOf` | qa tasks: the developer task whose TDD cases this QA writes and whose result it audits. Required for every developer task |
+| `designOf` | design-reviewer tasks: the developer task whose implementation is checked against the design. Required for every developer task that depends, directly or not, on a designer task |
+| `phase` | qa-lead tasks: `author` (acceptance tests after the spec) or `accept` (after every developer task); architect tasks: `design` (map, then the change's design) or `update` (map after the merge) |
+| `stage` | staged plans: the stage this task belongs to, one of the plan's `stages`; no task depends on a later stage |
 | `reviewOf` | reviewer tasks only: the id of the task whose code this review covers. `orch plan` refuses a graph where a developer task has no reviewer |
 
 Every developer task must be covered by a reviewer task (`reviewOf`), and review runs in rounds: the orchestrator re-spawns the same review task with `orch spawn <run> <id> --round N`, which gives the session the name `<name>-r<N>` and a brief telling it to re-read the whole diff and answer its earlier findings. The venue and the round cap live in the plan:
@@ -59,6 +63,10 @@ Every developer task must be covered by a reviewer task (`reviewOf`), and review
 `venue: "pr"` means every session that changed code opens a pull or merge request and reviewers comment in threads on it; `branch` means the reviewer reads `git diff <base>...HEAD` and files findings through the orchestrator. Set both with `orch review <run> venue <branch|pr>` and `orch review <run> rounds <n>`.
 
 Rules of thumb: a wave is the set of ready tasks; spawn them together, one session each. The integrator's task depends on every task whose branch it merges. QA's task depends on the developer's task it tests, never runs in the same wave on the same paths. The reviewer reads a branch and edits nothing except its handoff, so its `pathsAllowed` is `[]`.
+
+## Acceptance testing and stages
+
+`"acceptance": true` (the default; `orch acceptance <run> off` drops it) makes `orch plan` require a qa-lead `author` task and an `accept` task that comes after every developer task. `"mode": "staged"` with `"stages": ["architecture", "spec", "build-1", …]` makes `orch ready` hold every task of a stage until `orch approve <run> <stage> "<the user's words>"` has recorded all earlier ones in `approved.json`.
 
 ## Authorizations
 

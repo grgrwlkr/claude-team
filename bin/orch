@@ -7,7 +7,18 @@ SELF="$0"
 while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
 PLUGIN_ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
 RULES="$PLUGIN_ROOT/skills/orchestrator/references/team-rules.md"
-ROLES="analyst developer designer qa tester reviewer integrator researcher"
+ROLES="analyst developer designer qa tester reviewer integrator researcher architect design-reviewer qa-lead"
+# closure($p; $id): every task $id depends on, directly or through others; safe on cycles.
+JQ_DEFS='
+def bad(msg): "ERROR: " + msg;
+def closure($p; $start):
+  {seen: [], todo: [$start]}
+  | until((.todo | length) == 0;
+      .todo[0] as $x | .todo |= .[1:]
+      | if (.seen | index($x)) != null then .
+        else .seen += [$x] | .todo += [$p.tasks[] | select(.id == $x) | (.dependsOn // [])[]] end)
+  | .seen - [$start];
+'
 # Every session the plugin launches, the lead included, runs the built-in Concise output style; --settings outranks /output-style.
 STYLE='{"outputStyle":"Concise"}'
 # Team sessions start without Remote Control: its mirror of a session carries the session's name, and a
@@ -71,6 +82,10 @@ orch address <run> <session-name>                 set the orchestrator's address
 orch authorize <run> <push-base|delete-merged|tag|install-tools|mutate-data> <on|off>
 orch review <run> venue <branch|pr>               where review happens: the branch diff, or a pull/merge request with threads
 orch review <run> rounds <n>                      how many review rounds a task may take (default 3)
+orch acceptance <run> <on|off>                    require a qa-lead that writes acceptance tests first and accepts the whole change last (default on)
+orch approve <run> <stage> "<the user's words>"   staged mode: record the user's approval of a stage; the next one opens
+orch stage-report <run> <stage>                   staged mode: an HTML page of the stage's handoffs and evidence, to show the user
+orch architecture                                 the architecture map's state, the size of the job and the graph tools this stack has
 orch interactive <run> <on|off>                   require a tester task per developer task: run the app, verify visually
 orch tools [--refresh]                            inventory of the machine's means to run and watch an app; the MCP list is cached for an hour
 orch budget <run> <task-id|name> <n>              change a task's budget mid-run, in the plan and in the live session's record the guard reads
@@ -133,8 +148,9 @@ cmd_init() {
   jq -n --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$(now)" \
     '{run:$run, baseBranch:$base, orchestrator:$o, createdAt:$t,
       authorize:{pushBase:false, deleteMerged:false, tag:false, installTools:false, mutateData:false},
-      review:{venue:"branch", maxRounds:3}, interactive:false, tasks:[]}' > "$d/plan.json"
+      review:{venue:"branch", maxRounds:3}, interactive:false, acceptance:true, tasks:[]}' > "$d/plan.json"
   echo '[]' > "$d/accepted.json"
+  echo '[]' > "$d/approved.json"
   echo "$d"
 }
 
@@ -146,15 +162,14 @@ cmd_plan() {
   jq -e . "$file" >/dev/null 2>&1 || die "$file is not valid JSON"
   local roles_json; roles_json=$(printf '%s\n' $ROLES | jq -R . | jq -sc .)
   local err
-  err=$(jq -r --argjson roles "$roles_json" '
-    def bad(msg): "ERROR: " + msg;
+  err=$(jq -r --argjson roles "$roles_json" "$JQ_DEFS"'
     [ .tasks[] | select((.role | IN($roles[])) | not) | bad("task \(.id): unknown role \(.role)") ]
     + [ .tasks[] | select((.id // "") == "" or (.name // "") == "" or (.goal // "") == "") | bad("task \(.id // "?"): id, name and goal are required") ]
     + [ .tasks[] | select(.name | test("^[A-Za-z0-9][A-Za-z0-9-]*$") | not) | bad("task \(.id): name must be letters, digits, hyphens") ]
     + ( [ .tasks[].name ] | group_by(.) | map(select(length > 1) | bad("duplicate name \(.[0])")) )
     + ( [ .tasks[].id ] | group_by(.) | map(select(length > 1) | bad("duplicate id \(.[0])")) )
     + ( . as $p | [ .tasks[] | .dependsOn[]? as $dep | select(($p.tasks | map(.id) | index($dep)) == null) | bad("task \(.id): dependsOn unknown task \($dep)") ] )
-    + ( [ .tasks[] | select((.role != "reviewer" and .role != "tester") and ((.pathsAllowed // []) | length) == 0) | bad("task \(.id): pathsAllowed is empty; only the reviewer and the tester may own no paths") ] )
+    + ( [ .tasks[] | select((.role | IN("reviewer", "tester", "design-reviewer") | not) and ((.pathsAllowed // []) | length) == 0) | bad("task \(.id): pathsAllowed is empty; only the reviewer, the tester and the design-reviewer may own no paths") ] )
     + ( . as $p
         | [ $p.tasks[] | select(.role == "developer") as $t
             | select(([ $p.tasks[] | select(.role == "reviewer")
@@ -166,9 +181,33 @@ cmd_plan() {
             | ($t[$i].paths - ($t[$i].paths - $t[$j].paths)) as $shared
             | select(($shared | length) > 0)
             | bad("tasks \($t[$i].id) and \($t[$j].id) share paths \($shared | join(", ")) in the same wave; sequence them or split the paths") ] )
+    + ( . as $p
+        | [ $p.tasks[] | select(.role == "developer") as $t
+            | select(([ $p.tasks[] | select(.role == "qa" and (.qaOf // "") == $t.id) ] | length) == 0)
+            | bad("task \($t.id) writes code and no qa task covers it; add a qa task with qaOf: \"\($t.id)\" that writes its TDD cases first and audits the result") ] )
+    + ( . as $p
+        | [ $p.tasks[] | select(.role == "designer") | .id ] as $des
+        | if ($des | length) == 0 then [] else
+            [ $p.tasks[] | select(.role == "developer") as $t
+              | select(closure($p; $t.id) as $c | ($c - ($c - $des)) | length > 0)
+              | select(([ $p.tasks[] | select(.role == "design-reviewer" and (.designOf // "") == $t.id) ] | length) == 0)
+              | bad("task \($t.id) implements a designer task and no design-reviewer checks it; add a design-reviewer task with designOf: \"\($t.id)\"") ]
+          end )
+    + [ .tasks[] | select(.role == "qa-lead" and ((.phase // "") | IN("author", "accept") | not)) | bad("task \(.id): a qa-lead task needs phase author or accept") ]
+    + [ .tasks[] | select(.role == "architect" and ((.phase // "") | IN("design", "update") | not)) | bad("task \(.id): an architect task needs phase design or update") ]
+    + ( if (.mode // "single") == "staged" then
+          (.stages // []) as $s
+          | (if ($s | length) == 0 then [bad("mode staged needs a stages list, in order")] else [] end)
+            + [ .tasks[] | select((.stage // "") as $g | ($s | index($g)) == null) | bad("task \(.id): stage \(.stage // "missing") is not one of \($s | join(", "))") ]
+            + ( . as $p | [ $p.tasks[] as $t | ($t.dependsOn // [])[] as $dep | ($p.tasks[] | select(.id == $dep)) as $x
+                | select(($s | index($x.stage // "")) != null and ($s | index($t.stage // "")) != null)
+                | select(($s | index($x.stage)) > ($s | index($t.stage)))
+                | bad("task \($t.id) of stage \($t.stage) depends on \($x.id) of the later stage \($x.stage)") ] )
+        elif (.mode // "single") != "single" then [bad("mode must be single or staged")]
+        else [] end )
     | .[]' "$file")
   if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
-  local base orch_name created auth review interactive
+  local base orch_name created auth review interactive acceptance
   base=$(jq -r '.baseBranch' "$d/plan.json"); orch_name=$(jq -r '.orchestrator' "$d/plan.json"); created=$(jq -r '.createdAt' "$d/plan.json")
   auth=$(jq -c '.authorize // {pushBase:false, deleteMerged:false, tag:false, installTools:false}' "$d/plan.json")
   review=$(jq -c '.review // {venue:"branch", maxRounds:3}' "$d/plan.json")
@@ -184,8 +223,25 @@ cmd_plan() {
       | .[]' "$file")
     if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
   fi
-  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" --argjson auth "$auth" --argjson review "$review" --argjson inter "$interactive" \
-     '.run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t | .authorize = $auth | .review = $review | .interactive = $inter
+  acceptance=$(jq -r 'if .acceptance == false then "false" else "true" end' "$d/plan.json")
+  if [ "$acceptance" = true ]; then
+    err=$(jq -r "$JQ_DEFS"'
+      . as $p
+      | [ $p.tasks[] | select(.role == "developer") | .id ] as $devs
+      | if ($devs | length) == 0 then [] else
+          (if ([ $p.tasks[] | select(.role == "qa-lead" and .phase == "author") ] | length) == 0
+           then [bad("acceptance testing is on and no qa-lead task with phase author writes the acceptance tests; add one after the spec, or orch acceptance <run> off")] else [] end)
+          + (if ([ $p.tasks[] | select(.role == "qa-lead" and .phase == "accept") ] | length) == 0
+             then [bad("acceptance testing is on and no qa-lead task with phase accept accepts the whole change; add one after every developer task, or orch acceptance <run> off")] else [] end)
+          + [ $p.tasks[] | select(.role == "qa-lead" and .phase == "accept") as $a
+              | closure($p; $a.id) as $c | ($devs - $c)[] as $miss
+              | bad("qa-lead task \($a.id) accepts the whole change but does not come after developer task \($miss); make it depend on every developer task, directly or through the integrator") ]
+        end
+      | .[]' "$file")
+    if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
+  fi
+  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" --argjson auth "$auth" --argjson review "$review" --argjson inter "$interactive" --argjson acc "$acceptance" \
+     '.run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t | .authorize = $auth | .review = $review | .interactive = $inter | .acceptance = $acc
       | .tasks |= map(.budget = (.budget // 150) | .model = (.model // "opus") | .effort = (.effort // "high") | .dependsOn = (.dependsOn // []) | .pathsAllowed = (.pathsAllowed // []) | .acceptance = (.acceptance // []))' \
      "$file" > "$d/plan.json.tmp" && mv "$d/plan.json.tmp" "$d/plan.json"
   echo "plan stored: $(jq '.tasks | length' "$d/plan.json") tasks → $d/plan.json"
@@ -209,6 +265,29 @@ resolve_task() {
   [ -n "$id" ] && printf '%s' "$id"
 }
 
+# stage_gate <run_dir> <stage>: in staged mode, the first earlier stage the user has not approved yet.
+stage_gate() {
+  [ "$(jq -r '.mode // "single"' "$1/plan.json")" = staged ] || return 0
+  [ -f "$1/approved.json" ] || echo '[]' > "$1/approved.json"
+  jq -r --arg s "$2" --slurpfile ap "$1/approved.json" '(.stages // []) as $all | ($all | index($s)) as $i
+    | if $i == null then empty else [ $all[:$i][] | select(. as $x | ($ap[0] | map(.stage) | index($x)) == null) ] | first // empty end' "$1/plan.json"
+}
+
+# open_tasks <run_dir> [stage]: tasks neither accepted nor cancelled. A reviewer, tester, qa or
+# design-reviewer task is settled with the task it covers: the lead accepts code, not reviews.
+open_tasks() {
+  [ -f "$1/cancelled.json" ] || echo '[]' > "$1/cancelled.json"
+  [ -f "$1/accepted.json" ] || echo '[]' > "$1/accepted.json"
+  jq -r --arg st "${2:-}" --slurpfile acc "$1/accepted.json" --slurpfile can "$1/cancelled.json" '
+    ($acc[0] + $can[0] | map(.taskId)) as $ok
+    | .tasks[]
+    | select($st == "" or (.stage // "") == $st)
+    | .id as $id
+    | select(($ok | index($id)) == null)
+    | select(((.reviewOf // .verifies // .qaOf // .designOf // "") as $t | $t != "" and ($ok | index($t)) != null) | not)
+    | .id' "$1/plan.json"
+}
+
 is_cancelled() {
   [ -f "$1/cancelled.json" ] && jq -e --arg id "$2" 'map(select(.taskId == $id)) | length > 0' "$1/cancelled.json" >/dev/null 2>&1
 }
@@ -227,7 +306,7 @@ task_done() {
     return 0
   fi
   if [ "$role" = developer ]; then
-    case "${3:-}" in reviewer|tester|qa) ;; *) return 1 ;; esac
+    case "${3:-}" in reviewer|tester|qa|design-reviewer) ;; *) return 1 ;; esac
   fi
   local h="$1/handoffs/$name.md"
   [ -f "$h" ] && [ "$(handoff_word "$h")" = "done" ]
@@ -255,6 +334,7 @@ cmd_ready() {
     spawned=$(jq -r --arg id "$id" 'map(select(.taskId == $id)) | length' "$d/sessions.json")
     [ "$spawned" -eq 0 ] || continue
     is_cancelled "$d" "$id" && continue
+    [ -n "$(stage_gate "$d" "$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .stage // ""' "$d/plan.json")")" ] && continue
     role=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .role' "$d/plan.json")
     ok=1
     for dep in $(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .dependsOn[]' "$d/plan.json"); do
@@ -318,6 +398,17 @@ cmd_review() {
       ;;
     *) die "review <run> <venue|rounds> <value>" ;;
   esac
+}
+
+cmd_acceptance() {
+  local d; d=$(run_dir "${1:-}"); local value="${2:-}"
+  case "$value" in on|true|yes) value=true ;; off|false|no) value=false ;; *) die "acceptance <run> <on|off>" ;; esac
+  jq --argjson v "$value" '.acceptance = $v' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
+  if [ "$value" = true ]; then
+    echo "acceptance testing on: the plan needs a qa-lead author task after the spec and an accept task after every developer task"
+  else
+    echo "acceptance testing off"
+  fi
 }
 
 cmd_interactive() {
@@ -464,6 +555,8 @@ render_brief() {
   for dep in $(jq -r '.dependsOn[]' <<<"$task"); do
     task_done "$d" "$dep" "$(jq -r '.role' <<<"$task")" || die "task '$id' depends on '$dep', which is not done yet: its handoff must say done, and a developer task must also be accepted (orch accept) before anything but its reviewer, tester or QA builds on it"
   done
+  local gate; gate=$(stage_gate "$d" "$(jq -r '.stage // ""' <<<"$task")")
+  [ -z "$gate" ] || die "task '$id' is in stage $(jq -r '.stage' <<<"$task"), which waits for the user's approval of stage $gate (orch approve)"
   local run base orch_name name role goal budget venue max_rounds review_of review_line
   run=$(jq -r '.run' "$d/plan.json"); base=$(jq -r '.baseBranch' "$d/plan.json"); orch_name=$(jq -r '.orchestrator' "$d/plan.json")
   name=$(jq -r '.name' <<<"$task"); role=$(jq -r '.role' <<<"$task"); goal=$(jq -r '.goal' <<<"$task"); budget=$(jq -r '.budget' <<<"$task")
@@ -508,12 +601,53 @@ render_brief() {
       review_line="$review_line
   NOT authorized: creating or changing data in shared development databases or services. Use the fixtures, throwaway database or test setup the repository provides; a criterion that cannot be exercised without writing shared data is BLOCKED: to the orchestrator."
     fi
+  elif [ "$role" = qa ]; then
+    local qa_dev; qa_dev=$(jq -r --arg id "$(jq -r '.qaOf // ""' <<<"$task")" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
+    review_line="qa of ${qa_dev:-the developer task named in your goal} — round $round of $max_rounds.
+  Before the developer writes code: TDD test cases for its task in your allowed paths — every acceptance criterion, edge and failure case, each with its observable result. FYI: $qa_dev with the path, send a partial handoff, and wait for its DONE.
+  After DONE, audit its branch (git -C <its worktree> diff $base...HEAD): every case covered by a test that fails when the behaviour breaks; nothing skipped, disabled, focused or weakened; no mock standing in for the unit under test; its baseline, red and green runs real — re-run them. Findings go to $qa_dev as Q:, the verdict into your handoff. A later round audits the fixes the same way."
+  elif [ "$role" = qa-lead ]; then
+    if [ "$(jq -r '.phase' <<<"$task")" = author ]; then
+      review_line="qa-lead, phase author: acceptance tests for the whole change, from the spec's criteria (or the OpenSpec change's scenarios), in your allowed paths and the repository's test framework. They fail now and pass when the change is done: run them once against $base and paste the red run. Developers make them green and never edit them; an untestable criterion is a Q: to the analyst."
+    else
+      review_line="qa-lead, phase accept: accept the whole change now that every developer task and stage is done. Run the acceptance suite on the integrated result ($base after the integrator's merges, or the branch your task names), one row per criterion — pass, fail, not run — with the command and its output, then a verdict: ship / not yet. A failure goes to the orchestrator with the test, the command and the output; the orchestrator decides."
+    fi
+  elif [ "$role" = design-reviewer ]; then
+    local dr_dev dr_des
+    dr_dev=$(jq -r --arg id "$(jq -r '.designOf // ""' <<<"$task")" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
+    dr_des=$(jq -r '[.tasks[] | select(.role == "designer") | .name] | join(", ")' "$d/plan.json")
+    review_line="design review of ${dr_dev:-the task named in your goal} against the brief and tokens of ${dr_des:-the designer} — round $round of $max_rounds.
+  Read the design handoff, then the implementation: run it from its worktree or use the tester's evidence, capture every screen and state the brief names into .scratch/evidence/, and compare layout, spacing, type, colour, states and motion. Each finding: the design reference, the screenshot, severity. Questions about intent go to ${dr_des:-the designer} as Q:; you edit nothing."
+  elif [ "$role" = architect ]; then
+    if [ "$(jq -r '.phase' <<<"$task")" = design ]; then
+      review_line="architecture map: $(arch_status). Phase design: build the map when there is none — as detailed as the code allows, since every role relies on it — or bring it up to date when it is behind, then design this change against it in docs/architecture/decisions/$run.md (or the OpenSpec change's design.md). 'orch architecture' shows the size of the job and the graph tools this stack has. Stay reachable: teammates ask you about structure."
+    else
+      review_line="architecture map: $(arch_status). Phase update: the change has landed; update the map to what shipped, from the merged diff, and set built-at to the new commit of $base."
+    fi
   elif [ "$role" = integrator ] && [ "$venue" = pr ]; then
     review_line="review venue: pull request. The task branches carry PRs against $base; merge them in dependency order (gh pr merge <n> --merge, or locally and then push $base when authorized — a pushed merge closes its PR). You open no PR of your own for $base; put the merged PR numbers in your handoff."
   elif [ "$venue" = pr ] && [ "$role" != researcher ]; then
     review_line="review venue: pull request. When your work is ready, push your branch and open a PR against $base (gh pr create --draft --base $base, or glab mr create) with the acceptance criteria as a checklist, then put the PR link in your handoff and in your DONE message. Reviewers comment in threads there; answer each thread with what you changed and the commit that changed it."
   else
     review_line="review venue: branch. A reviewer will read your branch diff against $base and file findings through the orchestrator; answer its questions with file and line."
+  fi
+  local notes="" note_names
+  if [ "$role" = developer ]; then
+    note_names=$(jq -r --arg id "$id" '[.tasks[] | select(.role == "qa" and .qaOf == $id) | .name] | join(", ")' "$d/plan.json")
+    [ -n "$note_names" ] && notes="$notes
+TDD cases: $note_names writes them before you start; wait for its FYI, cover every case, answer its audit"
+    note_names=$(jq -r '[.tasks[] | select(.role == "qa-lead" and .phase == "author") | .pathsAllowed[]] | unique | join(", ")' "$d/plan.json")
+    [ -n "$note_names" ] && notes="$notes
+acceptance tests (the qa-lead's): $note_names — never edit them; the change is done when they pass"
+  fi
+  if [ "$role" != architect ]; then
+    note_names=$(jq -r '[.tasks[] | select(.role == "architect") | .name] | first // empty' "$d/plan.json")
+    [ -n "$note_names" ] && notes="$notes
+architecture map: docs/architecture/ — rely on it; structure questions go to $note_names"
+  fi
+  if [ "$(jq -r '.mode // "single"' "$d/plan.json")" = staged ]; then
+    notes="$notes
+stage: $(jq -r '.stage' <<<"$task") of $(jq -r '.stages | join(" → ")' "$d/plan.json"); the user approves each stage before the next one starts"
   fi
   local mcp mcp_line
   mcp=$(task_mcp "$task")
@@ -553,7 +687,7 @@ $auth_line
 $review_line
 allowed paths (relative to your worktree; the guard enforces them): $(jq -r '.pathsAllowed | join(", ")' <<<"$task")
 budget: $budget guarded tool calls (Bash, Edit, Write and every MCP tool); at 80% the guard holds one call and asks for a partial handoff, at 100% it stops you — plan for it
-$mcp_line
+$mcp_line$notes
 acceptance the orchestrator will check itself:
 $(jq -r '.acceptance[] | "- " + .' <<<"$task")
 
@@ -831,6 +965,144 @@ cmd_cost() {
     END { printf "%-18s %10d %10d %12d %12d\n", "TOTAL", o, i, r, w }'
 }
 
+cmd_approve() {
+  local d; d=$(run_dir "${1:-}"); local stage="${2:-}" note="${3:-}"
+  [ "$(jq -r '.mode // "single"' "$d/plan.json")" = staged ] || die "run ${1:-} is not staged; approve applies to mode staged"
+  [ -n "$stage" ] || die "approve <run> <stage> \"<the user's words>\""
+  jq -e --arg s "$stage" '(.stages // []) | index($s) != null' "$d/plan.json" >/dev/null || die "no stage '$stage'; stages: $(jq -r '.stages | join(", ")' "$d/plan.json")"
+  local gate; gate=$(stage_gate "$d" "$stage")
+  [ -z "$gate" ] || die "stage $gate comes first and is not approved yet"
+  local open; open=$(open_tasks "$d" "$stage" | tr '\n' ' ') || die "could not work out which tasks are accepted"
+  [ -z "$open" ] || die "stage $stage has tasks not accepted: ${open}- accept or cancel them first"
+  [ -n "$note" ] || die "approve needs the user's words: orch approve ${1:-} $stage \"<what the user said>\""
+  jq --arg s "$stage" --arg note "$note" --arg t "$(now)" 'map(select(.stage != $s)) + [{stage:$s, at:$t, note:$note}]' "$d/approved.json" > "$d/approved.tmp" && mv "$d/approved.tmp" "$d/approved.json"
+  printf '%s|orchestrator|%s|approve|allow|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$stage" "$note" >> "$d/events.log"
+  echo "stage $stage approved — orch ready shows what the next stage starts with"
+}
+
+html_esc() { printf '%s' "$1" | jq -Rrs @html; }
+# section <file> <heading>: the lines under "## <heading>" up to the next "## ".
+section() { awk -v h="$2" '$0 == "## " h {f=1; next} /^## / && f {exit} f' "$1"; }
+
+# cmd_stage_report: one self-contained page per stage for the user's approval: every task's state,
+# status, branch and what it did, with the images its handoff names — only those inside the repository.
+cmd_stage_report() {
+  local d; d=$(run_dir "${1:-}"); local stage="${2:-}"
+  [ -n "$stage" ] || die "stage-report <run> <stage>"
+  jq -e --arg s "$stage" '[.tasks[] | select(.stage == $s)] | length > 0' "$d/plan.json" >/dev/null || die "no task in stage '$stage'"
+  local root out img agents='[]'
+  root=$(cd "$(repo_root)" && pwd -P); out="$d/stages/$stage"; img="$out/img"
+  rm -rf "$out"; mkdir -p "$img"
+  command -v claude >/dev/null 2>&1 && agents=$(claude agents --json --all 2>/dev/null || echo '[]')
+  local cards="" id name role hs h p f rf cwd sid pics n=0
+  for id in $(jq -r --arg s "$stage" '.tasks[] | select(.stage == $s) | .id' "$d/plan.json"); do
+    name=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
+    role=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .role' "$d/plan.json")
+    hs=$(handoff_state "$d" "$name" "$id"); h="$d/handoffs/$name.md"; pics=""
+    if [ -f "$h" ]; then
+      sid=$(jq -r --arg n "$name" 'first(.[] | select(.name == $n) | .id) // empty' "$d/sessions.json")
+      cwd=$(jq -r --arg id "$sid" 'first(.[] | select(.id == $id) | .cwd) // empty' <<<"$agents")
+      for p in $(grep -oE '[^][:space:]()`"<>'"'"'[]+\.(png|jpe?g|gif|webp)' "$h" | sort -u); do
+        case "$p" in /*) f="$p" ;; *) [ -n "$cwd" ] || continue; f="$cwd/$p" ;; esac
+        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        rf="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)/$(basename "$f")"
+        case "$rf" in "$root"/*) ;; *) continue ;; esac
+        cp "$rf" "$img/$name-$(basename "$rf")" && n=$((n + 1))
+        pics="$pics<img src=\"img/$(html_esc "$name-$(basename "$rf")")\" alt=\"$(html_esc "$(basename "$rf")")\">"
+      done
+    fi
+    cards="$cards<section class=\"card\"><h2>$(html_esc "$name") <span class=\"role\">$(html_esc "$role")</span></h2><p class=\"state\">$(html_esc "$hs")</p>"
+    if [ -f "$h" ]; then
+      cards="$cards<h3>Status</h3><pre>$(html_esc "$(section "$h" Status)")</pre><h3>Branch</h3><pre>$(html_esc "$(section "$h" Branch)")</pre><h3>What I did</h3><pre>$(html_esc "$(section "$h" "What I did")")</pre>"
+    else
+      cards="$cards<p>No handoff yet.</p>"
+    fi
+    [ -n "$pics" ] && cards="$cards<h3>Evidence</h3><div class=\"pics\">$pics</div>"
+    cards="$cards</section>"
+  done
+  cat > "$out/index.html" <<EOF
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage $(html_esc "$stage") review</title>
+<style>
+:root{--bg:#fbfbfa;--fg:#1c1c1a;--muted:#5d5d58;--card:#ffffff;--line:#deded9}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#161615;--fg:#ececea;--muted:#a3a39e;--card:#1f1f1e;--line:#34342f}}
+:root[data-theme="dark"]{--bg:#161615;--fg:#ececea;--muted:#a3a39e;--card:#1f1f1e;--line:#34342f}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,sans-serif}
+main{max-width:960px;margin:0 auto;padding:24px 16px}
+h1{font-size:22px;margin:0 0 4px}.meta{color:var(--muted);margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin:16px 0}
+h2{font-size:17px;margin:0}.role{color:var(--muted);font-weight:400}.state{font-weight:600;margin:4px 0 8px}
+h3{font-size:13px;color:var(--muted);margin:12px 0 4px;text-transform:uppercase;letter-spacing:.04em}
+pre{white-space:pre-wrap;word-break:break-word;font:13px/1.45 ui-monospace,monospace;margin:0}
+.pics{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:4px}
+</style></head>
+<body><main>
+<h1>Stage $(html_esc "$stage")</h1>
+<p class="meta">Run $(html_esc "${1:-}") · $(html_esc "$(now)") · the next stage starts after your approval</p>
+$cards
+</main></body></html>
+EOF
+  echo "$out/index.html"
+  echo "$n image(s) copied into $img — publish the page with its img/ files, or open it locally"
+}
+
+# arch_sha: the commit the architecture map was built at, when it names a real one.
+arch_sha() {
+  local r m sha; r=$(repo_root); m="$r/docs/architecture/README.md"
+  [ -f "$m" ] || return 0
+  sha=$(sed -n 's/^built-at: *\([0-9a-f]\{7,40\}\).*/\1/p' "$m" | sed -n 1p)
+  [ -n "$sha" ] && git -C "$r" cat-file -e "$sha^{commit}" 2>/dev/null && printf '%s' "$sha"
+}
+
+arch_status() {
+  local r sha; r=$(repo_root)
+  if [ ! -f "$r/docs/architecture/README.md" ]; then printf 'none yet — build it'; return; fi
+  sha=$(arch_sha)
+  if [ -z "$sha" ]; then printf 'docs/architecture/README.md without a valid built-at commit — treat it as stale'; return; fi
+  printf 'docs/architecture/README.md, built at %s, %s commits behind HEAD' "$sha" "$(git -C "$r" rev-list --count "$sha..HEAD")"
+}
+
+# graph_tools <repo root>: the dependency-graph generators this stack could use, found or not.
+graph_tools() {
+  local r="$1"
+  row() { printf '  %-8s %-30s %s\n' "$1" "$2" "$3"; }
+  row any "git history (co-change)" available
+  if [ -f "$r/package.json" ]; then
+    if [ -x "$r/node_modules/.bin/depcruise" ]; then row js/ts dependency-cruiser available; else row js/ts dependency-cruiser "missing — npx dependency-cruiser, or a dev dependency (install-tools)"; fi
+    if [ -x "$r/node_modules/.bin/madge" ]; then row js/ts madge available; else row js/ts madge "missing — npx madge"; fi
+  fi
+  if [ -f "$r/Cargo.toml" ]; then
+    if command -v cargo >/dev/null 2>&1; then row rust "cargo metadata (crate graph)" available; fi
+    if command -v cargo-modules >/dev/null 2>&1; then row rust cargo-modules available; else row rust cargo-modules "missing — cargo install --locked cargo-modules"; fi
+  fi
+  if [ -f "$r/pyproject.toml" ] || [ -f "$r/setup.py" ]; then
+    if command -v pydeps >/dev/null 2>&1; then row python pydeps available; else row python pydeps "missing — pipx install pydeps"; fi
+  fi
+  if [ -f "$r/go.mod" ] && command -v go >/dev/null 2>&1; then row go "go mod graph" available; fi
+  if [ -f "$r/pom.xml" ] || [ -f "$r/build.gradle" ] || [ -f "$r/build.gradle.kts" ]; then
+    if command -v jdeps >/dev/null 2>&1; then row java jdeps available; else row java jdeps "missing — part of the JDK"; fi
+  fi
+}
+
+cmd_architecture() {
+  local r files sha changed=0; r=$(repo_root)
+  echo "architecture map: $(arch_status)"
+  files=$(git -C "$r" ls-files | wc -l | tr -d ' ')
+  echo "tracked files: $files"
+  echo "by extension (5 files or more):"
+  git -C "$r" ls-files | sed -n 's/.*\.\([A-Za-z0-9]*\)$/\1/p' | sort | uniq -c | sort -rn | awk '$1 >= 5 {printf "  %-10s %s\n", $2, $1}'
+  sha=$(arch_sha)
+  if [ -n "$sha" ]; then
+    changed=$(git -C "$r" diff --name-only "$sha" HEAD | wc -l | tr -d ' ')
+    echo "files changed since the map: $changed"
+  fi
+  echo "graph tools for this stack:"
+  graph_tools "$r"
+  echo "architect budget, a heuristic to calibrate after a run: building from scratch ~$((40 + files / 20)) calls, updating ~$((15 + changed / 5)) calls"
+}
+
 # cmd_close: nothing here deletes a branch or a worktree. It proves which of the run's branches are
 # contained in the base branch (counting what it checked), drops the run's entries from the session
 # index and marks the run closed.
@@ -839,14 +1111,7 @@ cmd_close() {
   [ "${2:-}" = --force ] && force=1
   # A reviewer or tester task is settled with the task it covers: the lead accepts the code and
   # reads the review as its evidence.
-  [ -f "$d/cancelled.json" ] || echo '[]' > "$d/cancelled.json"
-  local open; open=$(jq -r --slurpfile acc "$d/accepted.json" --slurpfile can "$d/cancelled.json" '
-    ($acc[0] + $can[0] | map(.taskId)) as $ok
-    | .tasks[]
-    | .id as $id
-    | select(($ok | index($id)) == null)
-    | select(((.reviewOf // .verifies // "") as $t | $t != "" and ($ok | index($t)) != null) | not)
-    | .id' "$d/plan.json") || die "could not work out which tasks are accepted; refusing to close"
+  local open; open=$(open_tasks "$d") || die "could not work out which tasks are accepted; refusing to close"
   open=$(printf '%s' "$open" | tr '\n' ' ')
   if [ -n "$open" ] && [ "$force" -eq 0 ]; then
     die "tasks not accepted: ${open}- accept them, or close anyway with: orch close ${1:-} --force"
@@ -907,6 +1172,10 @@ case "$cmd" in
   resume) cmd_resume "$@" ;;
   decide) cmd_decide "$@" ;;
   close) cmd_close "$@" ;;
+  acceptance) cmd_acceptance "$@" ;;
+  approve) cmd_approve "$@" ;;
+  stage-report) cmd_stage_report "$@" ;;
+  architecture) cmd_architecture "$@" ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$cmd'"; ;;
 esac

@@ -33,18 +33,23 @@ Write the plan as a task graph: roles, names, goals, allowed paths, acceptance, 
 - With OpenSpec in the repository the analyst writes the change there (`openspec/changes/<id>/**` as its paths) instead of `docs/specs/`.
 - The designer is in the plan only when something visual is produced: UI, game HUD, site, graphic, 3D asset. It delivers a design brief and assets the developer implements from.
 - Developers own disjoint paths in the same wave. Same files means sequence, not parallelism.
-- QA depends on the developer task it tests and owns the test paths; it does not touch source.
+- **Every developer task gets a qa task** with `qaOf: <task-id>`, in the same wave as the developer: it writes the task's TDD cases before the code, then audits the result for corner-cutting. It owns its cases' paths and never touches source.
+- **A qa-lead covers the whole change** unless `orch acceptance <run> off`: a task with `phase: "author"` right after the spec writes the acceptance tests (they fail until the change is done; developers depend on it and never edit them), and one with `phase: "accept"` after every developer task — directly or through the integrator — runs them on the integrated result and proposes the verdict on the whole change.
+- **A developer task that implements a designer's work gets a design-reviewer task** with `designOf: <task-id>`: read-only, it compares the running result with the designer's brief and tokens by screenshots, in rounds like the reviewer.
+- **The architect is optional.** Run `orch architecture` and quote it when you propose one: whether a map exists, how far behind it is, the size of the job and the graph tools this stack has. A task with `phase: "design"` comes first — it builds the map when there is none, as detailed as the code allows, or brings it up to date, then designs the change; one with `phase: "update"` comes after the merge and updates the map to what shipped. It never rebuilds an existing map. Every other role is pointed at the map and at the architect for structure questions.
 - **MCP servers per task.** A session starts only the servers its task's `mcp` list names — `orch tools` lists them by scope. Default: none, and a tester gets the repository's `.mcp.json`; `"mcp": "inherit"` keeps the machine's full set. Every session starting every server is what pushed a wave's machine load into the dozens.
 - **Every developer task gets a reviewer task** with `reviewOf: <task-id>`; `orch plan` refuses a graph where code goes unreviewed. The reviewer owns no paths and delivers findings with cited lines.
 - **With interactive verification on, every developer task also gets a tester task** with `verifies: <task-id>`: it runs the application from the branch, exercises each acceptance criterion as a user would with the means the machine has (browser MCP, Playwright, screenshots, terminal capture), and hands over evidence per criterion. `orch plan` refuses the graph otherwise. Testers run in the same wave as reviewers and re-run per round like them.
 - The integrator depends on every branch it merges and is the only role allowed to merge into the base branch. Pushing the base branch stays with the user unless the user said otherwise in the task.
-- Budgets, in guarded tool calls (Bash, Edit, Write and every MCP tool): analyst 40–80, researcher 30–60, designer 50–100, developer 80–150, QA 80–120, reviewer 30–60, tester 80–150 (it drives the app through MCP calls, and they count), integrator 40–80. A brake that never engages is no brake: a budget several times what the work needs lets drift run that far. At 80% the guard holds one call and asks for a partial handoff. A session that runs out writes a handoff and you respawn narrower; `orch status` marks a session with `!` from 80%, and `orch budget <run> <task-id|name> <n>` raises a live session's budget when the work is sound and merely bigger than planned — editing `plan.json` by hand does not reach the guard.
+- Budgets, in guarded tool calls (Bash, Edit, Write and every MCP tool): analyst 40–80, researcher 30–60, designer 50–100, developer 80–150, qa 40–100, qa-lead 60–120 to author and 30–80 to accept, reviewer 30–60, design-reviewer 30–60, tester 80–150 (it drives the app through MCP calls, and they count), integrator 40–80; the architect's comes from `orch architecture` — building a map of a large repository is the biggest task of a run, updating one is small. A brake that never engages is no brake: a budget several times what the work needs lets drift run that far. At 80% the guard holds one call and asks for a partial handoff. A session that runs out writes a handoff and you respawn narrower; `orch status` marks a session with `!` from 80%, and `orch budget <run> <task-id|name> <n>` raises a live session's budget when the work is sound and merely bigger than planned — editing `plan.json` by hand does not reach the guard.
 
 ## 2. Ask once, and collect every gate in the same breath
 
 Forks whose wrong guess would waste the run go to the user before spawning, as one numbered list with options and your recommendation. Everything else: take the default and say so in the plan summary.
 
 In that same list, settle every action this run may need that a session cannot take on its own, because after approval the run must never stop to ask again:
+
+- **one run or staged** — `"mode": "staged"` with an ordered `stages` list (architecture, spec, each development stage) and a `stage` on every task. Staged is the one place the run waits for the user on purpose: after each stage you show the result and the next stage starts only on their word. See 4b.
 
 - **push the base branch** — the integrator merges locally regardless; may it push?
 - **delete merged branches and worktrees** at the end?
@@ -90,6 +95,14 @@ Repeat until a round comes back clean, or until the run's `maxRounds` (default 3
 Accept the reviewed task only after a clean round, or after you yourself confirmed the remaining findings are not blockers.
 
 **A real defect after the cap.** The last round can still surface a genuine bug, also after you accepted. The cap bounds the reviewer loop, not the fix: message the developer the finding directly, let it fix and report `DONE`, and verify that fix yourself — run the tests, read the diff — instead of another reviewer round. Record what you found and how you verified it with `orch decide`, then `orch accept` the task again with the new note; raise the developer's budget with `orch budget` if the fix needs it. When you would rather have independent eyes on a large fix, `orch review <run> rounds <n>` lifts the cap.
+
+## 4b. Staged runs
+
+In a staged run `orch ready` holds back every task of a stage until the user has approved all earlier ones. When a stage's tasks are accepted:
+
+1. `orch stage-report <run> <stage>` writes `<run dir>/stages/<stage>/index.html` with every task's state, status, branch and what it did, and the screenshots its handoff names (copied to `img/`, only from inside the repository).
+2. Show it to the user: publish the page with its `img/` files as an artifact when your harness offers one, otherwise open the file. Add in chat what you verified yourself and what you did not.
+3. End your turn and wait. On the user's go, `orch approve <run> <stage> "<their words>"` — it refuses while a task of the stage is open, or an earlier stage is not approved — then spawn the next wave. A change of direction goes into `decisions.md` and the plan (`orch task add|set`, `orch cancel`) before anything is spawned.
 
 ## 5. Report
 
