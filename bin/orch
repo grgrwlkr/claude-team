@@ -52,6 +52,16 @@ ev() {
   printf '%s\n' "$line" >> "$d/events.log"
 }
 
+# lock_run / unlock_run <run_dir>: the parallel spawns of a wave write sessions.json one at a time.
+lock_run() {
+  local i=0
+  until mkdir "$1/.lock" 2>/dev/null; do
+    sleep 0.1; i=$((i + 1))
+    [ "$i" -lt 600 ] || die "$1/.lock held for a minute; remove it if no orch command is running"
+  done
+}
+unlock_run() { rmdir "$1/.lock" 2>/dev/null; }
+
 run_dir() {
   plain_name "$1" || die "run name '$1' must be letters, digits, dots, hyphens and underscores, without '..'"
   local r; r="$(repo_root)/.orchestrator/$1"
@@ -89,6 +99,8 @@ orch task add <run> <file|->                      add a task (or an array of tas
 orch task set <run> <task-id|name> <field> <json> change one field of a task; budget and pathsAllowed reach live sessions too
 orch paths <run> <task-id|name> add <glob>...     widen a task's allowed paths, in the plan and in its live sessions
 orch cancel <run> <task-id|name> "<why>"|--undo   drop a task from the run: never ready, settled for close
+orch forget <run> <name|--dead>                   drop session records — --dead: those claude agents does not list on this machine — so their tasks can be spawned again
+orch grant <run> <task-id|name> <glob>...         the same as orch paths <run> <task> add <glob>...
 orch stop <run> <name|all>                        stop the run's sessions (claude stop); worktrees stay
 orch cost <run>                                   tokens per session from the transcripts, each message counted once
 orch address <run> <session-name>                 set the orchestrator's addressable name (from ListAgents)
@@ -786,16 +798,14 @@ spawn_one() {
   sid_short=$(printf '%s\n' "$out" | sed -n 's/.*backgrounded · \([0-9a-f]\{8\}\).*/\1/p' | head -1)
   [ -n "$sid_short" ] || die "could not parse the session id from claude --bg output:
 $out"
-  local session_id="" i=0
-  while [ $i -lt 30 ]; do
-    session_id=$(claude agents --json --all 2>/dev/null | jq -r --arg id "$sid_short" '.[] | select(.id == $id) | .sessionId // empty' | head -1)
-    [ -n "$session_id" ] && break
-    sleep 1; i=$((i+1))
-  done
-  [ -n "$session_id" ] || die "session $sid_short started but its sessionId did not appear in claude agents --json within 30 s; register it by hand"
-  jq --arg id "$id" --arg name "$name" --arg role "$role" --arg short "$sid_short" --arg sid "$session_id" --arg t "$(now)" --argjson task "$task" \
-     '. + [{taskId:$id, name:$name, role:$role, id:$short, sessionId:$sid, pathsAllowed:$task.pathsAllowed, budget:$task.budget, spawnedAt:$t}]' \
+  # Registered by the short id claude --bg printed, the start of the full session id: the guard
+  # recognises the session by it and orch status fills in the full id. Polling claude agents for the
+  # full id cost minutes per session under load.
+  lock_run "$d"
+  jq --arg id "$id" --arg name "$name" --arg role "$role" --arg short "$sid_short" --arg t "$(now)" --argjson task "$task" \
+     '. + [{taskId:$id, name:$name, role:$role, id:$short, sessionId:"", pathsAllowed:$task.pathsAllowed, budget:$task.budget, spawnedAt:$t}]' \
      "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
+  unlock_run "$d"
   printf '%s\n' "$(jq -c --arg n "$name" 'map(select(.name == $n)) | .[0]' "$d/sessions.json")"
   printf 'next: end your turn and wait for "STARTED: %s"; subscribe with notify_when_idle once, after STARTED arrives, and never again\n' "$name" >&2
 }
@@ -815,9 +825,12 @@ cmd_spawn() {
     esac; shift
   done
   if [ "$wave" -eq 1 ]; then
-    local any=0 t
-    for t in $(cmd_ready "$(jq -r '.run' "$d/plan.json")"); do any=1; spawn_one "$d" "$t" "$dry" 1; done
-    [ "$any" -eq 1 ] || echo "no ready task to spawn"
+    # The tasks of a wave launch in parallel: each claude --bg takes seconds, and far more under load.
+    local t pids="" p fail=0
+    for t in $(cmd_ready "$(jq -r '.run' "$d/plan.json")"); do spawn_one "$d" "$t" "$dry" 1 & pids="$pids $!"; done
+    [ -n "$pids" ] || echo "no ready task to spawn"
+    for p in $pids; do wait "$p" || fail=$((fail + 1)); done
+    [ "$fail" -eq 0 ] || die "$fail of the wave's spawns failed; the messages above say why"
   else
     [ -n "$id" ] || die "spawn <run> <task-id> [--round N] [--budget N] | --wave"
     spawn_one "$d" "$id" "$dry" "$round" "$budget"
@@ -829,13 +842,21 @@ cmd_status() {
   [ "${2:-}" = --no-live ] && live=0
   local agents='[]'
   if [ "$live" -eq 1 ] && command -v claude >/dev/null 2>&1; then agents=$(claude agents --json --all 2>/dev/null || echo '[]'); fi
+  if [ "$live" -eq 1 ] && jq -e 'map(select((.sessionId // "") == "")) | length > 0' "$d/sessions.json" >/dev/null 2>&1; then
+    lock_run "$d"
+    jq --argjson a "$agents" 'map(. as $r | if ($r.sessionId // "") == "" then .sessionId = (first($a[] | select(.id == $r.id) | .sessionId) // "") else . end)' \
+      "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
+    unlock_run "$d"
+  fi
   printf '%-16s %-11s %-9s %-8s %-9s %-8s %s\n' NAME ROLE ID STATE HANDOFF CALLS LAST_EVENT
-  jq -r '.[] | [.name, .role, .id, .sessionId, (.budget|tostring), .taskId] | @tsv' "$d/sessions.json" | while IFS="$(printf '\t')" read -r name role id sid budget taskid; do
-    local state calls last hs mark
+  jq -r '.[] | [.name, .role, .id, (if (.sessionId // "") == "" then "-" else .sessionId end), (.budget|tostring), .taskId] | @tsv' "$d/sessions.json" | while IFS="$(printf '\t')" read -r name role id sid budget taskid; do
+    local state calls last hs mark key
+    # Until its full id is known a session's lines are found by its short id.
+    if [ "$sid" = - ]; then key="${id}[^|]*"; else key="$sid"; fi
     state=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .state // "?"' <<<"$agents" | head -1); [ -n "$state" ] || state="-"
-    calls=$(grep -c "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$d/events.log" 2>/dev/null || true); calls=${calls:-0}
+    calls=$(grep -c "^[^|]*|$key|[^|]*|[^|]*|allow|" "$d/events.log" 2>/dev/null || true); calls=${calls:-0}
     # The last event of any kind, not the last block: a stale "Stop|no handoff" hid a handoff written afterwards.
-    last=$(grep "^[^|]*|$sid|" "$d/events.log" 2>/dev/null | sed -n '$p' | cut -d'|' -f4,5,6 | cut -c1-58)
+    last=$(grep "^[^|]*|$key|" "$d/events.log" 2>/dev/null | sed -n '$p' | cut -d'|' -f4,5,6 | cut -c1-58)
     hs=$(handoff_state "$d" "$name" "$taskid")
     # "!" from 80% of the budget: time to look before the guard stops the session mid-thought.
     mark=""; [ "$budget" -gt 0 ] 2>/dev/null && [ $((calls * 5)) -ge $((budget * 4)) ] && mark="!"
@@ -958,6 +979,35 @@ cmd_cancel() {
   echo "cancelled $id: $note — never ready, settled for close; its dependents stay blocked until you re-plan them (orch task set <id> dependsOn …)"
 }
 
+# cmd_forget: a run moved to another machine keeps the records of sessions that machine does not
+# run, and orch ready never offers a task that has one. Handoffs, worktrees and branches stay.
+cmd_forget() {
+  local d; d=$(run_dir "${1:-}"); local who="${2:-}" gone
+  [ -n "$who" ] || die "forget <run> <name|--dead>"
+  if [ "$who" = --dead ]; then
+    need claude
+    local live; live=$(claude agents --json --all 2>/dev/null) || die "claude agents --json failed; nothing forgotten"
+    [ "$(jq 'length' <<<"$live" 2>/dev/null || echo 0)" -gt 0 ] || die "claude agents lists no session on this machine, which proves nothing; forget sessions by name"
+    gone=$(jq -c --argjson a "$live" '[.[] | select(.id as $i | ($a | map(.id) | index($i)) == null)]' "$d/sessions.json")
+  else
+    gone=$(jq -c --arg n "$who" '[.[] | select(.name == $n)]' "$d/sessions.json")
+    [ "$(jq 'length' <<<"$gone")" -gt 0 ] || die "no session named '$who' in run ${1:-}"
+  fi
+  [ "$(jq 'length' <<<"$gone")" -gt 0 ] || { echo "every session of run ${1:-} runs on this machine"; return 0; }
+  lock_run "$d"
+  jq --argjson g "$gone" '[.[] | select(.name as $n | ($g | map(.name) | index($n)) == null)]' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
+  unlock_run "$d"
+  local id f real; real=$(cd "$d" && pwd -P)
+  for id in $(jq -r '.[].id' <<<"$gone"); do
+    for f in "$INDEX_DIR/$id"*; do
+      [ -f "$f" ] || continue
+      case "$(cat "$f")" in "$d"|"$real") rm -f "$f" ;; esac
+    done
+  done
+  ev "$d" orchestrator "$who" forget allow "$(jq -r 'map(.name) | join(" ")' <<<"$gone")"
+  echo "forgot $(jq -r 'map(.name) | join(", ")' <<<"$gone") — their tasks can be spawned again; handoffs, worktrees and branches stay"
+}
+
 cmd_stop() {
   local d; d=$(run_dir "${1:-}"); local who="${2:-}" ids
   [ -n "$who" ] || die "stop <run> <name|all>"
@@ -982,8 +1032,8 @@ cmd_stop() {
 cmd_cost() {
   local d; d=$(run_dir "${1:-}")
   printf '%-18s %10s %10s %12s %12s\n' NAME OUTPUT INPUT CACHE_READ CACHE_WRITE
-  jq -r '.[] | [.name, .sessionId] | @tsv' "$d/sessions.json" | while IFS="$(printf '\t')" read -r name sid; do
-    local f; f=$(find "$PROJECTS_DIR" -maxdepth 2 -name "$sid.jsonl" 2>/dev/null | sed -n 1p)
+  jq -r '.[] | [.name, (if (.sessionId // "") == "" then .id else .sessionId end)] | @tsv' "$d/sessions.json" | while IFS="$(printf '\t')" read -r name sid; do
+    local f; f=$(find "$PROJECTS_DIR" -maxdepth 2 -name "$sid*.jsonl" 2>/dev/null | sed -n 1p)
     if [ -z "$f" ]; then printf '%s\t-\n' "$name"; continue; fi
     jq -s -r --arg n "$name" '[.[] | select(.type == "assistant" and .message.usage != null)]
       | group_by(.message.id // .uuid) | map(.[-1].message.usage)
@@ -1201,6 +1251,8 @@ case "$cmd" in
   paths) cmd_paths "$@" ;;
   cancel) cmd_cancel "$@" ;;
   stop) cmd_stop "$@" ;;
+  forget) cmd_forget "$@" ;;
+  grant) cmd_paths "${1:-}" "${2:-}" add "${@:3}" ;;
   cost) cmd_cost "$@" ;;
   pause) cmd_pause "$@" ;;
   resume) cmd_resume "$@" ;;

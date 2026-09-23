@@ -424,7 +424,7 @@ expect_exit 1 "stop refuses an unknown name" "$ORCH" stop r4 nobody
 
 echo "# wave 4: cost per session from the transcripts, one count per message"
 export ORCH_PROJECTS_DIR="$TMP_BASE/projects"
-RES_SID=$(jq -r '.[] | select(.name == "res-4") | .sessionId' .orchestrator/r4/sessions.json)
+RES_SID="$(jq -r '.[] | select(.name == "res-4") | .id' .orchestrator/r4/sessions.json)-0000-4000-8000-000000000000"
 mkdir -p "$ORCH_PROJECTS_DIR/-some-worktree"
 {
   echo '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}'
@@ -570,5 +570,42 @@ expect_exit 0 "a note with a newline and a pipe" "$ORCH" accept r6 impl "$(print
 expect_no_grep '^2026-01-01T00:00:00Z|sid-x' .orchestrator/r6/events.log "a note cannot forge an event line the guard would count"
 awk -F'|' 'END {print NF}' .orchestrator/r6/events.log > "$TMP_BASE/v"
 expect_grep '^6$' "$TMP_BASE/v" "the accept line keeps its six fields"
+
+echo "# spawn registers by the short id, in parallel; status counts by it; forget drops dead sessions"
+expect_exit 0 "init r7" "$ORCH" init r7 --base main
+"$ORCH" acceptance r7 off > /dev/null
+cat > "$TMP_BASE/r7.json" <<'JSON'
+{"run":"r7","baseBranch":"main","tasks":[
+ {"id":"impl","role":"developer","name":"d7","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"qa","role":"qa","name":"qa-7","qaOf":"impl","goal":"cases","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"rev","role":"reviewer","name":"rev-7","reviewOf":"impl","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"budget":10,"mcp":[]}
+]}
+JSON
+expect_exit 0 "plan r7" "$ORCH" plan r7 "$TMP_BASE/r7.json"
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "spawn the wave" "$ORCH" spawn r7 --wave
+jq -r '[.[].name] | sort | join(",")' .orchestrator/r7/sessions.json > "$TMP_BASE/v"
+expect_grep '^d7,qa-7$' "$TMP_BASE/v" "both sessions of the wave are registered"
+expect_no_grep '^agents' "$TMP_BASE/claude.calls" "spawn no longer polls claude agents"
+D7_ID=$(jq -r '.[] | select(.name == "d7") | .id' .orchestrator/r7/sessions.json)
+echo "2026-09-24T00:00:00Z|${D7_ID}-0000-4000-8000-000000000000|d7|Bash|allow|ls" >> .orchestrator/r7/events.log
+expect_exit 0 "status counts calls by the short id" "$ORCH" status r7 --no-live
+expect_grep "^d7 .* 1/20" "$TMP_BASE/out" "one call counted for d7"
+expect_exit 0 "live status fills in the full session id" "$ORCH" status r7
+jq -r '.[] | select(.name == "d7") | .sessionId' .orchestrator/r7/sessions.json > "$TMP_BASE/v"
+expect_grep "^${D7_ID}-0000-4000-8000-000000000000$" "$TMP_BASE/v" "the full id is stored"
+grep -v "^${D7_ID}$" "$TMP_BASE/claude.bg" > "$TMP_BASE/bg.tmp"; mv "$TMP_BASE/bg.tmp" "$TMP_BASE/claude.bg"
+expect_exit 0 "forget the sessions this machine does not run" "$ORCH" forget r7 --dead
+jq -r '[.[].name] | join(",")' .orchestrator/r7/sessions.json > "$TMP_BASE/v"
+expect_grep '^qa-7$' "$TMP_BASE/v" "the dead one is gone, the live one stays"
+expect_exit 0 "ready after forget" "$ORCH" ready r7
+expect_grep '^impl$' "$TMP_BASE/out" "its task can be spawned again"
+expect_exit 0 "forget by name" "$ORCH" forget r7 qa-7
+jq -r 'length' .orchestrator/r7/sessions.json > "$TMP_BASE/v"
+expect_grep '^0$' "$TMP_BASE/v" "no session left"
+expect_exit 1 "forget refuses an unknown name" "$ORCH" forget r7 nobody
+expect_exit 0 "grant is paths add" "$ORCH" grant r7 d7 'lib/**'
+jq -r '.tasks[] | select(.id == "impl") | .pathsAllowed | join(",")' .orchestrator/r7/plan.json > "$TMP_BASE/v"
+expect_grep 'lib/\*\*' "$TMP_BASE/v" "the grant reached the plan"
 
 summary

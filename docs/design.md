@@ -50,6 +50,10 @@ OpenSpec structures specifications and runs no agents; this plugin runs agents a
 
 A security review (2026-09-23) of 0.6.0 found that a stage name became a path under `rm -rf` and that a note could carry a newline into `events.log`, where the guard counts `allow` lines as budget and a `nudge` line as the reminder given. Run and stage names are now plain single path components, and every event line goes through one helper that turns newlines and pipes into spaces. `orch stage-report` copies only images a handoff names from inside the repository, never a symlink and never a file with a second hard link, which could be a file outside the repository under a name inside it; a session that swaps a file for a symlink between that check and the copy belongs to the class above.
 
+## Sessions register by their short id
+
+`claude --bg` prints an 8-character id, the start of the session's full id. `orch spawn` used to poll `claude agents --json` until the full id appeared, and under a load average near 100 each poll took seconds, so a wave spent minutes per session. Now a session is registered by the short id at once, the guard recognises it by that prefix, `orch status` fills in the full id when it next lists the agents, and the sessions of a wave launch in parallel with `sessions.json` written under a lock. Two sessions of one run whose full ids share their first 8 characters would confuse the guard; the odds are 1 in 4 billion per pair.
+
 ## Known gaps
 
 - Quota exhaustion on the lead's model is not detected; fallback chains cover overload only.

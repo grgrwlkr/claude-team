@@ -147,7 +147,7 @@ case "$tool" in
       # shellcheck disable=SC2053  # the glob must stay unquoted to act as a pattern
       if [[ "$rel" == $pat ]]; then ok=1; break; fi
     done < <(jq -r '.pathsAllowed[]?' <<<"$rec")
-    [ "$ok" -eq 1 ] || block "path $rel is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it."
+    [ "$ok" -eq 1 ] || block "path $rel is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it: it grants a path with orch paths $(basename "$run_dir") $name add <glob>, never by editing sessions.json."
     allow "$rel"
     ;;
   Bash)

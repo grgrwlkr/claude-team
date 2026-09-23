@@ -9,6 +9,7 @@ The lead's job after a spawn is to wait cheaply and judge sharply. Nothing here 
 - On a wake-up with no `DONE`/`BLOCKED` message: check `orch status` once. If the session is `working` or its handoff is `none`, end your turn without re-subscribing.
 - A message to a session running in another permission mode can sit queued without waking it (seen in a run; not documented by Claude Code). If a message gets no reaction, send it once more, and keep every session on one mode with `ORCH_PERMISSION_MODE`.
 - If `SendMessage` refuses a name because several sessions carry it (`N agents are named …`), run `ListAgents` and resend to `<name> [ref]` of the row marked `bg`; the others are offline Remote Control mirrors or sessions of earlier runs. Team sessions start without Remote Control for this reason; a name reused from an earlier run still collides with that run's leftover mirrors.
+- Under heavy load `SendMessage` can report a timeout although the message arrived. Don't resend at once: wait for a reaction, or look at the recipient's recent events, then resend once.
 - Do not `sleep`, do not re-run `orch status` in a loop. The user sees everything in `claude agents` anyway.
 
 ## On every wake-up

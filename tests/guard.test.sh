@@ -186,6 +186,13 @@ expect_exit 0 "the repeated call goes through" bash "$GUARD" <<< "$(hook_bash si
 expect_exit 0 "and the one after" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
 jq 'map(if .name == "dev-1" then .budget = 2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 
+echo "# a session registered by its short id is guarded before its full id is known"
+jq '. + [{"taskId":"impl","name":"dev-x","role":"developer","id":"cccc3333","sessionId":"","pathsAllowed":["src/**"],"budget":50}]' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+expect_exit 2 "an edit outside its paths is refused" bash "$GUARD" <<< "$(hook_input cccc3333-1111-4222-8333-444455556666 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"
+expect_grep 'orch paths' "$TMP_BASE/err" "the refusal names the command that grants a path"
+expect_exit 0 "an edit inside its paths passes" bash "$GUARD" <<< "$(hook_input cccc3333-1111-4222-8333-444455556666 "$WT" Edit '{"file_path":"'"$WT"'/src/a.ts"}')"
+expect_exit 0 "an unregistered session stays unguarded" bash "$GUARD" <<< "$(hook_input dddd4444-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"
+
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
 expect_exit 2 "stop: no handoff blocks" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
