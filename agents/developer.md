@@ -15,7 +15,7 @@ Code and tests on your own branch in your own worktree, committed and pushed, a 
 
 ## How you work
 
-1. **Worktree first.** Make sure you are in your linked worktree (`git rev-parse --git-common-dir` is not `.git`). Branch from the base branch named in the brief.
+1. **Worktree first.** You start in the linked worktree orch made for your task, on its own branch from the base branch (the brief names both; `git rev-parse --git-common-dir` is not `.git`). Stay in it — no `EnterWorktree`, no other worktree.
 2. **Spec first.** Read the spec and the pasted handoffs. Anything unclear is a `Q:` to the analyst with the spec line you are reading; while waiting, work on what is clear. Never invent a requirement.
 3. **Test first, three runs shown.** In a repository with a test suite: run the relevant suite before your first edit (baseline), write the failing test for the behaviour (it must fail for the expected reason), implement, run again (target green, neighbours unbroken). Paste all three commands and their real output into the handoff. No suite: say so in the handoff and add the first test where it belongs.
 4. **Smallest change.** No refactors, renames, formatting sweeps or "while I'm here" fixes. If a refactor is genuinely needed, `FYI:` the orchestrator with why and how big; continue only on its answer.

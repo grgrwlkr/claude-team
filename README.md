@@ -61,7 +61,7 @@ Interactive verification is a choice the lead puts to you at plan approval, toge
 
 Review is mandatory and iterative: `orch plan` refuses a graph where a developer task has no reviewer, and the lead re-spawns the reviewer with `orch spawn <run> <id> --round N` after each round of fixes, up to three rounds by default. At plan approval you choose where review happens — on the branch, or on a pull/merge request where authors open the PR and reviewers comment in threads (`orch review <run> venue pr`).
 
-Handoffs travel through `orch handoff-put <run> <name>` on stdin, so a session isolated in a worktree can still deliver one; the file itself lives in the run directory, which sessions cannot write. The lead records its verdict with `orch accept <run> <task-id>`, which is what unblocks dependents — a teammate's handoff is never edited to change its status. A developer's own `done` readies only its reviewer, tester and QA; the integrator and anything else that builds on the code wait for the lead's accept. `orch close <run>` ends a run: a containment report for its branches with the count of refs checked, session index cleanup, the final table — it deletes nothing.
+Handoffs travel through `orch handoff-put <run> <name>` on stdin, so a session isolated in a worktree can still deliver one; the file itself lives in the run directory, which sessions cannot write. The lead records its verdict with `orch accept <run> <task-id>`, which is what unblocks dependents — a teammate's handoff is never edited to change its status. A developer's own `done` readies only its reviewer, tester and QA; the integrator and anything else that builds on the code wait for the lead's accept. `orch close <run>` ends a run: a containment report for its branches with the count of refs checked, session index cleanup, the final table, and the run's sessions removed from `claude agents` — it deletes no branch or worktree.
 
 ## Guard rails (hooks, mechanical)
 
@@ -97,7 +97,7 @@ No session starts with an MCP server running: `orch spawn` launches it with an e
 - Every session spends your subscription quota independently: a wave of four is roughly four times the burn.
 - `--fallback-model` switches only when a model is overloaded or unavailable, per turn; an exhausted weekly window is not caught. Relaunch with another `orch start --model` in that case.
 - Background sessions live on this machine and stop on shutdown; they survive sleep.
-- Deleting a session in `claude agents` deletes the worktree Claude created for it. Push first.
+- Finished sessions leave `claude agents`: `orch accept` removes the accepted task's sessions and those of the reviews, tests and QA it settles, `orch close` the rest (`orch rm <run> <name|--settled|all>` by hand). `orch spawn` starts each session inside a worktree it made (`.claude/worktrees/<run>-<task>`, branch of the same name), which `claude rm` keeps together with its branch; a worktree Claude creates itself it deletes once the commits are pushed or merged, branch included. Transcripts stay for `claude --resume`.
 - Hooks in this plugin run in every session where the plugin is enabled and exit immediately for sessions not registered in a run; measured cost is one `jq` per guarded tool call.
 
 ## Develop
