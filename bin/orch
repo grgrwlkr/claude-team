@@ -94,7 +94,7 @@ orch status <run> [--no-live]                     roster joined with claude agen
 orch events <run> [--since <line>]                guard log (blocks, budgets, pauses)
 orch handoff <run> <name>                         print a session's handoff
 orch handoff-put <run> <name>                     write a session's handoff from stdin (works from inside a worktree)
-orch accept <run> <task-id|name> ["<note>"]       the lead accepts a task; unblocks dependents whatever the handoff says
+orch accept <run> <task-id|name> ["<note>"]       the lead accepts a task; unblocks dependents whatever the handoff says; removes sessions no open task needs
 orch task add <run> <file|->                      add a task (or an array of tasks) through the plan's validation
 orch task set <run> <task-id|name> <field> <json> change one field of a task; budget and pathsAllowed reach live sessions too
 orch paths <run> <task-id|name> add <glob>...     widen a task's allowed paths, in the plan and in its live sessions
@@ -102,6 +102,7 @@ orch cancel <run> <task-id|name> "<why>"|--undo   drop a task from the run: neve
 orch forget <run> <name|--dead>                   drop session records — --dead: those claude agents does not list on this machine — so their tasks can be spawned again
 orch grant <run> <task-id|name> <glob>...         the same as orch paths <run> <task> add <glob>...
 orch stop <run> <name|all>                        stop the run's sessions (claude stop); worktrees stay
+orch rm <run> <name|--settled|all>                remove sessions from claude agents (claude rm) — --settled: those no open task needs; accept and close do it for you
 orch cost <run>                                   tokens per session from the transcripts, each message counted once
 orch address <run> <session-name>                 set the orchestrator's addressable name (from ListAgents)
 orch authorize <run> <push-base|delete-merged|tag|install-tools|mutate-data> <on|off>
@@ -117,7 +118,7 @@ orch budget <run> <task-id|name> <n>              change a task's budget mid-run
 orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
 orch resume <run> <name|all>
 orch decide <run> "<decision>"                    append to decisions.md
-orch close <run> [--force]                        containment report for the run's branches, session index cleanup, CLOSED marker
+orch close <run> [--force]                        containment report for the run's branches, session index cleanup, CLOSED marker; removes every session of the run and fails while claude agents still lists one
 EOF
 }
 
@@ -382,6 +383,10 @@ cmd_accept() {
      'map(select(.taskId != $id)) + [{taskId:$id, at:$t, note:$note}]' "$d/accepted.json" > "$d/accepted.tmp" && mv "$d/accepted.tmp" "$d/accepted.json"
   ev "$d" orchestrator "$id" accept allow "$note"
   echo "accepted $id — dependents are unblocked; orch ready shows what to spawn next"
+  # An acceptance can finish sessions of other tasks too: a developer's, once the integrator building on it is accepted.
+  local done_names; done_names=$(finished_sessions "$d") || true
+  # shellcheck disable=SC2086  # one session name per word
+  [ -z "$done_names" ] || ! command -v claude >/dev/null 2>&1 || remove_sessions "$d" "$d/sessions.json" $done_names || true
 }
 
 cmd_address() {
@@ -696,7 +701,8 @@ stage: $(jq -r '.stage' <<<"$task") of $(jq -r '.stages | join(" → ")' "$d/pla
     '[]') mcp_line="MCP servers: none — this task was given none; ask the orchestrator if the work needs one" ;;
     *) mcp_line="MCP servers start on demand: none runs in this session. When the work needs one, call the Agent tool with subagent_type mcp-<server> and a self-contained task; the server runs only while that helper works. Helpers: $(helper_names "$mcp")" ;;
   esac
-  local base_line auth_line
+  local base_line auth_line wt
+  wt=$(task_worktree "$d" "$(jq -r '.name' <<<"$task")")
   if [ "$role" = integrator ]; then
     base_line="base branch: $base — you merge into it; work on it only through your own worktree"
     if [ "$(jq -r '.authorize.pushBase // false' "$d/plan.json")" = true ]; then
@@ -708,7 +714,7 @@ stage: $(jq -r '.stage' <<<"$task") of $(jq -r '.stages | join(" → ")' "$d/pla
       auth_line="$auth_line; deleting merged branches and worktrees after you verify every ref is contained in $base"
     fi
   else
-    base_line="base branch: $base — branch your worktree from it; never commit to it"
+    base_line="base branch: $base — never commit to it"
     auth_line="the integrator owns $base; never push or merge it"
   fi
   cat <<EOF
@@ -722,6 +728,7 @@ your handoff (mandatory before you stop): $d/handoffs/$name.md
   alone in its call; the guard lets that through even when you are paused or out of budget. A quoted heredoc works
   too, but Claude Code's own worktree isolation may refuse a heredoc whose text names git commands.
 scratch files and logs: .scratch/ inside your own worktree — never /tmp, where parallel sessions collide
+your worktree: $wt on branch $(basename "$wt"), made by orch from $base; you start inside it. Stay there: never call EnterWorktree and never make another worktree — once nobody in the run can still need you the orchestrator removes this session with claude rm, which keeps this worktree and its branch but would delete a worktree the session made itself
 $base_line
 $auth_line
 $review_line
@@ -755,11 +762,103 @@ EOF
   cat <<EOF
 
 ## First steps
-1. Read the rules file. 2. Read the task and the handoffs above. 3. Create or enter your worktree. 4. Send the orchestrator one line: "STARTED: $name, plan in three bullets" — it starts watching you only after this. 5. Work. 6. Send the handoff with orch handoff-put, then message the orchestrator "DONE: $name" or "BLOCKED: <what you need, from whom>". Silence is not a report: the orchestrator acts on your messages, not on your idleness.
+1. Read the rules file. 2. Read the task and the handoffs above. 3. Check you are in your worktree ($wt). 4. Send the orchestrator one line: "STARTED: $name, plan in three bullets" — it starts watching you only after this. 5. Work. 6. Send the handoff with orch handoff-put, then message the orchestrator "DONE: $name" or "BLOCKED: <what you need, from whom>". Silence is not a report: the orchestrator acts on your messages, not on your idleness.
 EOF
 }
 
 cmd_brief() { local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "brief <run> <task-id>"; render_brief "$d" "$2" "${3:-1}"; }
+
+# task_worktree <run_dir> <task name>: the worktree orch makes for a task, named and branched
+# <run>-<task name>; every round of the task works there.
+task_worktree() { printf '%s/.claude/worktrees/%s-%s' "$(repo_root)" "$(basename "$1")" "$2"; }
+
+# make_worktree <run_dir> <task name>: the session is started inside a worktree orch made, because
+# claude rm keeps that one, while a worktree the session made itself with EnterWorktree is deleted
+# with its branch once its commits are pushed or merged — past the delete-merged gate and the
+# containment report of orch close.
+make_worktree() {
+  local wt branch root
+  wt=$(task_worktree "$1" "$2"); branch=$(basename "$wt")
+  if [ ! -d "$wt" ]; then
+    root=$(repo_root)
+    if git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
+      git -C "$root" worktree add -q "$wt" "$branch" >&2 || die "could not add the worktree $wt on $branch"
+    else
+      git -C "$root" worktree add -q -b "$branch" "$wt" "$(jq -r '.baseBranch' "$1/plan.json")" >&2 || die "could not make the worktree $wt"
+    fi
+  fi
+  printf '%s' "$wt"
+}
+
+# finished_sessions <run_dir>: sessions no open task can still need. A session is needed while its
+# task is open, and while a task that builds on it, directly or through others, is open: the
+# integrator asks developers about conflicts, developers ask the designer. The analyst, researcher
+# and architect answer anyone, so they stay until no task is open.
+finished_sessions() {
+  local open; open=$(open_tasks "$1") || return 1
+  jq -r --arg open "$open" --slurpfile p "$1/plan.json" "$JQ_DEFS"'
+    ($open | split("\n") | map(select(. != ""))) as $o
+    | $p[0] as $plan
+    | .[] | select((.removedAt // "") == "")
+    | .taskId as $t
+    | select(($o | index($t)) == null)
+    | (first($plan.tasks[] | select(.id == $t) | .role) // "") as $role
+    | select(if ($role == "analyst" or $role == "researcher" or $role == "architect") then ($o | length) == 0
+             else [$o[] as $x | closure($plan; $x) | index($t)] | all(. == null) end)
+    | .name' "$1/sessions.json"
+}
+
+# remove_sessions <run_dir> <records file> <name>...: claude rm each session not removed yet, so
+# finished sessions leave claude agents and ListAgents. The record stays, marked removedAt, so its
+# task is never offered again. A session without a worktree orch made is left alone: claude rm would
+# delete the worktree it made itself, branch included. Fails when a session was kept.
+remove_sessions() {
+  local d="$1" f="$2" name id out n=0 kept=0; shift 2
+  for name in "$@"; do
+    id=$(jq -r --arg n "$name" 'first(.[] | select(.name == $n and (.removedAt // "") == "") | .id) // empty' "$f")
+    [ -n "$id" ] || continue
+    if [ -z "$(jq -r --arg n "$name" 'first(.[] | select(.name == $n)) | .worktree // ""' "$f")" ]; then
+      echo "kept $name: it made its own worktree, which claude rm would delete with its branch; once that branch is settled: claude rm $id" >&2
+      kept=$((kept + 1)); continue
+    fi
+    # A session claude no longer knows (removed by hand) counts as removed.
+    if ! out=$(claude rm "$id" 2>&1) && ! printf '%s' "$out" | grep -q '^No job matching'; then
+      printf 'kept %s: %s\n' "$name" "$out" >&2
+      kept=$((kept + 1)); continue
+    fi
+    lock_run "$d"
+    jq --arg n "$name" --arg t "$(now)" 'map(if .name == $n then .removedAt = $t else . end)' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    unlock_run "$d"
+    ev "$d" orchestrator "$name" rm allow "$id"
+    n=$((n + 1))
+  done
+  [ "$n" -eq 0 ] || echo "removed $n session(s) from claude agents — worktrees and branches stay, transcripts stay for claude --resume"
+  [ "$kept" -eq 0 ]
+}
+
+cmd_rm() {
+  local d; d=$(run_dir "${1:-}"); local who="${2:-}" names
+  case "$who" in
+    '') die "rm <run> <name|--settled|all>" ;;
+    all) names=$(jq -r '.[].name' "$d/sessions.json") ;;
+    --settled) names=$(finished_sessions "$d") || die "could not work out which sessions are finished; nothing removed" ;;
+    *)
+      jq -e --arg n "$who" 'map(select(.name == $n)) | length > 0' "$d/sessions.json" >/dev/null || die "no session named '$who' in run ${1:-}"
+      names="$who" ;;
+  esac
+  need claude
+  # shellcheck disable=SC2086  # one session name per word
+  remove_sessions "$d" "$d/sessions.json" $names
+}
+
+# listed_sessions <run_dir>: the run's sessions, forgotten ones included, that claude agents still
+# lists, as "<name> <id>" lines. Fails when claude agents cannot be read.
+listed_sessions() {
+  local live f files=()
+  live=$(claude agents --json --all 2>/dev/null) || return 1
+  for f in "$1/sessions.json" "$1/forgotten.json"; do [ -f "$f" ] && files+=("$f"); done
+  jq -s -r --argjson a "$live" 'add | .[] | select(.id as $i | $a | map(.id) | index($i)) | "\(.name) \(.id)"' "${files[@]}"
+}
 
 spawn_one() {
   local d="$1" id="$2" dry="$3" round="${4:-1}" budget="${5:-}"
@@ -771,6 +870,7 @@ spawn_one() {
   max_rounds=$(jq -r '.review.maxRounds // 3' "$d/plan.json")
   [ "$round" -le "$max_rounds" ] || die "round $round exceeds the run's maxRounds ($max_rounds); the orchestrator decides what happens after the last round — accept with the findings recorded, or re-scope the task"
   name=$(jq -r '.name' <<<"$task"); role=$(jq -r '.role' <<<"$task"); model=$(jq -r '.model' <<<"$task"); effort=$(jq -r '.effort' <<<"$task")
+  local task_name="$name"
   [ "$round" -gt 1 ] && name="$name-r$round"
   if jq -e --arg n "$name" 'map(select(.name == $n)) | length > 0' "$d/sessions.json" >/dev/null; then die "session '$name' is already registered; for another review round use --round $((round+1))"; fi
   local brief; brief=$(render_brief "$d" "$id" "$round" "$budget") || exit 1
@@ -791,10 +891,14 @@ spawn_one() {
     return 0
   fi
   need claude
-  local out sid_short agents_args=()
+  local out sid_short wt agents_args=()
   [ -n "$agents_file" ] && agents_args=(--agents "$(cat "$agents_file")")
+  # The spawns of a wave run in parallel; git worktree add is serialized with the run's lock.
+  lock_run "$d"
+  wt=$(make_worktree "$d" "$task_name") || { unlock_run "$d"; exit 1; }
+  unlock_run "$d"
   # shellcheck disable=SC2086  # $extra is deliberately word-split
-  out=$(env -u CLAUDE_CODE_CHILD_SESSION claude --agent "orchestrator:$role" --bg --name "$name" --model "$model" --effort "$effort" --settings "$SPAWN_SETTINGS" $extra ${agents_args[@]+"${agents_args[@]}"} "$brief" 2>&1 | strip_ansi)
+  out=$(cd "$wt" && env -u CLAUDE_CODE_CHILD_SESSION claude --agent "orchestrator:$role" --bg --name "$name" --model "$model" --effort "$effort" --settings "$SPAWN_SETTINGS" $extra ${agents_args[@]+"${agents_args[@]}"} "$brief" 2>&1 | strip_ansi)
   sid_short=$(printf '%s\n' "$out" | sed -n 's/.*backgrounded · \([0-9a-f]\{8\}\).*/\1/p' | head -1)
   [ -n "$sid_short" ] || die "could not parse the session id from claude --bg output:
 $out"
@@ -802,8 +906,8 @@ $out"
   # recognises the session by it and orch status fills in the full id. Polling claude agents for the
   # full id cost minutes per session under load.
   lock_run "$d"
-  jq --arg id "$id" --arg name "$name" --arg role "$role" --arg short "$sid_short" --arg t "$(now)" --argjson task "$task" \
-     '. + [{taskId:$id, name:$name, role:$role, id:$short, sessionId:"", pathsAllowed:$task.pathsAllowed, budget:$task.budget, spawnedAt:$t}]' \
+  jq --arg id "$id" --arg name "$name" --arg role "$role" --arg short "$sid_short" --arg t "$(now)" --arg wt "$wt" --argjson task "$task" \
+     '. + [{taskId:$id, name:$name, role:$role, id:$short, sessionId:"", worktree:$wt, pathsAllowed:$task.pathsAllowed, budget:$task.budget, spawnedAt:$t}]' \
      "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
   unlock_run "$d"
   printf '%s\n' "$(jq -c --arg n "$name" 'map(select(.name == $n)) | .[0]' "$d/sessions.json")"
@@ -849,11 +953,12 @@ cmd_status() {
     unlock_run "$d"
   fi
   printf '%-16s %-11s %-9s %-8s %-9s %-8s %s\n' NAME ROLE ID STATE HANDOFF CALLS LAST_EVENT
-  jq -r '.[] | [.name, .role, .id, (if (.sessionId // "") == "" then "-" else .sessionId end), (.budget|tostring), .taskId] | @tsv' "$d/sessions.json" | while IFS="$(printf '\t')" read -r name role id sid budget taskid; do
+  jq -r '.[] | [.name, .role, .id, (if (.sessionId // "") == "" then "-" else .sessionId end), (.budget|tostring), .taskId, (.removedAt // "")] | @tsv' "$d/sessions.json" | while IFS="$(printf '\t')" read -r name role id sid budget taskid removed; do
     local state calls last hs mark key
     # Until its full id is known a session's lines are found by its short id.
     if [ "$sid" = - ]; then key="${id}[^|]*"; else key="$sid"; fi
     state=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .state // "?"' <<<"$agents" | head -1); [ -n "$state" ] || state="-"
+    [ -z "$removed" ] || state=removed
     calls=$(grep -c "^[^|]*|$key|[^|]*|[^|]*|allow|" "$d/events.log" 2>/dev/null || true); calls=${calls:-0}
     # The last event of any kind, not the last block: a stale "Stop|no handoff" hid a handoff written afterwards.
     last=$(grep "^[^|]*|$key|" "$d/events.log" 2>/dev/null | sed -n '$p' | cut -d'|' -f4,5,6 | cut -c1-58)
@@ -990,7 +1095,8 @@ cmd_forget() {
     need claude
     local live; live=$(claude agents --json --all 2>/dev/null) || die "claude agents --json failed; nothing forgotten"
     [ "$(jq 'length' <<<"$live" 2>/dev/null || echo 0)" -gt 0 ] || die "claude agents lists no session on this machine, which proves nothing; forget sessions by name"
-    gone=$(jq -c --argjson a "$live" '[.[] | select(.id as $i | ($a | map(.id) | index($i)) == null)]' "$d/sessions.json")
+    # A session orch removed with claude rm is not listed either, and its task is finished.
+    gone=$(jq -c --argjson a "$live" '[.[] | select((.removedAt // "") == "") | select(.id as $i | ($a | map(.id) | index($i)) == null)]' "$d/sessions.json")
   else
     gone=$(jq -c --arg n "$who" '[.[] | select(.name == $n)]' "$d/sessions.json")
     [ "$(jq 'length' <<<"$gone")" -gt 0 ] || die "no session named '$who' in run ${1:-}"
@@ -1009,10 +1115,10 @@ cmd_stop() {
   local d; d=$(run_dir "${1:-}"); local who="${2:-}" ids
   [ -n "$who" ] || die "stop <run> <name|all>"
   if [ "$who" = all ]; then
-    ids=$(jq -r '.[].id' "$d/sessions.json")
+    ids=$(jq -r '.[] | select((.removedAt // "") == "") | .id' "$d/sessions.json")
   else
-    ids=$(jq -r --arg n "$who" '.[] | select(.name == $n) | .id' "$d/sessions.json")
-    [ -n "$ids" ] || die "no session named '$who' in run ${1:-}"
+    jq -e --arg n "$who" 'map(select(.name == $n)) | length > 0' "$d/sessions.json" >/dev/null || die "no session named '$who' in run ${1:-}"
+    ids=$(jq -r --arg n "$who" '.[] | select(.name == $n and (.removedAt // "") == "") | .id' "$d/sessions.json")
   fi
   need claude
   local id n=0
@@ -1220,7 +1326,20 @@ cmd_close() {
   echo "session index: $dropped entries of this run removed"
   now > "$d/CLOSED"
   ev "$d" orchestrator "${1:-}" close allow "$n refs checked, $loose not contained"
+  # The run is over: no session it spawned may outlive it, forgotten ones included. Worktrees and
+  # branches stay for the cleanup.
+  need claude
+  # shellcheck disable=SC2046  # one session name per word
+  remove_sessions "$d" "$d/sessions.json" $(jq -r '.[].name' "$d/sessions.json") || true
+  # shellcheck disable=SC2046
+  [ ! -f "$d/forgotten.json" ] || remove_sessions "$d" "$d/forgotten.json" $(jq -r '.[].name' "$d/forgotten.json") || true
+  local listed; listed=$(listed_sessions "$d") || listed="(claude agents --json could not be read: nothing is verified)"
   cmd_status "$1" --no-live
+  if [ -n "$listed" ]; then
+    printf 'orch: the run is not closed — these of its sessions are still listed in claude agents:\n%s\nremove each (orch rm %s <name>, or claude rm <id> after its worktree is settled), then run orch close again\n' "$listed" "${1:-}" >&2
+    exit 1
+  fi
+  echo "no session of run ${1:-} is left in claude agents"
 }
 
 need jq " (brew install jq / apt install jq)"
@@ -1249,6 +1368,7 @@ case "$cmd" in
   cancel) cmd_cancel "$@" ;;
   stop) cmd_stop "$@" ;;
   forget) cmd_forget "$@" ;;
+  rm) cmd_rm "$@" ;;
   grant) cmd_paths "${1:-}" "${2:-}" add "${@:3}" ;;
   cost) cmd_cost "$@" ;;
   pause) cmd_pause "$@" ;;

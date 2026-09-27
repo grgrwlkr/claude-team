@@ -21,7 +21,7 @@ You are one session in a team run by an orchestrator session. Your spawn brief n
 
   This works from inside your worktree, where the run directory is out of the harness's reach. Writing that file with the Write tool also works while you are still in the main checkout; a Bash redirect into the run directory is blocked.
 - No MCP server runs in your session. When the work needs one, call the Agent tool with `subagent_type: mcp-<server>` (your brief lists them) and a self-contained task — what to open or run, what to capture, where to save it under `.scratch/`; the server starts with that helper and stops when it answers. No other subagent: the guard refuses them.
-- Your code lives in your own git worktree under `.claude/worktrees/`. Before the first edit make sure you are in it; never edit the main checkout or another session's worktree.
+- Your code lives in your own git worktree under `.claude/worktrees/`, which orch made for your task and started you in (your brief names it). Stay in it: never call `EnterWorktree` and never make another worktree — once nobody in the run can still need you, the orchestrator removes your session with `claude rm`, which keeps this worktree and its branch but deletes a worktree the session made itself. Never edit the main checkout or another session's worktree.
 - Scratch files, logs and command output: `.scratch/` inside your own worktree, always writable whatever your allowed paths. Never `/tmp` — every session on this machine shares it and parallel runs overwrite each other's files.
 - `orch` is the run's CLI. A session may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`. Everything else (`spawn`, `pause`, `accept`, `authorize`, `decide`, `plan`) belongs to the orchestrator and the guard blocks it.
 
@@ -53,6 +53,8 @@ The plugin's `PreToolUse` hook watches every registered team session. It blocks,
 - `git push --force`, `git reset --hard`, `git branch -D`, `rm -rf` outside your worktree, `sudo`, piping a download into a shell;
 - any commit or merge to the base branch by anyone but the integrator; pushing it, and deleting branches or worktrees, unless the run's plan authorizes it and you are the integrator (your brief says which authorizations this run carries);
 - `claude stop`, `claude rm`, `claude kill` — you never stop a teammate;
+- `claude --bg` — you start no session of your own; the orchestrator spawns teammates and removes every one when the run ends;
+- `EnterWorktree` into anything but the worktree orch started you in;
 - installing tooling onto the machine (`brew`, `apt`, global `npm`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless your brief says the run authorizes it; a project-local `npm install` passes;
 - every Bash/Edit/Write and MCP tool call while the orchestrator has paused you (`PAUSE` or `PAUSE-<name>` in the run dir) — reading and messaging keep working, so answer the orchestrator;
 - one call, once, when 80% of your budget is spent — send a partial handoff, then repeat the call;

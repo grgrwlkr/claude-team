@@ -24,9 +24,15 @@ bg=0; for a in "\$@"; do [ "\$a" = --bg ] && bg=1; done
 if [ "\$bg" = 1 ]; then
   # Unique across the parallel spawns of a wave, as real session ids are.
   id=\$(printf '%04x%04x' \$(( \$\$ % 65536 )) "\$RANDOM"); echo "\$id" >> "$TMP_BASE/claude.bg"
+  echo "\$id \$PWD" >> "$TMP_BASE/claude.cwd"
   echo "session backgrounded · \$id"; exit 0
 fi
 case "\$*" in
+  rm\ *)
+    [ -n "\${STUB_RM_FAIL:-}" ] && { echo "kept \$2 — 1 unpushed commit"; exit 1; }
+    [ -n "\${STUB_RM_GONE:-}" ] && { echo "No job matching '\$2'"; exit 1; }
+    grep -v "^\$2\\\$" "$TMP_BASE/claude.bg" > "$TMP_BASE/claude.bg.tmp"; mv "$TMP_BASE/claude.bg.tmp" "$TMP_BASE/claude.bg"
+    echo "removed \$2" ;;
   --version) echo "0.0.0 (stub)" ;;
   "mcp list") [ -n "\${STUB_SLOW:-}" ] && sleep 5; echo "playwright: npx -y @playwright/mcp@latest - ✓ Connected" ;;
   agents*) [ -f "$TMP_BASE/claude.bg" ] && jq -R '{id: ., sessionId: (. + "-0000-4000-8000-000000000000"), state: "working"}' "$TMP_BASE/claude.bg" | jq -s . || echo '[]' ;;

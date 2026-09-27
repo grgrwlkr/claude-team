@@ -419,7 +419,9 @@ RES_ID=$(jq -r '.[] | select(.name == "res-4") | .id' .orchestrator/r4/sessions.
 expect_exit 0 "stop one" "$ORCH" stop r4 res-4
 expect_grep "^stop $RES_ID\$" "$TMP_BASE/claude.calls" "claude stop ran with the session's id"
 expect_exit 0 "stop all" "$ORCH" stop r4 all
-[ "$(grep -c '^stop ' "$TMP_BASE/claude.calls")" -eq 3 ] && { PASS=$((PASS+1)); echo "ok   stop all reached every registered session"; } || { FAIL=$((FAIL+1)); echo "FAIL stop all: $(grep -c '^stop ' "$TMP_BASE/claude.calls") stop calls, want 3"; }
+# d4 was accepted above, so accept already removed it; stop all reaches the sessions still listed.
+LIVE4=$(jq '[.[] | select((.removedAt // "") == "")] | length' .orchestrator/r4/sessions.json)
+[ "$(grep -c '^stop ' "$TMP_BASE/claude.calls")" -eq $((LIVE4 + 1)) ] && { PASS=$((PASS+1)); echo "ok   stop all reached every session not removed"; } || { FAIL=$((FAIL+1)); echo "FAIL stop all: $(grep -c '^stop ' "$TMP_BASE/claude.calls") stop calls, want $((LIVE4 + 1))"; }
 expect_exit 1 "stop refuses an unknown name" "$ORCH" stop r4 nobody
 
 echo "# wave 4: cost per session from the transcripts, one count per message"
@@ -609,5 +611,113 @@ expect_grep '^d7,qa-7$' "$TMP_BASE/v" "forgotten sessions are kept as tombstones
 expect_exit 0 "grant is paths add" "$ORCH" grant r7 d7 'lib/**'
 jq -r '.tasks[] | select(.id == "impl") | .pathsAllowed | join(",")' .orchestrator/r7/plan.json > "$TMP_BASE/v"
 expect_grep 'lib/\*\*' "$TMP_BASE/v" "the grant reached the plan"
+
+echo "# spawn starts each session inside a worktree orch made; a session leaves claude agents once nobody can still need it"
+expect_exit 0 "init r8" "$ORCH" init r8 --base main
+"$ORCH" acceptance r8 off > /dev/null
+cat > "$TMP_BASE/r8.json" <<'JSON'
+{"run":"r8","baseBranch":"main","tasks":[
+ {"id":"spec","role":"analyst","name":"an-8","goal":"spec","pathsAllowed":["docs/specs/**"],"acceptance":["s"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"impl","role":"developer","name":"d8","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":["spec"],"budget":20,"mcp":[]},
+ {"id":"qa","role":"qa","name":"qa-8","qaOf":"impl","goal":"cases","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":["spec"],"budget":20,"mcp":[]},
+ {"id":"rev","role":"reviewer","name":"rev-8","reviewOf":"impl","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"budget":10,"mcp":[]},
+ {"id":"merge","role":"integrator","name":"int-8","goal":"merge","pathsAllowed":["**"],"acceptance":["z"],"dependsOn":["impl"],"budget":10,"mcp":[]}
+]}
+JSON
+expect_exit 0 "plan r8" "$ORCH" plan r8 "$TMP_BASE/r8.json"
+expect_exit 0 "spawn an-8" "$ORCH" spawn r8 spec
+AN_ID=$(jq -r '.[] | select(.name == "an-8") | .id' .orchestrator/r8/sessions.json)
+printf '# an-8\n## Status\ndone\n' > .orchestrator/r8/handoffs/an-8.md
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "accept the spec" "$ORCH" accept r8 spec "spec read"
+expect_no_grep "^rm $AN_ID\$" "$TMP_BASE/claude.calls" "the analyst stays while developers can still ask it about the spec"
+WT8="$REPO/.claude/worktrees/r8-d8"
+expect_exit 0 "brief names the worktree" "$ORCH" brief r8 impl
+expect_grep "your worktree: $WT8 " "$TMP_BASE/out" "the brief gives the session its worktree and branch"
+expect_exit 0 "dry run" "$ORCH" spawn r8 impl --dry-run
+[ ! -e "$WT8" ] && { PASS=$((PASS+1)); echo "ok   a dry run makes no worktree"; } || { FAIL=$((FAIL+1)); echo "FAIL a dry run made $WT8"; }
+expect_exit 0 "spawn d8" "$ORCH" spawn r8 impl
+git -C "$WT8" rev-parse --abbrev-ref HEAD > "$TMP_BASE/v" 2>&1
+expect_grep '^r8-d8$' "$TMP_BASE/v" "spawn made the task's worktree on its own branch"
+D8_ID=$(jq -r '.[] | select(.name == "d8") | .id' .orchestrator/r8/sessions.json)
+expect_grep "^$D8_ID $WT8\$" "$TMP_BASE/claude.cwd" "the session starts inside that worktree, so claude rm never deletes it"
+jq -r '.[] | select(.name == "d8") | .worktree' .orchestrator/r8/sessions.json > "$TMP_BASE/v"
+expect_grep "^$WT8\$" "$TMP_BASE/v" "the record carries the worktree"
+printf '# d8\n## Status\ndone\n## Branch\nr8-d8\n' > .orchestrator/r8/handoffs/d8.md
+expect_exit 0 "spawn rev-8" "$ORCH" spawn r8 rev
+REV_ID=$(jq -r '.[] | select(.name == "rev-8") | .id' .orchestrator/r8/sessions.json)
+expect_exit 0 "second review round" "$ORCH" spawn r8 rev --round 2
+REV2_ID=$(jq -r '.[] | select(.name == "rev-8-r2") | .id' .orchestrator/r8/sessions.json)
+expect_grep "^$REV2_ID $REPO/.claude/worktrees/r8-rev-8\$" "$TMP_BASE/claude.cwd" "a later round reuses the task's worktree"
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "accept d8" "$ORCH" accept r8 impl "tests green"
+expect_grep "^rm $REV_ID\$" "$TMP_BASE/claude.calls" "accept removes the review sessions it settles"
+expect_grep "^rm $REV2_ID\$" "$TMP_BASE/claude.calls" "every round of them"
+expect_no_grep "^rm $D8_ID\$" "$TMP_BASE/claude.calls" "the developer stays while the integrator can still ask it about a conflict"
+expect_no_grep "^rm $AN_ID\$" "$TMP_BASE/claude.calls" "the analyst still stays"
+jq -r '[.[] | select(.removedAt) | .name] | sort | join(",")' .orchestrator/r8/sessions.json > "$TMP_BASE/v"
+expect_grep '^rev-8,rev-8-r2$' "$TMP_BASE/v" "removed sessions are marked, not dropped"
+[ -d "$REPO/.claude/worktrees/r8-rev-8" ] && { PASS=$((PASS+1)); echo "ok   the worktree stays"; } || { FAIL=$((FAIL+1)); echo "FAIL the worktree is gone"; }
+expect_exit 0 "ready after accept" "$ORCH" ready r8
+expect_no_grep '^rev$' "$TMP_BASE/out" "a removed session's task is not offered again"
+expect_grep '^merge$' "$TMP_BASE/out" "the integrator is ready"
+expect_exit 0 "status" "$ORCH" status r8 --no-live
+expect_grep '^rev-8 .* removed ' "$TMP_BASE/out" "status shows the session as removed"
+expect_exit 0 "forget --dead after removal" "$ORCH" forget r8 --dead
+jq -r '[.[].name] | sort | join(",")' .orchestrator/r8/sessions.json > "$TMP_BASE/v"
+expect_grep '^an-8,d8,rev-8,rev-8-r2$' "$TMP_BASE/v" "a removed session is not mistaken for one on another machine"
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "stop all after removal" "$ORCH" stop r8 all
+expect_no_grep "^stop $REV_ID\$" "$TMP_BASE/claude.calls" "stop skips removed sessions"
+expect_exit 0 "spawn int-8" "$ORCH" spawn r8 merge
+INT_ID=$(jq -r '.[] | select(.name == "int-8") | .id' .orchestrator/r8/sessions.json)
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "rm --settled" "$ORCH" rm r8 --settled
+expect_no_grep '^rm ' "$TMP_BASE/claude.calls" "--settled removes nobody an open task may still need"
+expect_exit 1 "rm reports a refusal" env STUB_RM_FAIL=1 "$ORCH" rm r8 int-8
+expect_grep 'kept' "$TMP_BASE/err" "with claude rm's own words"
+jq -r '.[] | select(.name == "int-8") | .removedAt // "none"' .orchestrator/r8/sessions.json > "$TMP_BASE/v"
+expect_grep '^none$' "$TMP_BASE/v" "a session claude rm kept is not marked removed"
+jq 'map(if .name == "int-8" then del(.worktree) else . end)' .orchestrator/r8/sessions.json > "$TMP_BASE/s.tmp" && mv "$TMP_BASE/s.tmp" .orchestrator/r8/sessions.json
+: > "$TMP_BASE/claude.calls"
+expect_exit 1 "rm skips a session that made its own worktree" "$ORCH" rm r8 int-8
+expect_no_grep '^rm ' "$TMP_BASE/claude.calls" "claude rm never runs on it: it would delete that worktree and its branch"
+jq 'map(if .name == "int-8" then .worktree = "x" else . end)' .orchestrator/r8/sessions.json > "$TMP_BASE/s.tmp" && mv "$TMP_BASE/s.tmp" .orchestrator/r8/sessions.json
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "accept the merge" "$ORCH" accept r8 merge "merged"
+expect_grep "^rm $INT_ID\$" "$TMP_BASE/claude.calls" "the integrator goes once its task is accepted"
+expect_grep "^rm $D8_ID\$" "$TMP_BASE/claude.calls" "and the developer, once nothing that builds on it is open"
+expect_grep "^rm $AN_ID\$" "$TMP_BASE/claude.calls" "and the analyst, once no task is open"
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "close" "$ORCH" close r8
+expect_no_grep '^rm ' "$TMP_BASE/claude.calls" "close does not remove a session twice"
+expect_exit 1 "rm refuses an unknown name" "$ORCH" rm r8 nobody
+jq 'map(del(.removedAt))' .orchestrator/r8/sessions.json > "$TMP_BASE/s.tmp" && mv "$TMP_BASE/s.tmp" .orchestrator/r8/sessions.json
+expect_exit 0 "rm of sessions claude no longer knows" env STUB_RM_GONE=1 "$ORCH" rm r8 all
+jq -r '[.[] | select((.removedAt // "") == "")] | length' .orchestrator/r8/sessions.json > "$TMP_BASE/v"
+expect_grep '^0$' "$TMP_BASE/v" "they are marked removed, not reported as kept"
+
+echo "# close leaves no session of the run in claude agents, forgotten ones included"
+expect_exit 0 "init r9" "$ORCH" init r9 --base main
+"$ORCH" acceptance r9 off > /dev/null
+cat > "$TMP_BASE/r9.json" <<'JSON'
+{"run":"r9","baseBranch":"main","tasks":[
+ {"id":"a","role":"researcher","name":"res-9a","goal":"facts","pathsAllowed":["docs/research/a/**"],"acceptance":["q"],"dependsOn":[],"budget":10,"mcp":[]},
+ {"id":"b","role":"researcher","name":"res-9b","goal":"facts","pathsAllowed":["docs/research/b/**"],"acceptance":["q"],"dependsOn":[],"budget":10,"mcp":[]}
+]}
+JSON
+expect_exit 0 "plan r9" "$ORCH" plan r9 "$TMP_BASE/r9.json"
+expect_exit 0 "spawn r9" "$ORCH" spawn r9 --wave
+A9_ID=$(jq -r '.[] | select(.name == "res-9a") | .id' .orchestrator/r9/sessions.json)
+B9_ID=$(jq -r '.[] | select(.name == "res-9b") | .id' .orchestrator/r9/sessions.json)
+expect_exit 0 "forget res-9b" "$ORCH" forget r9 res-9b
+expect_exit 1 "close fails while a session stays listed" env STUB_RM_FAIL=1 "$ORCH" close r9 --force
+expect_grep 'res-9a' "$TMP_BASE/err" "and names it"
+expect_grep 'res-9b' "$TMP_BASE/err" "a forgotten session included"
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "close again" "$ORCH" close r9 --force
+expect_grep "^rm $A9_ID\$" "$TMP_BASE/claude.calls" "close removes the run's sessions"
+expect_grep "^rm $B9_ID\$" "$TMP_BASE/claude.calls" "and the forgotten ones"
+if grep -qE "^($A9_ID|$B9_ID)\$" "$TMP_BASE/claude.bg"; then FAIL=$((FAIL+1)); echo "FAIL a session of r9 is still listed"; else PASS=$((PASS+1)); echo "ok   no session of r9 is listed after close"; fi
 
 summary
