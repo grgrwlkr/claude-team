@@ -53,6 +53,7 @@ The plugin's `PreToolUse` hook watches every registered team session. It blocks,
 - `git push --force`, `git reset --hard`, `git branch -D`, `rm -rf` outside your worktree, `sudo`, piping a download into a shell;
 - any commit or merge to the base branch by anyone but the integrator; pushing it, and deleting branches or worktrees, unless the run's plan authorizes it and you are the integrator (your brief says which authorizations this run carries);
 - `claude stop`, `claude rm`, `claude kill` — you never stop a teammate;
+- `EnterWorktree` into anything but the worktree orch started you in;
 - installing tooling onto the machine (`brew`, `apt`, global `npm`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless your brief says the run authorizes it; a project-local `npm install` passes;
 - every Bash/Edit/Write and MCP tool call while the orchestrator has paused you (`PAUSE` or `PAUSE-<name>` in the run dir) — reading and messaging keep working, so answer the orchestrator;
 - one call, once, when 80% of your budget is spent — send a partial handoff, then repeat the call;

@@ -200,6 +200,16 @@ expect_exit 2 "a session may not run orch forget" bash "$GUARD" <<< "$(hook_bash
 rm "$RUN/forgotten.json"
 expect_exit 0 "an unregistered session stays unguarded" bash "$GUARD" <<< "$(hook_input dddd4444-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"
 
+echo "# a session stays in the worktree orch started it in"
+jq -r '.hooks.PreToolUse[].matcher' "$PLUGIN_ROOT/hooks/hooks.json" > "$TMP_BASE/matchers"
+expect_grep 'EnterWorktree' "$TMP_BASE/matchers" "PreToolUse routes EnterWorktree through the guard"
+expect_exit 0 "a session spawned before orch made worktrees may still make its own" bash "$GUARD" <<< "$(hook_input sid-int "$WT" EnterWorktree '{"name":"mine"}')"
+jq --arg wt "$WT" 'map(if .name == "dev-1" then .worktree = $wt else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+expect_exit 2 "a new worktree is refused: claude rm would delete it with its branch" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" EnterWorktree '{"name":"mine"}')"
+expect_grep "$WT" "$TMP_BASE/err" "the refusal names the session's own worktree"
+expect_exit 2 "so is entering another worktree" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" EnterWorktree '{"path":"'"$REPO"'/.claude/worktrees/other"}')"
+expect_exit 0 "entering its own worktree passes" bash "$GUARD" <<< "$(hook_input sid-dev "$REPO" EnterWorktree '{"path":"'"$WT"'"}')"
+
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
 expect_exit 2 "stop: no handoff blocks" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"

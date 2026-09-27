@@ -100,6 +100,16 @@ case "$cwd_real/" in
   "$run_dir"/*|"$INDEX_DIR"/*) block "your working directory is inside the orchestrator's directory ($cwd_real); cd back into your worktree" ;;
 esac
 
+# A session orch started inside its worktree stays there: claude rm keeps that worktree, but deletes
+# one the session made itself with its branch once the commits are pushed or merged. A session
+# spawned before orch made worktrees has no record of one and still makes its own.
+if [ "$tool" = EnterWorktree ]; then
+  own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+  [ -n "$own_wt" ] || allow_free "EnterWorktree"
+  [ "$(jq -r '.tool_input.path // ""' <<<"$input")" = "$own_wt" ] && allow_free "EnterWorktree $own_wt"
+  block "you already work in the worktree orch made for you: $own_wt. Stay there; a worktree you make yourself is deleted with its branch when your session is removed"
+fi
+
 # Handing off must always be possible: a session out of budget or paused is told to write its
 # handoff and stop, and the Stop hook demands one. Same standing as a Write of the handoff file.
 if [ "$tool" = Bash ] && sole_handoff_put "$(jq -r '.tool_input.command // empty' <<<"$input")" "$name"; then
