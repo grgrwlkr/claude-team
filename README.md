@@ -74,7 +74,7 @@ The plugin's `PreToolUse` hook watches every session registered in a run and blo
 - `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `budget`, `task`, `paths`, `grant`, `cancel`, `stop`, `forget`, `cost`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`;
 - `claude stop|rm|kill|respawn` — sessions never stop each other;
 - `EnterWorktree` into anything but the worktree orch started the session in, so `claude rm` never gets a worktree it would delete with its branch;
-- `orch rm`, like the other lead subcommands;
+- `orch rm`, like the other lead subcommands, and `claude --bg`: a session a teammate started would outlive the run;
 - every Bash/Edit/Write and MCP tool call while the lead has paused the session or the run (`orch pause`); reading and messaging keep working;
 - every Bash/Edit/Write and MCP tool call past the task's tool-call budget — the passive brake against drift. A tester drives a browser through MCP tools, so those calls are held and counted like the rest; `orch status` marks a session with `!` from 80%, and `orch budget` changes a live session's budget.
 
@@ -99,7 +99,7 @@ No session starts with an MCP server running: `orch spawn` launches it with an e
 - Every session spends your subscription quota independently: a wave of four is roughly four times the burn.
 - `--fallback-model` switches only when a model is overloaded or unavailable, per turn; an exhausted weekly window is not caught. Relaunch with another `orch start --model` in that case.
 - Background sessions live on this machine and stop on shutdown; they survive sleep.
-- Finished sessions leave `claude agents`: `orch accept` removes the accepted task's sessions and those of the reviews, tests and QA it settles, `orch close` the rest (`orch rm <run> <name|--settled|all>` by hand). `orch spawn` starts each session inside a worktree it made (`.claude/worktrees/<run>-<task>`, branch of the same name), which `claude rm` keeps together with its branch; a worktree Claude creates itself it deletes once the commits are pushed or merged, branch included. Transcripts stay for `claude --resume`.
+- No session outlives the run: `orch accept` removes every session no open task can still need: a reviewer's, tester's or QA's once the task it covers is accepted, a developer's or designer's once everything built on it is accepted too, the analyst's, researcher's and architect's once no task is open; `orch close` removes the rest, forgotten ones included, and fails while `claude agents` still lists any of them (`orch rm <run> <name|--settled|all>` by hand). `orch spawn` starts each session inside a worktree it made (`.claude/worktrees/<run>-<task>`, branch of the same name), which `claude rm` keeps together with its branch; a worktree Claude creates itself it deletes once the commits are pushed or merged, branch included. Transcripts stay for `claude --resume`.
 - Hooks in this plugin run in every session where the plugin is enabled and exit immediately for sessions not registered in a run; measured cost is one `jq` per guarded tool call.
 
 ## Develop

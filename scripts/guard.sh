@@ -207,6 +207,8 @@ case "$tool" in
       fi
     fi
     if has '(^|[;&| ])claude (stop|kill|rm|respawn)( |$)'; then block "sessions are stopped only by the orchestrator or the user"; fi
+    # A session started here is one orch never registered, so the run could not remove it when it ends.
+    if has '(^|[;&| /])claude [^|;&]*--(bg|background)( |=|$)'; then block "a team session starts no background session; ask the orchestrator for a teammate"; fi
     # Installing tooling onto the machine is the user's call, given once at plan approval (install-tools).
     # A project-local `npm install` or `bun install` is the project's own dependency step and passes.
     if [ "$auth_install" != true ] && has '(^|[;&| ])(brew|apt|apt-get|dnf|yum|pacman|apk|choco|winget|pipx|cargo|gem) +(install|add)( |$)|(^|[;&| ])(npm|pnpm|yarn|bun) +(install|add|i)( [^|;&]*)? +(-g|--global)( |$)|(^|[;&| ])(pip3?|uv) +(install|pip install|tool install)( |$)|(^|[;&| ])npx +playwright +install|(^|[;&| ])playwright +install|(^|[;&| ])claude +mcp +add( |$)'; then
