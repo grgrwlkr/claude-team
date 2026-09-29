@@ -1408,4 +1408,77 @@ expect_exit 0 "ready after --rest" "$ORCH" ready r19
 expect_grep '^arch-up$' "$TMP_BASE/out" "the last stage opens without another approval"
 expect_exit 1 "approve --rest refuses a run with nothing left to approve" "$ORCH" approve r19 --rest "again"
 
+echo "# orch runs and the init warning, orch graph, orch inbox: run r20"
+expect_exit 0 "init r20 while other runs are open" "$ORCH" init r20 --base main
+expect_grep 'not closed' "$TMP_BASE/err" "init warns about unclosed runs"
+expect_grep ' r19 (' "$TMP_BASE/err" "and names one"
+expect_no_grep '[ ,]r2 (' "$TMP_BASE/err" "but not a closed run"
+expect_no_grep '[ ,]r20 (' "$TMP_BASE/err" "nor the run it creates"
+expect_grep '/.orchestrator/r20$' "$TMP_BASE/out" "stdout is still the run dir alone"
+expect_exit 0 "plan r20" "$ORCH" plan r20 "$TMP_BASE/r5.json"
+expect_exit 0 "graph r20" "$ORCH" graph r20
+expect_grep '^ID  *NAME  *ROLE  *STATE  *CALLS  *SESSIONS  *WHY' "$TMP_BASE/out" "graph has a header"
+[ "$(grep -c . "$TMP_BASE/out")" -eq 11 ] && { PASS=$((PASS+1)); echo "ok   graph prints one row per task"; } || { FAIL=$((FAIL+1)); echo "FAIL graph printed:"; cat "$TMP_BASE/out"; }
+expect_grep '^arch  *arch-5  *architect  *ready ' "$TMP_BASE/out" "the architect's design task is ready"
+expect_grep '^spec  *spec-5  *analyst  *held .*architect task arch' "$TMP_BASE/out" "a task behind the architect says so"
+expect_grep '^impl  *dev-5  *developer  *held .*stage design' "$TMP_BASE/out" "a task of a later stage names the stage it waits for"
+awk '$4 == "ready" {print $1}' "$TMP_BASE/out" > "$TMP_BASE/graph-ready"
+"$ORCH" ready r20 > "$TMP_BASE/ready"
+expect_exit 0 "graph's ready tasks are orch ready's" cmp -s "$TMP_BASE/graph-ready" "$TMP_BASE/ready"
+"$ORCH" accept r20 arch fixture --force > /dev/null
+"$ORCH" cancel r20 design "not needed" > /dev/null
+expect_exit 0 "graph after a cancel" "$ORCH" graph r20
+expect_grep '^design  *des-5  *designer  *cancelled  .*not needed' "$TMP_BASE/out" "a cancelled task with its reason"
+expect_grep '^impl  *dev-5  *developer  *orphaned .*design' "$TMP_BASE/out" "a task on a cancelled dependency is orphaned and names it"
+expect_grep '^spec  *spec-5  *analyst  *ready ' "$TMP_BASE/out" "the accepted architect frees the spec"
+"$ORCH" cancel r20 design --undo > /dev/null
+cat > .orchestrator/r20/sessions.json <<'JSON'
+[{"taskId":"spec","name":"spec-5","role":"analyst","id":"s20aaaaa","sessionId":"sid-spec20","pathsAllowed":["docs/specs/**"],"budget":10},
+ {"taskId":"qal-a","name":"qal-5a","role":"qa-lead","id":"q20aaaaa","sessionId":"sid-qal20","pathsAllowed":["tests/acceptance/**"],"budget":20}]
+JSON
+: > .orchestrator/r20/events.log
+for i in 1 2 3 4 5 6 7 8 9; do echo "2026-09-29T01:00:0${i}Z|sid-spec20|spec-5|Bash|allow|ls" >> .orchestrator/r20/events.log; done
+echo "2026-09-29T01:00:10Z|sid-spec20|spec-5|Edit|block|outside pathsAllowed|/x" >> .orchestrator/r20/events.log
+echo "2026-09-29T01:00:11Z|sid-qal20|qal-5a|Bash|block|cd outside|cd /" >> .orchestrator/r20/events.log
+printf '# spec-5\n## Status\ndone\n' | "$ORCH" handoff-put r20 spec-5 > /dev/null
+mkdir -p "$TMP_BASE/bin-agents"
+cat > "$TMP_BASE/bin-agents/claude" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  agents) echo '[{"id":"s20aaaaa","sessionId":"sid-spec20","state":"done"},{"id":"q20aaaaa","sessionId":"sid-qal20","state":"done"}]' ;;
+  *) exec "$TMP_BASE/bin/claude" "\$@" ;;
+esac
+EOF
+chmod +x "$TMP_BASE/bin-agents/claude"
+expect_exit 0 "graph with sessions and a handoff" "$ORCH" graph r20
+expect_grep '^spec  *spec-5  *analyst  *done  *9  *spec-5 ' "$TMP_BASE/out" "a spawned task shows its handoff, calls and sessions"
+expect_grep '^design  *des-5  *designer  *ready ' "$TMP_BASE/out" "an analyst's done handoff frees the designer"
+expect_grep '^impl  *dev-5  *developer  *held ' "$TMP_BASE/out" "the next stage is still held"
+expect_exit 0 "inbox r20" env PATH="$TMP_BASE/bin-agents:$PATH" "$ORCH" inbox r20
+expect_grep '^handoff done: spec (spec-5)' "$TMP_BASE/out" "an unaccepted done handoff"
+expect_grep '^budget: spec-5 9/10' "$TMP_BASE/out" "a session at 80 % of its budget or more"
+expect_no_grep '^budget: qal-5a' "$TMP_BASE/out" "and not one below"
+expect_grep '^block: .*|spec-5|Edit|block|outside pathsAllowed' "$TMP_BASE/out" "a block since the last inbox"
+expect_grep '^block: .*|qal-5a|Bash|block|cd outside' "$TMP_BASE/out" "every block since the last inbox"
+expect_grep '^idle without a handoff: qal-5a' "$TMP_BASE/out" "a session claude agents shows idle, with no handoff"
+expect_no_grep '^idle without a handoff: spec-5' "$TMP_BASE/out" "not one that wrote its handoff"
+expect_grep '^ready: design$' "$TMP_BASE/out" "the ready tasks"
+expect_exit 0 "inbox again" env PATH="$TMP_BASE/bin-agents:$PATH" "$ORCH" inbox r20
+expect_no_grep '^block:' "$TMP_BASE/out" "blocks already shown are not shown again"
+echo "2026-09-29T01:00:12Z|sid-qal20|qal-5a|Bash|block|git push|git push" >> .orchestrator/r20/events.log
+"$ORCH" accept r20 spec "spec read" > /dev/null
+expect_exit 0 "inbox after an accept and a new block" env PATH="$TMP_BASE/bin-agents:$PATH" "$ORCH" inbox r20
+expect_grep '^block: .*|qal-5a|Bash|block|git push' "$TMP_BASE/out" "the new block"
+[ "$(grep -c '^block:' "$TMP_BASE/out")" -eq 1 ] && { PASS=$((PASS+1)); echo "ok   and only the new one"; } || { FAIL=$((FAIL+1)); echo "FAIL inbox printed:"; cat "$TMP_BASE/out"; }
+expect_no_grep '^handoff done: spec' "$TMP_BASE/out" "an accepted handoff leaves the inbox"
+expect_exit 0 "runs" env PATH="$TMP_BASE/bin-agents:$PATH" "$ORCH" runs
+expect_grep '^RUN  *STATE  *OPEN  *LIVE  *LAST_EVENT' "$TMP_BASE/out" "runs has a header"
+expect_grep '^r2  *closed  *0 ' "$TMP_BASE/out" "a closed run"
+expect_grep '^r20  *open  *8  *2  *.*spec|accept' "$TMP_BASE/out" "an open run: open tasks, sessions claude agents lists, its last event"
+expect_grep '^r19  *open ' "$TMP_BASE/out" "every run in the repo"
+"$ORCH" pause r20 all "hold" > /dev/null
+expect_exit 0 "runs with a paused run" "$ORCH" runs
+expect_grep '^r20  *paused  *8  *0 ' "$TMP_BASE/out" "a paused run, and no live session the default stub lists"
+"$ORCH" resume r20 all > /dev/null
+
 summary

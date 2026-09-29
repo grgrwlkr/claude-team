@@ -130,6 +130,9 @@ orch spawn <run> <task-id> [--round N] [--budget N] [--dry-run]   spawn one task
 orch spawn <run> --wave [--dry-run]               spawn every ready task
 orch status <run> [--no-live]                     roster joined with claude agents --json; TASK: calls of every round of the task, CTX: context size at the session's last turn
 orch events <run> [--since <line>|--new] [--blocks]   guard log (blocks, budgets, pauses); --new: the lines since the last --new, --blocks: block lines only
+orch runs                                         one line per run in this repo: state, open tasks, sessions claude agents lists, last event
+orch graph <run>                                  every task with its state, sessions, calls of all rounds, and why it is not ready
+orch inbox <run>                                  what needs the lead: unaccepted done/partial/blocked/failed handoffs, sessions at 80 % of budget, blocks since the last inbox, idle sessions without a handoff, ready tasks
 orch handoff <run> <name>                         print a session's latest round's handoff, naming the earlier rounds
 orch handoff-put <run> <name> [--file <path>] [--by-lead "<source>"]   write a session's handoff from the file or stdin (works from inside a worktree); --by-lead stamps it as written by the orchestrator from that source
 orch qa-request <run> <name> "<what to check>"      a developer asks for qa of its task: adds a qa task after it (paths qa/<task name>/**) and prints the line to send the orchestrator
@@ -219,6 +222,9 @@ cmd_init() {
   [ -n "$base" ] || die "init needs --base <branch>"
   local d; d="$(state_root)/$run"
   [ -e "$d" ] && die "run '$run' already exists at $d"
+  local unclosed
+  unclosed=$(run_rows "$(live_agents)" | awk -F'\t' '$2 != "closed" { printf "%s%s (%s open tasks, %s live sessions)", (n++ ? ", " : ""), $1, $3, $4 }')
+  [ -z "$unclosed" ] || printf 'orch: warning: runs not closed in this repo: %s — close each with orch close <run> once its work is settled (orch runs)\n' "$unclosed" >&2
   mkdir -p "$d/handoffs"
   : > "$d/events.log"
   echo '[]' > "$d/sessions.json"
@@ -1375,6 +1381,110 @@ cmd_events() {
   [ "$new" = 0 ] || echo "$n" > "$d/events.cursor"
 }
 
+# live_agents: claude agents --json --all, or nothing when it cannot be read.
+live_agents() { command -v claude >/dev/null 2>&1 && claude agents --json --all 2>/dev/null; }
+
+# run_rows <live_agents output>: a tab-separated row per run in the repo — name, state, open tasks, sessions
+# (forgotten ones included) that claude agents lists, "?" when it could not be read, and the last event.
+run_rows() {
+  local p d state open live last
+  for p in "$(repo_root)"/.orchestrator/*/plan.json; do
+    [ -f "$p" ] || continue
+    d=$(dirname "$p")
+    if [ -f "$d/CLOSED" ]; then state=closed; elif [ -f "$d/PAUSE" ]; then state=paused; else state=open; fi
+    open=$(open_tasks "$d" | grep -c .)
+    live="?"
+    [ -z "$1" ] || live=$(cat "$d/sessions.json" "$d/forgotten.json" 2>/dev/null \
+      | jq -s -r --argjson a "$1" '[add // [] | .[] | select(.id as $i | $a | map(.id) | index($i))] | length' 2>/dev/null) || live="?"
+    last=$(sed -n '$p' "$d/events.log" 2>/dev/null | cut -d'|' -f1,3-6 | cut -c1-70)
+    printf '%s\t%s\t%s\t%s\t%s\n' "${d##*/}" "$state" "$open" "${live:-?}" "${last:--}"
+  done
+}
+
+cmd_runs() {
+  local run state open live last
+  printf '%-20s %-7s %-5s %-5s %s\n' RUN STATE OPEN LIVE LAST_EVENT
+  run_rows "$(live_agents)" | while IFS="$(printf '\t')" read -r run state open live last; do
+    printf '%-20s %-7s %-5s %-5s %s\n' "$run" "$state" "$open" "$live" "$last"
+  done
+}
+
+# cmd_graph: every task, spawned or not, with its state; an unspawned task that is not ready says why,
+# checking what cmd_ready checks. A dependency that is cancelled and was never done keeps it out for good.
+cmd_graph() {
+  local d; d=$(run_dir "${1:-}")
+  local id name role stage state why sess spawned dep dh orphan wait g a
+  printf '%-12s %-16s %-15s %-10s %-6s %-20s %s\n' ID NAME ROLE STATE CALLS SESSIONS WHY
+  jq -r '.tasks[] | [.id, .name, .role, (.stage // "")] | @tsv' "$d/plan.json" | while IFS="$(printf '\t')" read -r id name role stage; do
+    why=""
+    sess=$(cat "$d/sessions.json" "$d/forgotten.json" 2>/dev/null | jq -s -r --arg t "$id" '[add // [] | .[] | select(.taskId == $t) | .name] | join(",")')
+    spawned=$(jq -r --arg id "$id" 'map(select(.taskId == $id)) | length' "$d/sessions.json")
+    state=$(handoff_state "$d" "$name" "$id")
+    case "$state" in
+      cancelled) why=$(jq -r --arg id "$id" 'first(.[] | select(.taskId == $id) | .note) // ""' "$d/cancelled.json") ;;
+      accepted|settled) ;;
+      *)
+        if [ "$spawned" -gt 0 ]; then
+          [ "$state" = none ] && state=spawned
+        else
+          orphan=""; wait=""
+          for dep in $(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .dependsOn[]' "$d/plan.json"); do
+            task_done "$d" "$dep" "$role" && continue
+            if is_cancelled "$d" "$dep"; then orphan="$orphan $dep"; continue; fi
+            dh=$(handoff_state "$d" "$(jq -r --arg id "$dep" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")" "$dep")
+            [ "$dh" = done ] && dh="done, not accepted"
+            wait="$wait, $dep ($dh)"
+          done
+          g=$(stage_gate "$d" "$stage"); a=$(arch_gate "$d" "$role")
+          if [ -n "$orphan" ]; then state=orphaned; why="dependency cancelled:$orphan — never ready until re-planned (orch task set ${1} $id dependsOn …)"
+          elif [ -n "$g" ]; then state=held; why="stage $stage waits for the user's approval of stage $g"
+          elif [ -n "$a" ]; then state=held; why="waits for the architect task $a to be accepted"
+          elif [ -n "$wait" ]; then state=waiting; why="on ${wait#, }"
+          else state=ready; fi
+        fi ;;
+    esac
+    printf '%-12s %-16s %-15s %-10s %-6s %-20s %s\n' "$id" "$name" "$role" "$state" "$(task_calls "$d" "$id")" "${sess:--}" "${why:--}"
+  done
+}
+
+# cmd_inbox: what needs the lead now, in one call instead of status, events and a handoff per session.
+# Blocks are shown once: the cursor in inbox.cursor is the events.log line the last inbox read up to.
+cmd_inbox() {
+  local d; d=$(run_dir "${1:-}")
+  local out id name hs sid budget calls key st since n agents
+  out=$(
+    jq -r '.tasks[] | [.id, .name] | @tsv' "$d/plan.json" | while IFS="$(printf '\t')" read -r id name; do
+      hs=$(handoff_state "$d" "$name" "$id")
+      # The leading paren keeps bash 3.2 from ending the $( ) at the pattern's.
+      case "$hs" in (done|partial|blocked|failed) echo "handoff $hs: $id ($name) — orch handoff ${1} $name" ;; esac
+    done
+    jq -r '.[] | select((.removedAt // "") == "") | [.name, .id, (if (.sessionId // "") == "" then "-" else .sessionId end), (.budget | tostring)] | @tsv' "$d/sessions.json" \
+      | while IFS="$(printf '\t')" read -r name id sid budget; do
+        if [ "$sid" = - ]; then key="${id}[^|]*"; else key="$sid"; fi
+        calls=$(grep -c "^[^|]*|$key|[^|]*|[^|]*|allow|" "$d/events.log" 2>/dev/null || true); calls=${calls:-0}
+        [ "$budget" -gt 0 ] 2>/dev/null && [ $((calls * 5)) -ge $((budget * 4)) ] && echo "budget: $name $calls/$budget — orch budget ${1} $name +<n>, or let it hand off"
+      done
+    since=$(cat "$d/inbox.cursor" 2>/dev/null || echo 0)
+    # Counted before printing: a line the guard appends meanwhile is left for the next inbox.
+    n=$(wc -l < "$d/events.log" | tr -d ' ')
+    awk -v s="$since" -v n="$n" -F'|' 'NR > s && NR <= n && $5 == "block" { print "block: " $0 }' "$d/events.log"
+    echo "$n" > "$d/inbox.cursor"
+    # claude agents shows a session between turns as done (or blocked on a prompt); without a handoff it has not reported.
+    if agents=$(live_agents); then
+      jq -r --argjson a "$agents" '.[] | select((.removedAt // "") == "") | .id as $i
+          | (first($a[] | select(.id == $i) | .state) // "") as $s | select($s != "" and $s != "working") | "\(.name)\t\($s)"' "$d/sessions.json" \
+        | while IFS="$(printf '\t')" read -r name st; do
+          [ -f "$(latest_handoff "$d" "$name")" ] || echo "idle without a handoff: $name (claude agents: $st) — message it"
+        done
+    else
+      echo "idle sessions unknown: claude agents could not be read"
+    fi
+    n=$(cmd_ready "${1}" | tr '\n' ' '); n=${n% }
+    [ -z "$n" ] || echo "ready: $n"
+  )
+  if [ -n "$out" ]; then printf '%s\n' "$out"; else echo "nothing needs you in run ${1}"; fi
+}
+
 cmd_handoff() {
   local d; d=$(run_dir "${1:-}"); local n="${2:-}" f o r others=""
   [ -n "$n" ] || die "handoff <run> <name>"
@@ -1946,6 +2056,9 @@ case "$cmd" in
   spawn) cmd_spawn "$@" ;;
   status) cmd_status "$@" ;;
   events) cmd_events "$@" ;;
+  runs) cmd_runs "$@" ;;
+  graph) cmd_graph "$@" ;;
+  inbox) cmd_inbox "$@" ;;
   handoff) cmd_handoff "$@" ;;
   handoff-put) cmd_handoff_put "$@" ;;
   qa-request) cmd_qa_request "$@" ;;
