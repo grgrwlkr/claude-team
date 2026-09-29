@@ -1342,4 +1342,70 @@ expect_grep '^lead  *500  *9  *9000  *90$' "$TMP_BASE/out" "and a lead row from 
 expect_exit 0 "address from a restarted lead" env CLAUDE_CODE_SESSION_ID=1ead0000-0000-4000-8000-00000000018b "$ORCH" address r18 lead-18
 expect_grep '^1ead0000-0000-4000-8000-00000000018b$' .orchestrator/r18/lead-session "address records the new lead id"
 
+echo "# budget +N and budgetInitial, approve --rest, task patch: run r19"
+expect_exit 0 "init r19" "$ORCH" init r19 --base main
+jq '.stages += ["ship"] | .tasks |= map(if .id == "arch-up" then .stage = "ship" else . end)' "$TMP_BASE/r5.json" > "$TMP_BASE/r19.json"
+expect_exit 0 "plan r19, three stages" "$ORCH" plan r19 "$TMP_BASE/r19.json"
+echo '[{"taskId":"impl","name":"dev-5","role":"developer","id":"d19aaaaa","sessionId":"sid-d19","pathsAllowed":["src/**"],"budget":25}]' > .orchestrator/r19/sessions.json
+expect_exit 0 "budget +15" "$ORCH" budget r19 impl +15
+expect_grep '35' "$TMP_BASE/out" "budget +N prints the new budget"
+jq -r '.tasks[] | select(.id == "impl") | "\(.budget) \(.budgetInitial)"' .orchestrator/r19/plan.json > "$TMP_BASE/v"
+expect_grep '^35 20$' "$TMP_BASE/v" "+N adds to the plan budget and keeps the initial one"
+jq -r '.[] | "\(.budget) \(.budgetInitial)"' .orchestrator/r19/sessions.json > "$TMP_BASE/v"
+expect_grep '^40 25$' "$TMP_BASE/v" "+N adds to the session's own budget and keeps its initial one"
+expect_grep '|impl|budget|allow|+15' .orchestrator/r19/events.log "the raise is logged as +N"
+expect_exit 0 "budget +5 again" "$ORCH" budget r19 impl +5
+expect_exit 0 "budget set outright" "$ORCH" budget r19 dev-5 50
+jq -r '.tasks[] | select(.id == "impl") | "\(.budget) \(.budgetInitial)"' .orchestrator/r19/plan.json > "$TMP_BASE/v"
+expect_grep '^50 20$' "$TMP_BASE/v" "later changes keep the first initial budget"
+expect_exit 1 "budget refuses +x" "$ORCH" budget r19 impl +x
+expect_exit 1 "budget refuses a bare +" "$ORCH" budget r19 impl +
+jq -r '.tasks[] | select(.id == "spec") | .budgetInitial' .orchestrator/r19/plan.json > "$TMP_BASE/v"
+expect_grep '^null$' "$TMP_BASE/v" "a task whose budget never changed has no budgetInitial"
+expect_exit 0 "task set a budget" "$ORCH" task set r19 spec budget 33
+jq -r '.tasks[] | select(.id == "spec") | "\(.budget) \(.budgetInitial)"' .orchestrator/r19/plan.json > "$TMP_BASE/v"
+expect_grep '^33 20$' "$TMP_BASE/v" "task set keeps the initial budget"
+jq '.tasks |= map(if .id == "impl" then .budget = 70 else . end)' "$TMP_BASE/r19.json" > "$TMP_BASE/r19v.json"
+expect_exit 0 "plan --replan from a file without budgetInitial" "$ORCH" plan r19 "$TMP_BASE/r19v.json" --replan
+jq -r '.tasks[] | select(.id == "impl") | "\(.budget) \(.budgetInitial)"' .orchestrator/r19/plan.json > "$TMP_BASE/v"
+expect_grep '^70 20$' "$TMP_BASE/v" "--replan keeps the stored initial budget"
+jq -r '.[] | "\(.budget) \(.budgetInitial)"' .orchestrator/r19/sessions.json > "$TMP_BASE/v"
+expect_grep '^70 25$' "$TMP_BASE/v" "and so does the session it carries the budget into"
+
+echo '{"impl":{"goal":"code against spec S-1"},"qa-5":{"goal":"cases for S-1","budget":44}}' > "$TMP_BASE/patch.json"
+expect_exit 0 "task patch" "$ORCH" task patch r19 "$TMP_BASE/patch.json"
+jq -r '.tasks[] | select(.id == "impl" or .id == "qa") | "\(.id) \(.goal) \(.budget) \(.budgetInitial)"' .orchestrator/r19/plan.json > "$TMP_BASE/v"
+expect_grep '^impl code against spec S-1 70 20$' "$TMP_BASE/v" "the patch sets a field of a task named by id"
+expect_grep '^qa cases for S-1 44 20$' "$TMP_BASE/v" "and fields of a task named by name, keeping the initial budget"
+expect_grep '|qa|task-patch|allow|budget,goal' .orchestrator/r19/events.log "each patched task is logged with its fields"
+echo '{"impl":{"budget":61}}' > "$TMP_BASE/patch.json"
+expect_exit 0 "task patch a budget" "$ORCH" task patch r19 "$TMP_BASE/patch.json"
+jq -r '.[] | .budget' .orchestrator/r19/sessions.json > "$TMP_BASE/v"
+expect_grep '^61$' "$TMP_BASE/v" "a patched budget reaches the live session"
+cp .orchestrator/r19/plan.json "$TMP_BASE/r19-before.json"
+echo '{"impl":{"goal":"changed"},"spec":{"role":"wizard"}}' > "$TMP_BASE/patch.json"
+expect_exit 1 "task patch refuses a patch the validation rejects" "$ORCH" task patch r19 "$TMP_BASE/patch.json"
+expect_exit 0 "and changes nothing" cmp -s "$TMP_BASE/r19-before.json" .orchestrator/r19/plan.json
+echo '{"nosuch":{"goal":"x"}}' > "$TMP_BASE/patch.json"
+expect_exit 1 "task patch refuses an unknown task" "$ORCH" task patch r19 "$TMP_BASE/patch.json"
+expect_grep 'nosuch' "$TMP_BASE/err" "and names it"
+echo '{"impl":"code"}' > "$TMP_BASE/patch.json"
+expect_exit 1 "task patch refuses a value that is not an object" "$ORCH" task patch r19 "$TMP_BASE/patch.json"
+echo '{"impl":' > "$TMP_BASE/patch.json"
+expect_exit 1 "task patch refuses invalid JSON" "$ORCH" task patch r19 "$TMP_BASE/patch.json"
+expect_exit 1 "task patch needs a file" "$ORCH" task patch r19 "$TMP_BASE/no-such-patch.json"
+
+"$ORCH" accept r19 arch fixture --force > /dev/null
+for t in spec design qal-a; do "$ORCH" accept r19 "$t" ok --force > /dev/null; done
+expect_exit 0 "approve design" "$ORCH" approve r19 design "user: design ok"
+expect_exit 1 "approve --rest needs the user's words" "$ORCH" approve r19 --rest
+expect_exit 0 "approve --rest" "$ORCH" approve r19 --rest "user: не спрашивай, делай до конца"
+jq -r 'map("\(.stage)=\(.note)") | join(";")' .orchestrator/r19/approved.json > "$TMP_BASE/v"
+expect_grep '^design=user: design ok;build=user: не спрашивай, делай до конца;ship=user: не спрашивай, делай до конца$' "$TMP_BASE/v" "--rest approves every stage not yet approved and keeps the earlier approvals"
+expect_grep '|rest|approve|allow|' .orchestrator/r19/events.log "--rest is logged"
+for t in impl qa rev drev qal-b; do "$ORCH" accept r19 "$t" ok --force > /dev/null; done
+expect_exit 0 "ready after --rest" "$ORCH" ready r19
+expect_grep '^arch-up$' "$TMP_BASE/out" "the last stage opens without another approval"
+expect_exit 1 "approve --rest refuses a run with nothing left to approve" "$ORCH" approve r19 --rest "again"
+
 summary

@@ -29,6 +29,9 @@ def paths_meet($a; $b):
     else ($a | lit) as $x | ($b | lit) as $y | ($x | startswith($y)) or ($y | startswith($x)) end;
 # as_qa: a plan stored before the tester role merged into qa still holds tester tasks; they run as qa.
 def as_qa: if .role == "tester" then .role = "qa" | .qaOf = (.qaOf // .verifies) else . end;
+# rebudget($n): a task or session record gets budget $n; the first budget it had stays as budgetInitial,
+# so a run can be calibrated afterwards.
+def rebudget($n): (if .budget != $n and .budget != null then .budgetInitial = (.budgetInitial // .budget) else . end) | .budget = $n;
 '
 # Globs as regexes. glob_re: Claude Code's paths — ** any depth, * and ? within one directory, {a,b}
 # alternatives; module paths use it because they become path-scoped rules. guard_re: the guard's
@@ -133,6 +136,7 @@ orch qa-request <run> <name> "<what to check>"      a developer asks for qa of i
 orch accept <run> <task-id|name> ["<note>"] [--force]   the lead accepts a task, records its branch head, prints what became ready and removes sessions no open task needs. Refused for a task never spawned, cancelled, or whose handoff is none, partial or blocked, and for a branch that changed files outside its pathsAllowed. An architect task is accepted only when orch architecture --check passes in its worktree on a committed map; --force accepts anyway and says why in the note
 orch task add <run> <file|->                      add a task (or an array of tasks) through the plan's validation
 orch task set <run> <task-id|name> <field> <json> change one field of a task; budget and pathsAllowed reach live sessions too
+orch task patch <run> <file>                      change fields of several tasks at once, {"<task-id|name>": {"<field>": <json>}}, validated once
 orch paths <run> <task-id|name> add <glob>...     widen a task's allowed paths, in the plan and in its live sessions
 orch cancel <run> <task-id|name> "<why>"|--undo   drop a task from the run: never ready, settled for close
 orch forget <run> <name|--dead>                   drop session records — --dead: those claude agents does not list on this machine — so their tasks can be spawned again
@@ -146,13 +150,14 @@ orch review <run> venue <branch|pr>               where review happens: the bran
 orch review <run> rounds <n>                      how many review rounds a task may take (default 3)
 orch acceptance <run> <on|off>                    require a qa-lead that writes acceptance tests first and accepts the whole change last (default on)
 orch approve <run> <stage> "<the user's words>"   staged mode: record the user's approval of a stage; the next one opens
+orch approve <run> --rest "<the user's words>"    staged mode: the user lifts staging; one approval covers every stage left
 orch stage-report <run> <stage>                   staged mode: an HTML page of the stage's handoffs and evidence, to show the user
 orch architecture                                 the architecture map's state in this worktree, the size of the job and the graph tools this stack has
 orch architecture --check                         the map against the current tree: coverage by modules.json, dead paths, changes since built-at, generated rules in sync
 orch architecture --sync                          write .claude/rules/architecture/<module>.md from docs/architecture/modules.json
 orch interactive <run> <on|off>                   require a qa task per developer task, which also runs the app and verifies visually
 orch tools [--refresh]                            inventory of the machine's means to run and watch an app; the MCP list is cached for an hour
-orch budget <run> <task-id|name> <n>              change a task's budget mid-run, in the plan and in the live session's record the guard reads
+orch budget <run> <task-id|name> <n|+n>           change a task's budget mid-run (+n adds), in the plan and in the live session's record the guard reads; the first budget stays as budgetInitial
 orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
 orch resume <run> <name|all>
 orch decide <run> "<decision>"                    append to decisions.md
@@ -368,13 +373,18 @@ cmd_plan() {
      "$file" > "$d/plan.json.tmp" && mv "$d/plan.json.tmp" "$d/plan.json"
   rm -f "$d/plan.rewritten.json"
   if [ "$replan" = 1 ]; then
+    # A replan file written by hand need not repeat budgetInitial; the stored one stays.
+    jq --argjson old "$old" "$JQ_DEFS"'($old.tasks | map({key: .id, value: .}) | from_entries) as $o
+      | .tasks |= map(($o[.id] // null) as $was
+          | if $was == null then . else .budget as $b | .budget = $was.budget | .budgetInitial = (.budgetInitial // $was.budgetInitial) | rebudget($b) end
+          | if .budgetInitial == null then del(.budgetInitial) else . end)' "$d/plan.json" > "$d/plan.json.tmp" && mv "$d/plan.json.tmp" "$d/plan.json"
     lock_run "$d"
-    jq --argjson old "$old" --slurpfile new "$d/plan.json" '
+    jq --argjson old "$old" --slurpfile new "$d/plan.json" "$JQ_DEFS"'
       ($old.tasks | map({key: .id, value: .}) | from_entries) as $o
       | ($new[0].tasks | map({key: .id, value: .}) | from_entries) as $n
       | map(. as $s | ($n[$s.taskId] // null) as $t | ($o[$s.taskId] // {}) as $was
           | if $t == null then .
-            else (if $t.budget != $was.budget then .budget = $t.budget else . end)
+            else (if $t.budget != $was.budget then rebudget($t.budget) else . end)
                | (if $t.pathsAllowed != $was.pathsAllowed then .pathsAllowed = $t.pathsAllowed else . end) end)' \
       "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
     unlock_run "$d"
@@ -1384,18 +1394,24 @@ cmd_handoff() {
 # so a mid-run change has to land in both.
 cmd_budget() {
   local d; d=$(run_dir "${1:-}"); local who="${2:-}" n="${3:-}"
-  [ -n "$who" ] || die "budget <run> <task-id|name> <n>"
-  case "$n" in ''|*[!0-9]*) die "budget <run> <task-id|name> <n>  (n is a number of guarded tool calls)" ;; esac
+  [ -n "$who" ] || die "budget <run> <task-id|name> <n|+n>"
+  local add=0 k="$n"
+  case "$n" in +*) add=1; k="${n#+}" ;; esac
+  case "$k" in ''|*[!0-9]*) die "budget <run> <task-id|name> <n|+n>  (n is a number of guarded tool calls, +n adds to the current budget)" ;; esac
   local hits
   hits=$(jq -r --arg w "$who" '[.tasks[] | select(.id == $w or .name == $w)] | length' "$d/plan.json")
   hits=$((hits + $(jq -r --arg w "$who" '[.[] | select(.taskId == $w or .name == $w)] | length' "$d/sessions.json")))
   [ "$hits" -gt 0 ] || die "no task or session '$who' in run ${1:-}"
-  jq --arg w "$who" --argjson n "$n" '.tasks |= map(if .id == $w or .name == $w then .budget = $n else . end)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
+  local set="rebudget(if \$add == 1 then (.budget // 0) + \$k else \$k end)"
+  jq --arg w "$who" --argjson k "$k" --argjson add "$add" "$JQ_DEFS"'.tasks |= map(if .id == $w or .name == $w then '"$set"' else . end)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
   lock_run "$d"
-  jq --arg w "$who" --argjson n "$n" 'map(if .taskId == $w or .name == $w then .budget = $n else . end)' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
+  jq --arg w "$who" --argjson k "$k" --argjson add "$add" "$JQ_DEFS"'map(if .taskId == $w or .name == $w then '"$set"' else . end)' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
   unlock_run "$d"
   ev "$d" orchestrator "$who" budget allow "$n"
-  echo "budget of $who: $n guarded calls — the guard honours it from the session's next call"
+  local now_b
+  now_b=$(jq -r --arg w "$who" --slurpfile s "$d/sessions.json" '[(.tasks[] | select(.id == $w or .name == $w) | "task \(.id) \(.budget)"),
+    ($s[0][] | select((.taskId == $w or .name == $w) and (.removedAt // "") == "") | "session \(.name) \(.budget)")] | join(", ")' "$d/plan.json")
+  echo "budget of $who: $n guarded calls, now $now_b — the guard honours it from the session's next call"
 }
 
 cmd_pause() {
@@ -1427,7 +1443,7 @@ cmd_decide() {
 # edit never starts from a stale or rejected copy.
 cmd_task() {
   local sub="${1:-}" run="${2:-}"
-  [ $# -ge 2 ] || die "task add <run> <file|-> | task set <run> <task-id|name> <field> <json>"
+  [ $# -ge 2 ] || die "task add <run> <file|-> | task set <run> <task-id|name> <field> <json> | task patch <run> <file>"
   shift 2
   local d; d=$(run_dir "$run"); local tmp="$d/plan.edit.json" id="" field=""
   case "$sub" in
@@ -1445,10 +1461,30 @@ cmd_task() {
       jq . >/dev/null 2>&1 <<<"$3" || die "task set: the value must be JSON — 7, \"text\", [\"a\",\"b\"]"
       jq --arg id "$id" --arg f "$field" --argjson v "$3" '.tasks |= map(if .id == $id then .[$f] = $v else . end)' "$d/plan.json" > "$tmp"
       ;;
-    *) die "task add <run> <file|-> | task set <run> <task-id|name> <field> <json>" ;;
+    patch)
+      local src="${1:-}" p k t ids='{}'
+      [ -n "$src" ] || die "task patch <run> <file>  ({\"<task-id|name>\": {\"<field>\": <json value>}, …})"
+      [ -f "$src" ] || die "no such file $src"
+      p=$(jq -c . "$src" 2>/dev/null) || die "task patch: $src is not valid JSON"
+      jq -e 'type == "object" and all(.[]; type == "object")' >/dev/null <<<"$p" || die "task patch: $src must be {\"<task-id|name>\": {\"<field>\": <json value>}, …}"
+      while IFS= read -r k; do
+        t=$(resolve_task "$d" "$k") || die "no task or session '$k' in run $run"
+        ids=$(jq -c --arg k "$k" --arg t "$t" '. + {($k): $t}' <<<"$ids")
+      done < <(jq -r 'keys[]' <<<"$p")
+      jq --argjson p "$p" --argjson ids "$ids" '.tasks |= map(. as $t | reduce ($p | to_entries[] | select($ids[.key] == $t.id) | .value) as $f ($t; . + $f))' "$d/plan.json" > "$tmp"
+      ;;
+    *) die "task add <run> <file|-> | task set <run> <task-id|name> <field> <json> | task patch <run> <file>" ;;
   esac
   ( cmd_plan "$run" "$tmp" --replan ) || { rm -f "$tmp"; exit 1; }
   rm -f "$tmp"
+  if [ "$sub" = patch ]; then
+    # Budgets and pathsAllowed reached the live sessions through the replan.
+    jq -r --argjson ids "$ids" 'to_entries | map({id: $ids[.key], f: (.value | keys)}) | group_by(.id)[] | "\(.[0].id)\t\([.[].f[]] | unique | join(","))"' <<<"$p" | while IFS="$(printf '\t')" read -r t k; do
+      ev "$d" orchestrator "$t" task-patch allow "$k"
+      echo "patched $t: $k"
+    done
+    return 0
+  fi
   case "$field" in
     budget|pathsAllowed)
       lock_run "$d"
@@ -1564,7 +1600,19 @@ cmd_cost() {
 cmd_approve() {
   local d; d=$(run_dir "${1:-}"); local stage="${2:-}" note="${3:-}"
   [ "$(jq -r '.mode // "single"' "$d/plan.json")" = staged ] || die "run ${1:-} is not staged; approve applies to mode staged"
-  [ -n "$stage" ] || die "approve <run> <stage> \"<the user's words>\""
+  [ -n "$stage" ] || die "approve <run> <stage> \"<the user's words>\" | approve <run> --rest \"<the user's words>\""
+  if [ "$stage" = --rest ]; then
+    # The user lifts staging: one approval for every stage left, so from here only dependencies order the tasks.
+    [ -n "$note" ] || die "approve --rest needs the user's words: orch approve ${1:-} --rest \"<what the user said>\""
+    [ -f "$d/approved.json" ] || echo '[]' > "$d/approved.json"
+    local rest
+    rest=$(jq -r --slurpfile ap "$d/approved.json" '[(.stages // [])[] | select(. as $x | ($ap[0] | map(.stage) | index($x)) == null)] | join(" ")' "$d/plan.json")
+    [ -n "$rest" ] || die "every stage of run ${1:-} is approved already"
+    jq --arg rest "$rest" --arg note "$note" --arg t "$(now)" '. + [$rest | split(" ")[] | {stage:., at:$t, note:$note, rest:true}]' "$d/approved.json" > "$d/approved.tmp" && mv "$d/approved.tmp" "$d/approved.json"
+    ev "$d" orchestrator rest approve allow "$note"
+    echo "stages $rest approved at once — no stage waits for the user any more; orch ready shows what can start"
+    return 0
+  fi
   plain_name "$stage" || die "stage name '$stage' is not a plain name"
   jq -e --arg s "$stage" '(.stages // []) | index($s) != null' "$d/plan.json" >/dev/null || die "no stage '$stage'; stages: $(jq -r '.stages | join(", ")' "$d/plan.json")"
   local gate; gate=$(stage_gate "$d" "$stage")
