@@ -20,8 +20,14 @@ name=$(session_json "$run_dir" "$sid" | jq -r '.name')
 [ -n "$name" ] && [ "$name" != null ] || exit 0
 handoff="$run_dir/handoffs/$name.md"
 
+# Stop lines are never "allow": the guard counts allow lines as the budget.
+# A paused session stops to wait for the orchestrator; a handoff now could be overwritten by the one it owes later.
+if [ -f "$run_dir/PAUSE-$name" ] || [ -f "$run_dir/PAUSE" ]; then
+  log_event "$run_dir" "$sid" "$name" Stop stop "paused"
+  exit 0
+fi
 if [ -f "$handoff" ] && grep -q '^## Status' "$handoff"; then
-  log_event "$run_dir" "$sid" "$name" Stop allow "handoff present"
+  log_event "$run_dir" "$sid" "$name" Stop stop "handoff present"
   exit 0
 fi
 log_event "$run_dir" "$sid" "$name" Stop block "no handoff"

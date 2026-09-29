@@ -38,7 +38,7 @@ echo "# pause"
 touch "$RUN/PAUSE-int-1"
 expect_exit 2 "paused session blocked" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"ls"}')"
 expect_exit 2 "PAUSE-<name> blocks Bash" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"ls"}')"
-expect_exit 2 "pause also holds MCP tools (a tester drives the browser through them)" bash "$GUARD" <<< "$(hook_input sid-int "$WT" mcp__playwright__browser_click '{}')"
+expect_exit 2 "pause also holds MCP tools (qa drives the browser through them)" bash "$GUARD" <<< "$(hook_input sid-int "$WT" mcp__playwright__browser_click '{}')"
 rm "$RUN/PAUSE-int-1"
 echo reason > "$RUN/PAUSE"
 expect_exit 2 "global PAUSE blocks everyone" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"
@@ -74,7 +74,7 @@ expect_exit 2 "truncating the session index is blocked" bash "$GUARD" <<< "$(hoo
 
 : > "$RUN/events.log"
 echo "# first-run fixes: authorized actions and orch commands"
-expect_exit 0 "orch handoff-put is allowed for a session" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 dev-1 < /tmp/h.md"}')"
+expect_exit 0 "orch handoff-put is allowed for a session" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 dev-1 < .scratch/h.md"}')"
 expect_exit 0 "orch status is allowed for a session" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch status r1"}')"
 : > "$RUN/events.log"
 expect_exit 2 "orch pause is the lead's command, blocked for a session" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch pause r1 int-1 stop"}')"
@@ -99,6 +99,11 @@ expect_exit 2 "orch reached by path is still policed" bash "$GUARD" <<< "$(hook_
 expect_exit 2 "orch via bash is still policed" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"bash /x/bin/orch authorize r1 push-base on"}')"
 expect_exit 2 "handoff-put under another session name is blocked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 int-1 < h.md"}')"
 expect_exit 0 "handoff-put under own name is allowed" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 dev-1 < h.md"}')"
+expect_exit 2 "audit F14: handoff-put into another run is blocked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r2 dev-1 < h.md"}')"
+expect_grep 'own run (r1)' "$TMP_BASE/err" "the refusal names the session's own run"
+touch "$RUN/PAUSE-int-1"
+expect_exit 2 "audit F14: and gets no free pass while paused" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"orch handoff-put r2 int-1 < h.md"}')"
+rm "$RUN/PAUSE-int-1"
 
 echo "# installs are gated by the install-tools authorization"
 : > "$RUN/events.log"
@@ -112,6 +117,9 @@ expect_exit 0 "brew install allowed when authorized" bash "$GUARD" <<< "$(hook_i
 echo "# hooks.json routes MCP tools through the guard"
 jq -r '.hooks.PreToolUse[].matcher' "$PLUGIN_ROOT/hooks/hooks.json" > "$TMP_BASE/matchers"
 expect_grep '^mcp__\.\*$' "$TMP_BASE/matchers" "PreToolUse has an mcp__.* matcher"
+expect_grep '^Bash|Monitor|' "$TMP_BASE/matchers" "audit F2: Monitor runs shell commands and goes through the guard with Bash"
+expect_exit 2 "audit F2: a Monitor command is judged like a Bash one" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Monitor '{"command":"git push --force origin w1","description":"x"}')"
+expect_exit 0 "audit F2: a harmless Monitor command passes" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Monitor '{"command":"tail -f build.log","description":"x"}')"
 
 echo "# wave 3: the handoff channel is free of budget, pause and prose scanning"
 NL='
@@ -168,9 +176,21 @@ expect_exit 0 "a session may start an MCP helper agent"bash "$GUARD" <<< "$(hook
 expect_exit 2 "but no other subagent" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Agent '{"subagent_type":"general-purpose","prompt":"do the task"}')"
 expect_exit 2 "nor one with no type" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Agent '{"prompt":"do the task"}')"
 jq -r '.hooks.PreToolUse[].matcher' "$PLUGIN_ROOT/hooks/hooks.json" > "$TMP_BASE/matchers"
-expect_grep '^Agent$' "$TMP_BASE/matchers" "PreToolUse routes the Agent tool through the guard"
+expect_grep '^Agent|Task$' "$TMP_BASE/matchers" "PreToolUse routes the Agent tool, and its older name Task, through the guard"
 expect_exit 0 "a session may run orch architecture" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch architecture")"
 expect_exit 0 "a session may run orch tools" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch tools")"
+jq '. + [{"taskId":"arch","name":"arch-1","role":"architect","id":"cccc3333","sessionId":"sid-arch","pathsAllowed":["docs/architecture/**"],"budget":50}]' "$RUN/sessions.json" > "$RUN/sessions.tmp" && mv "$RUN/sessions.tmp" "$RUN/sessions.json"
+expect_exit 0 "any session may check the map" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch architecture --check")"
+expect_exit 2 "only the architect regenerates the map's rules" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch architecture --sync")"
+expect_grep 'architect' "$TMP_BASE/err" "the refusal names who may"
+expect_exit 2 "nor through a variable" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" 'X=--sync; orch architecture $X')"
+expect_exit 2 "nor through a command substitution" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" 'orch architecture $(printf -- --sync)')"
+expect_exit 2 "nor through backticks" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" 'orch architecture `echo --sync`')"
+expect_exit 2 "nor glued to the subcommand with IFS" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" 'orch architecture${IFS}--sync')"
+expect_exit 2 "nor hidden behind a second mention in the same command" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" 'orch architecture --sync orch architecture')"
+expect_exit 0 "plain orch architecture stays open" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch architecture")"
+expect_exit 2 "a lead subcommand is judged by its own name, not by a later word" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch pause orch status")"
+expect_exit 0 "the architect may sync" bash "$GUARD" <<< "$(hook_bash sid-arch "$WT" "orch architecture --sync")"
 jq 'map(if .name == "dev-1" then .budget = 10 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 : > "$RUN/events.log"
 expect_exit 0 "scratch is writable in your own worktree whatever the task's paths" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/.scratch/handoff.md"}')"
@@ -189,6 +209,53 @@ expect_exit 0 "the repeated call goes through" bash "$GUARD" <<< "$(hook_bash si
 expect_exit 0 "and the one after" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
 jq 'map(if .name == "dev-1" then .budget = 2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 
+echo "# audit tests-guard F15: a budget the guard cannot read is no licence"
+: > "$RUN/events.log"
+jq 'map(if .name == "dev-1" then .budget = "abc" else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+expect_exit 2 "a non-numeric budget blocks, not unlimited" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
+expect_grep 'budget unreadable; ask the orchestrator' "$TMP_BASE/err" "and says the budget is unreadable"
+expect_exit 0 "the handoff stays writable" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "orch handoff-put r1 dev-1 < .scratch/handoff.md")"
+jq 'map(if .name == "dev-1" then del(.budget) else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+expect_exit 2 "a missing budget blocks too" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
+expect_grep 'budget unreadable' "$TMP_BASE/err" "for the same reason"
+jq 'map(if .name == "dev-1" then .budget = 2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+: > "$RUN/events.log"
+
+echo "# audit guard F12: budget count and log run under a lock, so parallel calls cannot overshoot"
+mkdir "$RUN/.budget-dev-1.lock"
+( bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")" >/dev/null 2>&1; echo $? > "$TMP_BASE/lockrc" ) &
+sleep 1
+expect_no_grep 'sid-dev|dev-1|' "$RUN/events.log" "a call waits while another call of the session holds the budget lock"
+rmdir "$RUN/.budget-dev-1.lock"
+wait
+expect_grep '^0$' "$TMP_BASE/lockrc" "and goes through once it is released"
+expect_exit 0 "the lock is released after the call" test ! -e "$RUN/.budget-dev-1.lock"
+mkdir "$RUN/.budget-dev-1.lock"
+expect_exit 2 "a lock held past the wait blocks, it is not skipped" env CLAUDE_ORCH_LOCK_WAIT=1 bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
+expect_grep 'budget lock' "$TMP_BASE/err" "and names the lock"
+rmdir "$RUN/.budget-dev-1.lock"
+: > "$RUN/events.log"
+jq 'map(if .name == "dev-1" then .budget = 5 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")" >/dev/null 2>&1 & done
+wait
+expect_exit 0 "twelve parallel calls on a budget of 5 allow exactly 5" test "$(grep -c '|sid-dev|dev-1|Bash|allow|' "$RUN/events.log")" -eq 5
+expect_exit 0 "and nudge exactly once" test "$(grep -c '|sid-dev|dev-1|Bash|nudge|[0-9]' "$RUN/events.log")" -eq 1
+expect_exit 0 "and leave no lock behind" test ! -e "$RUN/.budget-dev-1.lock"
+jq 'map(if .name == "dev-1" then .budget = 2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+: > "$RUN/events.log"
+
+echo "# audit guard F16: block lines carry the command or path (C3)"
+: > "$RUN/events.log"
+expect_exit 2 "a force push is blocked" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "git push --force origin w1")"
+expect_grep '|sid-int|int-1|Bash|block|force push is never allowed|git push --force origin w1$' "$RUN/events.log" "its block line ends with the command"
+expect_exit 2 "a write outside the paths is blocked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/docs/x.md"}')"
+expect_grep "|sid-dev|dev-1|Write|block|.*|$WT/docs/x.md\$" "$RUN/events.log" "its block line ends with the file path"
+expect_exit 0 "field 6 is still the reason bin/orch reads" test "$(grep '|Write|block|' "$RUN/events.log" | cut -d'|' -f6)" = "path docs/x.md is outside your allowed paths (src/**, test/**). Ask the orchestrator if the task needs it: it grants a path with orch paths r1 dev-1 add <glob>, never by editing sessions.json."
+LONG="git reset --hard $(printf 'x%.0s' $(seq 1 200))"
+expect_exit 2 "a long destructive command is blocked" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "git status${NL}${LONG}")"
+expect_exit 0 "and its block line keeps the first 120 characters, newlines flattened" test "$(grep '|destructive git command' "$RUN/events.log" | cut -d'|' -f7)" = "$(printf 'git status %s' "$LONG" | cut -c1-120)"
+: > "$RUN/events.log"
+
 echo "# a session registered by its short id is guarded before its full id is known"
 jq '. + [{"taskId":"impl","name":"dev-x","role":"developer","id":"cccc3333","sessionId":"","pathsAllowed":["src/**"],"budget":50}]' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 expect_exit 2 "an edit outside its paths is refused" bash "$GUARD" <<< "$(hook_input cccc3333-1111-4222-8333-444455556666 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"
@@ -203,6 +270,33 @@ expect_exit 2 "a session may not run orch forget" bash "$GUARD" <<< "$(hook_bash
 rm "$RUN/forgotten.json"
 expect_exit 0 "an unregistered session stays unguarded" bash "$GUARD" <<< "$(hook_input dddd4444-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"
 
+echo "# audit F19: a session running one of this plugin's agents is a team session, registered or not"
+as_agent() { jq -c --arg t "$1" '. + {agent_type: $t}'; }
+expect_exit 2 "an unregistered orchestrator: agent session is held, not set free" env CLAUDE_ORCH_REGISTER_WAIT=1 bash "$GUARD" <<< "$(hook_input abab1212-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}' | as_agent orchestrator:developer)"
+expect_grep 'unregistered team session' "$TMP_BASE/err" "and is told the orchestrator must register or stop it"
+( sleep 1; jq '. + [{"taskId":"impl","name":"dev-late","role":"developer","id":"abab1212","sessionId":"","pathsAllowed":["src/**"],"budget":50}]' "$RUN/sessions.json" > "$RUN/late.tmp" && mv "$RUN/late.tmp" "$RUN/sessions.json" ) &
+expect_exit 2 "a session orch registers while the guard waits is judged by its record" env CLAUDE_ORCH_REGISTER_WAIT=10 bash "$GUARD" <<< "$(hook_input abab1212-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}' | as_agent orchestrator:developer)"
+wait
+expect_grep 'outside your allowed paths' "$TMP_BASE/err" "refused for its paths, not for being unregistered"
+expect_exit 0 "a subagent of this plugin in someone else's session is not a team session" env CLAUDE_ORCH_REGISTER_WAIT=1 bash "$GUARD" <<< "$(hook_input dddd4444-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}' | as_agent orchestrator:reviewer | jq -c '. + {agent_id: "agent-1"}')"
+expect_exit 0 "another plugin's agent session is not ours" env CLAUDE_ORCH_REGISTER_WAIT=1 bash "$GUARD" <<< "$(hook_input dddd4444-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}' | as_agent other:developer)"
+expect_exit 0 "the guard hooks outlast the registration wait, or a timeout would let the call through" jq -e '[.hooks.PreToolUse[].hooks[].timeout] | min > 15' "$PLUGIN_ROOT/hooks/hooks.json"
+
+echo "# audit tests-guard F3, F13: a session the guard knows is held when its cwd or its record goes missing"
+mkdir -p "$WT/.scratch/gone" && rmdir "$WT/.scratch/gone"
+expect_exit 2 "a registered session whose cwd was removed is blocked" bash "$GUARD" <<< "$(hook_bash sid-int "$WT/.scratch/gone" "ls")"
+expect_grep 'no longer exists' "$TMP_BASE/err" "and is told its working directory is gone"
+printf '%s' "$RUN" > "$CLAUDE_ORCH_STATE/ecec7777-0000-4000-8000-000000000000"
+expect_exit 2 "a session in the index that its run no longer lists is blocked" bash "$GUARD" <<< "$(hook_bash ecec7777-0000-4000-8000-000000000000 /tmp "ls")"
+expect_grep 'no longer listed' "$TMP_BASE/err" "and is told why"
+printf '%s' "$TMP_BASE/no-such-run" > "$CLAUDE_ORCH_STATE/ecec7777-0000-4000-8000-000000000000"
+expect_exit 0 "an index entry whose run dir is gone holds nothing" bash "$GUARD" <<< "$(hook_bash ecec7777-0000-4000-8000-000000000000 /tmp "ls")"
+rm -f "$CLAUDE_ORCH_STATE/ecec7777-0000-4000-8000-000000000000"
+cp "$RUN/sessions.json" "$RUN/sessions.keep"
+printf '[{"name": ' > "$RUN/sessions.json"
+expect_exit 2 "an unreadable sessions.json does not set a known session free" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "ls")"
+mv "$RUN/sessions.keep" "$RUN/sessions.json"
+
 echo "# a session stays in the worktree orch started it in"
 jq -r '.hooks.PreToolUse[].matcher' "$PLUGIN_ROOT/hooks/hooks.json" > "$TMP_BASE/matchers"
 expect_grep 'EnterWorktree' "$TMP_BASE/matchers" "PreToolUse routes EnterWorktree through the guard"
@@ -213,11 +307,331 @@ expect_grep "$WT" "$TMP_BASE/err" "the refusal names the session's own worktree"
 expect_exit 2 "so is entering another worktree" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" EnterWorktree '{"path":"'"$REPO"'/.claude/worktrees/other"}')"
 expect_exit 0 "entering its own worktree passes" bash "$GUARD" <<< "$(hook_input sid-dev "$REPO" EnterWorktree '{"path":"'"$WT"'"}')"
 
+echo "# audit guard F1, F3; tests-guard F11, F12: a Bash write is judged by its target, not by the text around it"
+W2="$REPO/.claude/worktrees/w2"
+mkdir -p "$W2/src" "$RUN/canvas/boards"
+jq --arg w2 "$W2" 'map(if .name == "dev-1" then .budget = 500 elif .name == "int-1" then .budget = 500 | .worktree = $w2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+: > "$RUN/events.log"
+dev_cmd() { expect_exit "$1" "$2" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "$3")"; }
+dev_cmd 0 "a read of the run dir with stderr silenced passes" "cat $RUN/plan.json 2>/dev/null"
+dev_cmd 0 "so does a listing with 2>&1 into a pipe" "ls $RUN/handoffs/ 2>&1 | tail -n 5; ls >&2"
+dev_cmd 0 "copying out of the run dir into scratch passes" "cp $RUN/plan.json .scratch/plan.json"
+dev_cmd 0 "so does making scratch and copying a canvas into it" "mkdir -p .scratch && mkdir -p .scratch/canvas && cp -R $RUN/canvas/boards .scratch/canvas/"
+dev_cmd 0 "a read of the run dir redirected into scratch passes" "grep allow $RUN/events.log > .scratch/ev.txt"
+dev_cmd 0 "a heredoc body is text, not redirects" "gh pr create --title t --body-file - <<'PR'${NL}> a quoted note about $RUN/plan.json${NL}PR"
+dev_cmd 0 "a > inside quotes is not a redirect" "git commit -m 'a > docs/x.md'"
+dev_cmd 0 "a write inside the task's paths passes" "echo x > src/new.ts"
+dev_cmd 0 "so does making a directory whose contents are the task's" "mkdir -p test"
+dev_cmd 0 "an interpreter running a module over the run dir reads it" "python3 -m json.tool $RUN/plan.json"
+dev_cmd 0 "find -exec with a reader passes" "find $RUN -name '*.md' -exec cat {} +"
+dev_cmd 0 "an unresolvable target that names neither the run dir nor the index is left alone" 'touch $TMPDIR/x.log'
+dev_cmd 2 "a redirect outside the task's paths is blocked" "echo x > docs/secret.md"
+expect_grep 'outside your allowed paths' "$TMP_BASE/err" "and names the allowed paths"
+dev_cmd 2 "so is sed -i on a file outside them" "sed -i '' 's/a/b/' docs/x.md"
+dev_cmd 2 "and cp into one" "cp src/a.ts docs/b.md"
+dev_cmd 2 "and tee" "echo x | tee -a docs/x.md"
+dev_cmd 2 "a write into another session's worktree is blocked" "touch $W2/src/x.ts"
+expect_grep 'int-1' "$TMP_BASE/err" "and names whose worktree it is"
+n=0
+for form in "dd if=/dev/zero of=$RUN/plan.json count=1" "install -m 644 src/a.ts $RUN/x" "rsync -a src/ $RUN/copy/" \
+  "ln -s /tmp/x $RUN/link" "truncate -s 0 $RUN/events.log" "perl -pi -e 's/a/b/' $RUN/plan.json" "mkdir $RUN/x" \
+  "rm $RUN/PAUSE-dev-1" "echo x | tee -a $RUN/events.log" "mv .scratch/h.md $RUN/handoffs/dev-1.md" "cp -t $RUN src/a.ts" \
+  "chmod a-w $RUN/plan.json" "echo x >> $CLAUDE_ORCH_STATE/sid-dev" "find $RUN -name PAUSE -delete" "cd $RUN && touch PAUSE"; do
+  n=$((n + 1)); dev_cmd 2 "a write into the run dir or the index is blocked, form $n: ${form%% *}" "$form"
+done
+expect_exit 2 "the integrator's ** does not reach the run dir" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "echo x > $RUN/plan.json")"
+dev_cmd 2 "a subshell's cd does not move the command after it" "(cd /tmp); touch docs/x.md"
+ln -s "$RUN/plan.json" "$WT/src/pl"
+dev_cmd 2 "a write through a symlink is judged where it lands" "echo x > src/pl"
+rm "$WT/src/pl"
+dev_cmd 2 "an unresolvable target is blocked when the text names the run dir" 'd=.orchestrator; touch $d/r1/PAUSE'
+dev_cmd 2 "so is a substitution" "touch \$(echo $RUN)/PAUSE"
+dev_cmd 2 "node -e naming the run dir is blocked" "node -e 'require(\"fs\").appendFileSync(\"$RUN/sessions.json\", \"x\")'"
+dev_cmd 2 "so is a python3 heredoc" "python3 - <<'EOF'${NL}open('$RUN/sessions.json', 'a').write('x')${NL}EOF"
+dev_cmd 2 "xargs feeding a writer is judged like the writer" "echo $RUN/PAUSE | xargs touch"
+dev_cmd 2 "a shell -c naming the run dir is blocked" "bash -c \"touch $RUN/PAUSE\""
+dev_cmd 0 "an awk program that only prints reads the run dir" "awk '{print \$1}' $RUN/events.log"
+MSG="git commit -m \"\$(cat <<'EOF'${NL}fix: don't (re)write .orchestrator/r1 by hand${NL}EOF${NL})\""
+dev_cmd 0 "a commit message in a heredoc inside \$( ) is text, apostrophes and parens included" "$MSG && echo x > src/ok.ts"
+dev_cmd 2 "and the command after it is still judged" "$MSG && echo x > $RUN/plan.json"
+jq 'map(if .name == "dev-1" then .budget = 2 else . end | del(.worktree | select(. == $w2)))' --arg w2 "$W2" "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+
+echo "# audit guard F15, tests-guard F10: a Write is judged where it lands, through a symlinked ancestor too"
+W3="$REPO/.claude/worktrees/w3"
+git -C "$REPO" worktree add -q -b w3 "$W3" main
+set_rec() { jq --arg n "$1" --arg w3 "$W3" --arg wt "$WT" "map(if .name == \$n then $2 else . end)" "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"; }
+set_rec dev-1 '.budget = 500'
+set_rec int-1 '.worktree = $w3'
+: > "$RUN/events.log"
+ln -s "$TMP_BASE/outside" "$WT/src/ln"
+expect_exit 2 "a Write under a symlinked dir, into a level still to be made, is blocked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/src/ln/new/f.ts"}')"
+expect_grep 'outside your worktree' "$TMP_BASE/err" "as outside the worktree"
+rm "$WT/src/ln"
+expect_exit 0 "a Write into directories still to be made inside the paths passes" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/src/new/deep/f.ts"}')"
+
+echo "# audit guard F4, F11: Edit and Write take the worktree from the file, not from the cwd"
+expect_exit 0 "a Write into the own worktree from the main checkout passes" bash "$GUARD" <<< "$(hook_input sid-dev "$REPO" Write '{"file_path":"'"$WT"'/src/y.ts"}')"
+expect_exit 2 "a Write into another session's worktree is blocked from inside it" bash "$GUARD" <<< "$(hook_input sid-dev "$W3" Write '{"file_path":"'"$W3"'/src/p.ts"}')"
+expect_grep "outside your worktree ($WT)" "$TMP_BASE/err" "and names the session's own worktree"
+set_rec dev-1 'del(.worktree)'
+expect_exit 0 "with no worktree on record, the file's worktree counts, not the cwd's" bash "$GUARD" <<< "$(hook_input sid-dev "$REPO" Write '{"file_path":"'"$WT"'/src/y.ts"}')"
+expect_exit 2 "and one registered to another session is still refused" bash "$GUARD" <<< "$(hook_input sid-dev "$W3" Edit '{"file_path":"'"$W3"'/src/p.ts"}')"
+expect_grep "int-1's worktree" "$TMP_BASE/err" "naming whose it is"
+expect_exit 2 "and so is the main checkout, from inside the own worktree" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Edit '{"file_path":"'"$REPO"'/src/a.ts"}')"
+expect_grep 'main checkout' "$TMP_BASE/err" "as the main checkout"
+set_rec dev-1 '.worktree = $wt'
+
+echo "# audit guard F10: a command that starts by cd-ing into the own worktree is judged from there"
+dev_at() { expect_exit "$1" "$2" bash "$GUARD" <<< "$(hook_bash sid-dev "$3" "$4")"; }
+dev_at 0 "cd back into the own worktree from outside the repository passes" /tmp "cd $WT && pwd"
+dev_at 0 "so does a lone cd from a working directory that was removed" "$WT/.scratch/gone" "cd '$WT'"
+dev_at 0 "and a cd into a subdirectory from inside the run dir" "$RUN" "cd $WT/src; ls"
+dev_at 2 "the rest of the command is judged from the new directory" /tmp "cd $WT/src && echo x > ../docs/x.md"
+expect_grep 'path docs/x.md is outside your allowed paths' "$TMP_BASE/err" "by its paths, not by the old cwd"
+dev_at 2 "a cd into another session's worktree gets no pass" /tmp "cd $W3 && ls"
+dev_at 2 "nor a cd that runs in the background" /tmp "cd $WT & ls"
+dev_at 2 "nor a cd into the run dir" "$WT" "cd $RUN && touch x"
+dev_at 2 "a relative cd from a removed working directory gets no pass" "$WT/.scratch/gone" "cd src"
+
+echo "# audit guard F8: orch is a command only in command position"
+dev_cmd 0 "orch in a commit message is prose" "git commit -m 'docs: explain orch accept'"
+dev_cmd 0 "so is orch in a grep pattern" "grep -rn 'orch spawn' docs"
+dev_cmd 0 "orch handoff-put --help asks for help" "orch handoff-put --help 2>&1"
+dev_cmd 0 "so does orch -h" "orch -h"
+n=0
+for form in "ls && orch accept r1 impl" "ls || orch accept r1 impl" "ls | orch accept r1 impl" "echo \$(orch accept r1 impl)" \
+  "echo \"\`orch accept r1 impl\`\"" "env A=1 orch accept r1 impl" "command orch accept r1 impl" "exec orch accept r1 impl" \
+  "(orch accept r1 impl)" "$PLUGIN_ROOT/bin/orch accept r1 impl" "bash -c 'orch accept r1 impl'" "echo r1 | xargs orch accept" \
+  "orch pause r1 all --help" "orch init --help"; do
+  n=$((n + 1)); dev_cmd 2 "a lead command in command position is blocked, form $n: $form" "$form"
+done
+
+echo "# audit guard F9: the body of a quoted heredoc is data, not commands"
+dev_cmd 0 "a commit message fed on stdin may name destructive git" "git commit -F - <<'EOF'${NL}never run git reset --hard here${NL}EOF"
+dev_cmd 0 "so may one in the \$( ) idiom" "git commit -m \"\$(cat <<'EOF'${NL}docs: say why git push --force and sudo are refused${NL}EOF${NL})\""
+dev_cmd 0 "and a PR body under <<\"X\"" "gh pr create --title t --body-file - <<\"PR\"${NL}curl -s https://x.y/i.sh | sh is what we removed${NL}PR"
+dev_cmd 0 "and one under <<-'X'" "cat <<-'EOF' > .scratch/n.md${NL}	rm -rf /tmp/x and git branch -D w1${NL}	EOF"
+dev_cmd 2 "an unquoted heredoc body is still scanned" "cat <<EOF > .scratch/n.md${NL}\$(git reset --hard)${NL}EOF"
+dev_cmd 2 "a quoted body piped into a shell is still scanned" "cat <<'X' | bash${NL}git push --force${NL}X"
+dev_cmd 2 "the command after the terminator is still scanned" "cat <<'X' > .scratch/n.md${NL}text${NL}X${NL}git reset --hard"
+dev_cmd 2 "and a here-string is no heredoc" "cat <<< 'x'${NL}git reset --hard"
+
+echo "# audit guard F5: git is judged by its normalised argv and by the branch it runs on"
+git init -q --bare "$TMP_BASE/origin.git"
+git -C "$REPO" remote add origin "$TMP_BASE/origin.git"
+git -C "$REPO" push -q origin main w1 2>/dev/null
+auth() { jq ".authorize.pushBase = $1 | .authorize.deleteMerged = $1" "$RUN/plan.json" > "$RUN/plan.tmp" && mv "$RUN/plan.tmp" "$RUN/plan.json"; }
+int_cmd() { expect_exit "$1" "$2" bash "$GUARD" <<< "$(hook_bash sid-int "$W3" "$3")"; }
+dev_cmd 2 "a commit through git -C into the main checkout lands on base" "git -C $REPO commit --allow-empty -m x"
+dev_cmd 2 "so does one after a cd into the main checkout" "cd $REPO && git commit --allow-empty -m x"
+dev_cmd 2 "and one after a cd further down the command" "ls; cd $REPO; git commit --allow-empty -m x"
+dev_cmd 2 "global options before -C do not hide it" "git -c user.name=x --no-pager -C $REPO commit -m x"
+dev_cmd 2 "nor does pointing --git-dir and --work-tree at the main checkout" "git --git-dir=$REPO/.git --work-tree $REPO commit -m x"
+dev_at 0 "a commit through git -C into the own worktree passes from the main checkout" "$REPO" "git -C $WT commit --allow-empty -m x"
+dev_cmd 2 "a push to HEAD:refs/heads/<base> is a push to base" "git push origin HEAD:refs/heads/main"
+dev_cmd 2 "so is a push to refs/heads/<base>" "git push origin refs/heads/main"
+dev_cmd 2 "and one to <x>:<base>" "git push origin w1:main"
+dev_cmd 2 "and --all" "git push --all origin"
+dev_cmd 2 "and --mirror" "git push --mirror origin"
+dev_at 2 "and a push of HEAD from the base branch" "$REPO" "git push origin HEAD"
+dev_cmd 0 "a branch whose name ends in the base's is not the base" "git push origin feature/main mainline"
+git -C "$WT" branch -q --set-upstream-to=origin/main w1
+dev_cmd 2 "a bare push whose upstream is <remote>/<base> is a push to base" "git push"
+dev_cmd 2 "so is one that names only the remote" "git push -o ci.skip origin"
+git -C "$WT" branch -q --set-upstream-to=origin/w1 w1
+dev_cmd 0 "a bare push to the branch's own upstream passes" "git push"
+dev_cmd 2 "-f inside combined flags is a force push" "git push -uf origin w1"
+expect_grep 'force push' "$TMP_BASE/err" "named as one"
+dev_cmd 2 "so is a +refspec" "git push origin +w1"
+dev_cmd 2 "and --force-with-lease" "git push --force-with-lease origin w1"
+dev_cmd 2 "gh pr merge is the integrator's" "gh pr merge 12 --merge"
+dev_cmd 2 "so is merging through gh api pulls/<n>/merge" "gh api -X PUT repos/o/r/pulls/12/merge"
+dev_cmd 2 "and through gh api …/merges" "gh api repos/o/r/merges -f base=main -f head=w1"
+dev_cmd 2 "and through the graphql mergePullRequest mutation" "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
+dev_cmd 0 "reading a PR through gh passes" "gh pr view 12 && gh api repos/o/r/pulls/12"
+dev_cmd 2 "reset with --hard anywhere in its argv is destructive" "git reset -q --hard"
+dev_cmd 2 "so is one with --hard last" "git reset HEAD~1 --hard"
+dev_cmd 2 "clean with split flags is destructive" "git clean -d -f"
+dev_cmd 2 "so is clean -fdx" "git clean -fdx"
+dev_cmd 2 "and clean --force" "git clean --force -d"
+dev_cmd 0 "a dry-run clean passes" "git clean -n -d"
+dev_cmd 2 "push -d deletes a remote branch" "git push -d origin w9"
+dev_cmd 2 "so does push <remote> :<branch>" "git push origin :w9"
+dev_cmd 2 "branch --delete needs the integrator and delete-merged" "git branch --delete w9"
+auth false
+int_cmd 2 "an unauthorized integrator may not gh pr merge" "gh pr merge 12 --squash"
+expect_grep 'not authorized' "$TMP_BASE/err" "and is told the plan does not authorize it"
+auth true
+int_cmd 0 "an authorized integrator may gh pr merge" "gh pr merge 12 --squash"
+int_cmd 0 "and push to HEAD:refs/heads/<base>" "git push origin HEAD:refs/heads/main"
+int_cmd 2 "but not delete the base remotely" "git push origin :main"
+int_cmd 2 "branch --delete --force stays destructive under authorization" "git branch --delete --force w9"
+int_cmd 2 "so does branch -d -f" "git branch -d -f w9"
+int_cmd 2 "and branch -df" "git branch -df w9"
+int_cmd 0 "branch --delete of a merged branch is the authorized integrator's" "git branch --delete w9"
+git -C "$WT" branch -q --unset-upstream w1
+
+echo "# audit guard F6, tests-guard F7: a base checkout is judged per git call"
+dev_cmd 0 "a new branch, then a word equal to the base in the next command, passes" "git checkout -b feat && ls main"
+dev_cmd 0 "restoring a file from base with checkout <base> -- <paths> passes" "git checkout main -- src/a.ts"
+dev_cmd 0 "a detached checkout passes" "git checkout --detach main 2>&1 | tail -1; git log --oneline -1"
+dev_cmd 2 "a checkout of the base piped on stays blocked" "git checkout -q main 2>&1 | tail -1"
+dev_cmd 2 "and so does a switch to it with a command after" "git switch main && ls"
+
+echo "# audit guard F7, tests-guard F2: rm -r is judged within its own command"
+dev_cmd 0 "an absolute path in the command after rm -rf is not an rm target" "rm -rf .scratch/build && git -C $WT status"
+dev_cmd 0 "nor one after a ;" "rm -rf .scratch/build; ls /tmp"
+dev_cmd 2 "split flags and a variable target are blocked" 'rm -f -r $X'
+expect_grep 'rm -r may target' "$TMP_BASE/err" "as a recursive delete"
+dev_cmd 2 "so is --recursive with a \${…} target" 'rm --recursive ${HOME}/x'
+dev_cmd 2 "and -fR" 'rm -fR "$D"'
+dev_cmd 0 "rm -f of a variable is no recursive delete" 'rm -f $X'
+
+echo "# audit guard F14, tests-guard F20: the install gate reads the whole argv"
+jq '.authorize.installTools = false' "$RUN/plan.json" > "$RUN/plan.tmp" && mv "$RUN/plan.tmp" "$RUN/plan.json"
+n=0
+for form in "npm -g install typescript" "pnpm add typescript --global" "yarn global add typescript" "npx -y playwright@1.50 install chromium" \
+  "bunx playwright install" "go install golang.org/x/tools/gopls@latest" "deno install -g x.ts" "/usr/local/bin/pip3 install x" \
+  "uv pip install --system x" "python3 -m pip install x"; do
+  n=$((n + 1)); dev_cmd 2 "an install of tooling is gated, form $n: $form" "$form"
+done
+dev_cmd 0 "the worktree's venv pip passes" ".venv/bin/pip install -r requirements.txt"
+dev_cmd 0 "so does uv pip install" "uv pip install -r requirements.txt"
+echo "# security review of 2dae217: the install gate judges where a package lands, not only where pip lives"
+n=0
+for form in ".venv/bin/pip install --user x" ".venv/bin/pip install --prefix /usr/local x" ".venv/bin/pip install --target=/opt/x x" \
+  ".venv/bin/pip install --root / x" "uv pip install --python /usr/bin/python3 x" "uv pip install -p /usr/bin/python3 x" \
+  "uv pip install --target /opt/x x" "npm install --prefix /usr/local typescript" "pnpm add --dir /opt/app x" "yarn add --modules-folder /opt/nm x"; do
+  n=$((n + 1)); dev_cmd 2 "an install that lands outside the worktree is gated, form $n: $form" "$form"
+done
+dev_cmd 2 "a package whose name holds pip does not make yarn read as pip" "yarn add --modules-folder /opt/nm pipdeptree"
+dev_cmd 2 "nor pnpm" "pnpm add --dir /opt/app pipx"
+dev_cmd 2 "nor bun" "bun add --cwd /opt/app pip-tools"
+dev_cmd 0 "a venv pip installing into a target inside the worktree passes" ".venv/bin/pip install --target .scratch/site x"
+dev_cmd 0 "uv pip with the worktree's own interpreter passes" "uv pip install --python .venv/bin/python x"
+dev_cmd 0 "npm with a prefix inside the worktree passes" "npm install --prefix src x"
+dev_cmd 0 "and listing global packages" "npm ls -g"
+jq '.authorize.installTools = true' "$RUN/plan.json" > "$RUN/plan.tmp" && mv "$RUN/plan.tmp" "$RUN/plan.json"
+
+echo "# audit landscape L11: the third identical command in a row is a loop suspect, never a block"
+: > "$RUN/events.log"
+dev_cmd 0 "a command passes" "bun test src/a.test.ts"
+dev_cmd 0 "and again" "bun   test src/a.test.ts"
+dev_cmd 0 "the third time in a row passes too" "bun test  src/a.test.ts"
+expect_grep 'same command' "$TMP_BASE/err" "with one reminder on stderr"
+cp "$TMP_BASE/out" "$TMP_BASE/loop.json"
+expect_exit 0 "and the same reminder as additionalContext, which is what reaches the model on exit 0" jq -e '.hookSpecificOutput | .hookEventName == "PreToolUse" and (.additionalContext | test("same command")) and (has("permissionDecision") | not)' "$TMP_BASE/loop.json"
+expect_grep '|sid-dev|dev-1|Bash|nudge|loop-suspect' "$RUN/events.log" "and a loop-suspect line"
+dev_cmd 0 "the fourth passes with no second reminder" "bun test src/a.test.ts"
+expect_no_grep 'same command' "$TMP_BASE/err" "silently"
+expect_exit 0 "one loop-suspect line per streak" test "$(grep -c '|nudge|loop-suspect' "$RUN/events.log")" -eq 1
+: > "$RUN/events.log"
+dev_cmd 0 "a different command between breaks the streak" "ls"
+dev_cmd 0 "one" "bun test"
+dev_cmd 0 "two" "ls"
+dev_cmd 0 "three" "bun test"
+expect_no_grep 'loop-suspect' "$RUN/events.log" "no loop suspect for alternating commands"
+set_rec dev-1 '.budget = 10'
+: > "$RUN/events.log"
+echo "2026-09-29T00:00:00Z|sid-dev|dev-1|Bash|nudge|loop-suspect" >> "$RUN/events.log"
+for _ in 1 2 3 4 5 6 7 8; do echo "2026-09-29T00:00:00Z|sid-dev|dev-1|Bash|allow|ls" >> "$RUN/events.log"; done
+dev_cmd 2 "a loop-suspect line does not use up the 80% reminder" "ls"
+expect_grep 'partial handoff' "$TMP_BASE/err" "which still comes"
+set_rec dev-1 '.budget = 500'
+
+echo "# contract C1: orch handoff-put --file <path in the own worktree> is the handoff channel"
+: > "$RUN/events.log"
+touch "$RUN/PAUSE-dev-1"
+dev_cmd 0 "a sole handoff-put --file goes through while paused" "orch handoff-put r1 dev-1 --file .scratch/handoff.md"
+expect_grep '|sid-dev|dev-1|Bash|allow-free|handoff-put' "$RUN/events.log" "outside the budget"
+dev_cmd 0 "so does an absolute path in the own worktree" "orch handoff-put r1 dev-1 --file $WT/.scratch/handoff.md"
+dev_cmd 2 "a file outside the own worktree gets no free pass" "orch handoff-put r1 dev-1 --file /tmp/h.md"
+dev_cmd 2 "nor one that climbs out of it" "orch handoff-put r1 dev-1 --file ../../../../h.md"
+dev_cmd 2 "nor a chained command" "orch handoff-put r1 dev-1 --file .scratch/h.md; ls"
+dev_cmd 2 "nor another session's name" "orch handoff-put r1 int-1 --file .scratch/h.md"
+echo "# security review of 2dae217: the < file form is held to the own worktree like --file"
+dev_cmd 0 "handoff-put from a file in the own worktree goes through while paused" "orch handoff-put r1 dev-1 < .scratch/handoff.md"
+dev_cmd 2 "one from outside the worktree gets no free pass" "orch handoff-put r1 dev-1 < /etc/hosts"
+dev_cmd 2 "nor one that climbs out of it" "orch handoff-put r1 dev-1 < ../../../../h.md"
+dev_cmd 2 "nor one from the home directory" "orch handoff-put r1 dev-1 < ~/.ssh/id_rsa"
+rm "$RUN/PAUSE-dev-1"
+dev_cmd 2 "unpaused, a handoff read from outside the worktree is still refused" "orch handoff-put r1 dev-1 < /etc/hosts"
+dev_cmd 2 "and so is --file from outside it" "orch handoff-put r1 dev-1 --file /etc/hosts"
+dev_cmd 0 "a handoff from a file in the worktree passes" "orch handoff-put r1 dev-1 < .scratch/handoff.md"
+dev_cmd 2 "inside a shell the source cannot be checked, so the file form is refused there" "bash -c 'orch handoff-put r1 dev-1 < /etc/hosts'"
+echo "# security review of 2dae217: the index reached through a symlinked path is still the orchestrator's"
+mkdir -p "$REPO/.idx" && ln -s "$REPO/.idx" "$REPO/idxlink"
+expect_exit 2 "a working directory inside the index behind a symlink is held" env CLAUDE_ORCH_STATE="$REPO/idxlink" bash "$GUARD" <<< "$(hook_bash sid-dev "$REPO/.idx" "ls")"
+expect_grep "orchestrator's directory" "$TMP_BASE/err" "as the orchestrator's directory"
+rm -rf "$REPO/.idx" "$REPO/idxlink"
+
+echo "# lead item G3.10: a Bash write outside the own worktree is blocked wherever it lands"
+dev_cmd 2 "a write into the main checkout is blocked" "echo x > $REPO/src/a.ts"
+expect_grep 'outside your worktree' "$TMP_BASE/err" "as outside the worktree"
+dev_cmd 2 "so is one into /tmp" "echo x > /tmp/g3b-x"
+dev_cmd 2 "and one into \$HOME" "cp src/a.ts ~/g3b-x"
+dev_cmd 0 "/dev/null, /dev/stdout, /dev/stderr and /dev/fd pass" "echo x > /dev/null; echo y >/dev/stdout 2>/dev/stderr; echo z > /dev/fd/2"
+
+echo "# lead item G3.11: a worktree the guard cannot resolve confines nothing"
+set_wt() { jq --arg p "$1" 'map(if .name == "int-1" then .worktree = $p else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"; }
+set_wt "$TMP_BASE/nowt/wt"
+expect_exit 2 "a record whose worktree does not exist blocks a ** Edit inside that path" bash "$GUARD" <<< "$(hook_input sid-int "$W3" Edit '{"file_path":"'"$TMP_BASE"'/nowt/wt/src/a.ts"}')"
+expect_grep 'worktree cannot be resolved' "$TMP_BASE/err" "and says the worktree cannot be resolved"
+int_cmd 2 "and a Bash write" "echo x > src/a.ts"
+expect_grep 'worktree cannot be resolved' "$TMP_BASE/err" "for the same reason"
+int_cmd 2 "and a cd into an arbitrary directory" "cd /tmp && ls"
+expect_grep 'worktree cannot be resolved' "$TMP_BASE/err" "for the same reason, not for leaving the repository"
+mkdir -p "$TMP_BASE/locked/wt"; chmod 000 "$TMP_BASE/locked"
+set_wt "$TMP_BASE/locked/wt"
+expect_exit 2 "a worktree whose resolution fails does not turn ** into every path" bash "$GUARD" <<< "$(hook_input sid-int "$W3" Edit '{"file_path":"'"$REPO"'/src/a.ts"}')"
+chmod 755 "$TMP_BASE/locked"
+set_wt "$W3"
+ln -s "$REPO" "$TMP_BASE/repolink"
+printf '%s' "$TMP_BASE/repolink/.orchestrator/r1" > "$CLAUDE_ORCH_STATE/sid-dev"
+dev_at 2 "a run dir reached through a symlinked parent still blocks a write into it" /tmp "cd $WT && echo x > $RUN/PAUSE"
+expect_grep 'written only by the orchestrator' "$TMP_BASE/err" "as the orchestrator's"
+rm -f "$CLAUDE_ORCH_STATE/sid-dev"
+
+echo "# lead item G3.12: orch behind a wrapper the guard does not know is still orch"
+n=0
+for form in "caffeinate orch accept r1 impl" "stdbuf -o0 orch accept r1 impl" "arch -arm64 orch accept r1 impl" "ionice -c3 orch accept r1 impl" \
+  "setsid orch accept r1 impl" "flock /tmp/l orch accept r1 impl" "script -q /dev/null orch accept r1 impl" "unbuffer orch accept r1 impl" \
+  "watch orch accept r1 impl" "doas orch accept r1 impl"; do
+  n=$((n + 1)); dev_cmd 2 "a lead command behind a wrapper is blocked, form $n: ${form%% orch*}" "$form"
+done
+dev_cmd 0 "orch in a grep pattern is still prose" "grep -rn 'orch spawn' docs"
+dev_cmd 0 "and in a commit message" "git commit -m 'orch accept'"
+dev_cmd 0 "and after echo" "echo orch accept r1 impl"
+dev_cmd 0 "a session command behind a wrapper passes" "caffeinate orch status r1"
+dev_cmd 2 "sed's e command runs a shell, so its script is scanned" "sed -n '1e orch accept r1 impl' src/a.ts"
+dev_cmd 0 "a sed script that only substitutes is text" "sed -e 's/orch accept/x/' src/a.ts"
+
+echo "# stage Q: a developer asks for qa under its own name only"
+dev_cmd 0 "orch qa-request for the own name passes" "orch qa-request r1 dev-1 'the parser edge cases'"
+dev_cmd 2 "under another session's name it is blocked" "orch qa-request r1 int-1 'x'"
+expect_grep 'orch qa-request may ask only for your own task (dev-1)' "$TMP_BASE/err" "the own name is the reason"
+dev_cmd 2 "so is one into another run" "orch qa-request r2 dev-1 'x'"
+dev_cmd 2 "and one without a name" "orch qa-request r1"
+dev_cmd 2 "and another name inside code" "bash -c 'orch qa-request r1 int-1 x'"
+dev_cmd 2 "and behind a wrapper" "caffeinate orch qa-request r1 int-1 x"
+dev_cmd 0 "orch qa-request --help asks for help" "orch qa-request --help"
+set_rec dev-1 '.budget = 2'
+
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
 expect_exit 2 "stop: no handoff blocks" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
+echo "wait for me" > "$RUN/PAUSE-dev-1"
+expect_exit 0 "audit guard F13: a session paused by name may stop without a handoff" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
+rm "$RUN/PAUSE-dev-1"
+echo "hold" > "$RUN/PAUSE"
+expect_exit 0 "audit guard F13: so may any session while the whole run is paused" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
+rm "$RUN/PAUSE"
 printf '# dev-1\n## Status\ndone\n' > "$RUN/handoffs/dev-1.md"
+: > "$RUN/events.log"
 expect_exit 0 "stop: handoff with Status passes" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
+expect_grep '|sid-dev|dev-1|Stop|stop|' "$RUN/events.log" "audit cost F1: the stop is logged with decision stop"
+bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
+expect_exit 0 "audit cost F1: stops do not spend the budget (dev-1 budget 2, two stops logged)" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
 expect_exit 0 "stop: second stop attempt passes to avoid loops" bash "$STOP" <<< "$(printf '{"session_id":"sid-int","cwd":"%s","stop_hook_active":true}' "$WT")"
 
 summary

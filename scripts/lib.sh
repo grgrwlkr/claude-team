@@ -34,7 +34,8 @@ find_run() {
 }
 
 # resolve_run <cwd> <session_id>: run dir via cwd, else via the index; verifies the session is still listed.
-# Prints "<run dir>|<cwd-in-repo:1|0>". Fails when the session is registered nowhere.
+# Prints "<run dir>|<cwd-in-repo:1|0>". Fails when the session is registered nowhere; returns 2, with the
+# run dir printed, when the index holds it but its existing run no longer lists it.
 resolve_run() {
   local root run in_repo=1
   if root=$(repo_root "$1" 2>/dev/null) && run=$(find_run "$root" "$2"); then
@@ -45,7 +46,11 @@ resolve_run() {
     run=$(cat "$INDEX_DIR/$2")
     jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$run/sessions.json" >/dev/null 2>&1 \
       || jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$run/forgotten.json" >/dev/null 2>&1 \
-      || return 1
+      || {
+        # Registered once and its run still there: unlisted or unreadable now is no release.
+        [ -d "$run" ] || return 1
+        printf '%s|0' "$run"; return 2
+      }
   fi
   mkdir -p "$INDEX_DIR" 2>/dev/null && printf '%s' "$run" > "$INDEX_DIR/$2" 2>/dev/null
   printf '%s|%s' "$run" "$in_repo"
@@ -56,23 +61,233 @@ session_json() {
   jq -c --arg s "$2" "$MINE"' map(select(mine($s))) | .[0]' "$1/sessions.json"
 }
 
-# norm_path <absolute path>: canonical form (symlinks and . / .. resolved) for an existing parent dir;
-# for a not-yet-existing parent, the path is accepted only when it has no . or .. segments. Fails otherwise.
+# norm_path <absolute path>: canonical form, its deepest existing directory resolved with symlinks and . / ..,
+# the part still to be created appended. A path whose parent does not exist yet is accepted only without
+# . or .. segments. Fails otherwise.
 norm_path() {
-  local p="$1" d b
+  local p="$1" d b rest=""
   case "$p" in /*) ;; *) return 1 ;; esac
   b=$(basename "$p"); d=$(dirname "$p")
   case "$b" in .|..) return 1 ;; esac
-  if [ -d "$d" ]; then
-    d=$(cd "$d" 2>/dev/null && pwd -P) || return 1
-    printf '%s/%s' "$d" "$b"
-  else
+  if [ ! -d "$d" ]; then
     case "/$p/" in */../*|*/./*) return 1 ;; esac
-    printf '%s' "$p"
+    until [ -d "$d" ]; do rest="/$(basename "$d")$rest"; d=$(dirname "$d"); done
   fi
+  d=$(cd "$d" 2>/dev/null && pwd -P) || return 1
+  printf '%s%s/%s' "${d%/}" "$rest" "$b"
 }
 
-# log_event <run_dir> <sid> <name> <tool> <decision> <detail>
+# shell_tokens: reads a shell command on stdin and prints its tokens, one per line as "<type><tab><value>":
+#   W a word, quotes removed; U a word holding an expansion ($VAR, $( ), backticks, ~user); G one holding an unquoted glob or brace
+#   S a command separator; P and p a subshell's ( and ); Q the start of the commands of a command or process
+#     substitution, which follow the tokens of the command they sit in
+#   O an output redirection whose target is the next word; D a >& one, whose next word is a file unless it is an fd or -;
+#     I an input redirection, whose next word is read, not written
+# Heredoc bodies are dropped; the substitutions in a body under an unquoted delimiter are kept as Q commands.
+shell_tokens() {
+  awk '
+function flush() {
+  if (inw) { if (w ~ /\n/) wu = 1; gsub(/\n/, " ", w); print (wu ? "U" : (wg ? "G" : "W")) "\t" w }
+  inw = 0; w = ""; wu = 0; wg = 0; wq = 0
+}
+# read_delim: reads the heredoc delimiter after the << (or <<-) ending at i into dl, dquo (it was quoted)
+# and ddash (<<-); returns the index of its last character
+function read_delim(a, len, i) {
+  dl = ""; dquo = 0; ddash = 0
+  if (a[i+1] == "-") { i++; ddash = 1 }
+  while (i < len && (a[i+1] == " " || a[i+1] == "\t")) i++
+  while (i < len && !index(" \t\n;&|<>()", a[i+1])) {
+    i++
+    if (a[i] == "\047" || a[i] == "\"") dquo = 1
+    else if (a[i] == "\\") { dquo = 1; if (i < len) { i++; dl = dl a[i] } }
+    else dl = dl a[i]
+  }
+  return i
+}
+# skip_body: from the newline at i, skips a heredoc body up to its delimiter line; returns the index of that line end
+function skip_body(a, len, s, i, delim, dash,   j, t) {
+  while (i < len) {
+    for (j = i + 1; j <= len && a[j] != "\n"; j++) ;
+    t = substr(s, i + 1, j - i - 1); i = j
+    if (dash) sub(/^\t+/, "", t)
+    if (t == delim) break
+  }
+  return i
+}
+# close_paren: the index of the ) closing a ( opened just before i; quotes and heredoc bodies hide parens
+function close_paren(a, len, s, i,   depth, q, pd, pdash) {
+  depth = 1; q = ""; pd = ""
+  for (; i <= len; i++) {
+    if (q == "\047") { if (a[i] == "\047") q = ""; continue }
+    if (a[i] == "\\") { i++; continue }
+    if (q == "\"") { if (a[i] == "\"") q = ""; continue }
+    if (a[i] == "\047" || a[i] == "\"") q = a[i]
+    else if (a[i] == "<" && a[i+1] == "<" && a[i+2] != "<") { i = read_delim(a, len, i + 1); pd = dl; pdash = ddash }
+    else if (a[i] == "\n" && pd != "") { i = skip_body(a, len, s, i, pd, pdash); pd = "" }
+    else if (a[i] == "(") depth++
+    else if (a[i] == ")" && --depth == 0) return i
+  }
+  return len + 1
+}
+# subst: queues the command of the substitution opening at i ($( <( >( or a backtick) and returns where it closes
+function subst(a, len, s, i,   j) {
+  if (a[i] == "`") {
+    for (j = i + 1; j <= len && a[j] != "`"; j++) if (a[j] == "\\") j++
+    q[++nq] = substr(s, i + 1, j - i - 1); return j
+  }
+  j = close_paren(a, len, s, i + 2); q[++nq] = substr(s, i + 2, j - i - 2); return j
+}
+function body_substs(b,   a, len, i) {
+  len = split(b, a, "")
+  for (i = 1; i <= len; i++) {
+    if (a[i] == "\\") i++
+    else if (a[i] == "`" || (a[i] == "$" && a[i+1] == "(")) i = subst(a, len, b, i)
+  }
+}
+function tok(s,   c, n, i, j, ch, k, line, t, body) {
+  n = split(s, c, ""); nh = 0; inw = 0; w = ""; wu = 0; wg = 0; wq = 0
+  for (i = 1; i <= n; i++) {
+    ch = c[i]
+    if (ch == "\\") { if (i < n && c[i+1] != "\n") { w = w c[i+1]; inw = 1 } i++; continue }
+    # an unterminated quote leaves the rest of the command unknown
+    if (ch == "\047") {
+      for (j = i + 1; j <= n && c[j] != "\047"; j++) ;
+      w = w substr(s, i + 1, j - i - 1); inw = 1; wq = 1; if (j > n) wu = 1; i = j; continue
+    }
+    if (ch == "\"") {
+      inw = 1; wq = 1
+      for (i++; i <= n && c[i] != "\""; i++) {
+        if (c[i] == "\\" && i < n && index("\"\\$`\n", c[i+1])) { if (c[i+1] != "\n") w = w c[i+1]; i++ }
+        else if (c[i] == "`" || (c[i] == "$" && c[i+1] == "(")) { i = subst(c, n, s, i); wu = 1 }
+        else { if (c[i] == "$") wu = 1; w = w c[i] }
+      }
+      if (i > n) wu = 1
+      continue
+    }
+    if (ch == "`" || (ch == "$" && c[i+1] == "(") || ((ch == "<" || ch == ">") && c[i+1] == "(")) {
+      i = subst(c, n, s, i); inw = 1; wu = 1; continue
+    }
+    if (ch == "~" && !inw) {
+      if (i == n || index(" \t\n;&|<>()/", c[i+1])) { w = ENVIRON["HOME"]; inw = 1; continue }
+      wu = 1
+    }
+    if (ch == "#" && !inw) { while (i < n && c[i+1] != "\n") i++; continue }
+    if (ch == "$") wu = 1
+    if (ch == "*" || ch == "?" || ch == "[" || (ch == "{" && (inw || (i < n && !index(" \t\n", c[i+1]))))) wg = 1
+    if (ch == " " || ch == "\t") { flush(); continue }
+    if (ch == "\n") {
+      flush(); print "S\t"
+      for (k = 1; k <= nh; k++) {
+        body = ""
+        while (i < n) {
+          for (j = i + 1; j <= n && c[j] != "\n"; j++) ;
+          line = substr(s, i + 1, j - i - 1); i = j
+          t = line; if (hdash[k]) sub(/^\t+/, "", t)
+          if (t == hdelim[k]) break
+          body = body line "\n"
+        }
+        if (!hquo[k]) body_substs(body)
+      }
+      nh = 0; continue
+    }
+    if (ch == ";" || ch == "|" || (ch == "&" && c[i+1] != ">")) {
+      flush()
+      if (c[i+1] == ch || (ch == "|" && c[i+1] == "&")) i++
+      print "S\t"; continue
+    }
+    if (ch == "(") { flush(); print "P\t"; continue }
+    if (ch == ")") { flush(); print "p\t"; continue }
+    if (ch == "&") { flush(); i++; if (c[i+1] == ">") i++; print "O\t"; continue }
+    if (ch == ">" || ch == "<") {
+      # digits right before the operator name an fd, not a word
+      if (inw && !wq && !wu && !wg && w ~ /^[0-9]+$/) { inw = 0; w = "" } else flush()
+      if (ch == ">") {
+        if (c[i+1] == ">" || c[i+1] == "|") i++
+        if (c[i+1] == "&") { i++; print "D\t" } else print "O\t"
+        continue
+      }
+      if (c[i+1] == "<" && c[i+2] == "<") { i += 2; print "I\t"; continue }
+      if (c[i+1] == "<") {
+        i = read_delim(c, n, i + 1); hdelim[++nh] = dl; hquo[nh] = dquo; hdash[nh] = ddash; continue
+      }
+      if (c[i+1] == ">") { i++; print "O\t"; continue }
+      if (c[i+1] == "&") i++
+      print "I\t"; continue
+    }
+    w = w ch; inw = 1
+  }
+  flush()
+}
+{ s = s (NR > 1 ? "\n" : "") $0 }
+END { nq = 0; tok(s); for (qi = 1; qi <= nq; qi++) { print "Q\t"; tok(q[qi]) } }
+'
+}
+
+# strip_quoted_heredocs: reads a shell command on stdin and prints it without the bodies of heredocs whose delimiter
+# is quoted (<<'X', <<"X", <<\X, <<-'X'): such a body is data. A body under an unquoted delimiter expands, and stays.
+# Heredocs inside $( ), backticks and double-quoted substitutions count; quotes and comments hide <<.
+strip_quoted_heredocs() {
+  awk '
+{ s = s (NR > 1 ? "\n" : "") $0 }
+END {
+  n = split(s, c, ""); out = ""; sp = 0; m[0] = "u"; nh = 0
+  for (i = 1; i <= n; i++) {
+    ch = c[i]; md = m[sp]
+    if (ch == "\\") { out = out ch c[i+1]; i++; continue }
+    if (md == "d") {
+      if (ch == "\"") sp--
+      else if (ch == "$" && c[i+1] == "(") { m[++sp] = "s"; dp[sp] = 0; out = out ch; ch = c[++i] }
+      else if (ch == "`") m[++sp] = "b"
+      out = out ch; continue
+    }
+    if (ch == "\047") { for (j = i + 1; j <= n && c[j] != "\047"; j++) ; out = out substr(s, i, j - i + 1); i = j; continue }
+    if (ch == "\"") m[++sp] = "d"
+    else if (ch == "`") { if (md == "b") sp--; else m[++sp] = "b" }
+    else if (ch == "$" && c[i+1] == "(") { m[++sp] = "s"; dp[sp] = 0; out = out ch; ch = c[++i] }
+    else if (ch == "(" && md == "s") dp[sp]++
+    else if (ch == ")" && md == "s") { if (dp[sp] == 0) sp--; else dp[sp]-- }
+    else if (ch == "#" && (i == 1 || index(" \t\n;&|()", c[i-1]))) {
+      for (j = i; j < n && c[j+1] != "\n"; j++) ;
+      out = out substr(s, i, j - i + 1); i = j; continue
+    }
+    else if (ch == "<" && c[i+1] == "<" && c[i+2] == "<") { out = out "<<<"; i += 2; continue }
+    else if (ch == "<" && c[i+1] == "<") {
+      j = i + 2; dash = 0; quo = 0; dl = ""
+      if (c[j] == "-") { dash = 1; j++ }
+      while (j <= n && (c[j] == " " || c[j] == "\t")) j++
+      while (j <= n && !index(" \t\n;&|<>()", c[j])) {
+        if (c[j] == "\047" || c[j] == "\"") { q = c[j]; quo = 1; for (j++; j <= n && c[j] != q; j++) dl = dl c[j] }
+        else if (c[j] == "\\") { quo = 1; j++; dl = dl c[j] }
+        else dl = dl c[j]
+        j++
+      }
+      hd[++nh] = dl; hq[nh] = quo; hdash[nh] = dash
+      out = out substr(s, i, j - i); i = j - 1; continue
+    }
+    else if (ch == "\n" && nh) {
+      out = out ch
+      for (k = 1; k <= nh; k++) {
+        while (i < n) {
+          for (j = i + 1; j <= n && c[j] != "\n"; j++) ;
+          line = substr(s, i + 1, j - i - 1); t = line
+          if (hdash[k]) sub(/^\t+/, "", t)
+          if (!hq[k] || t == hd[k]) out = out line (j <= n ? "\n" : "")
+          i = (j <= n ? j : n)
+          if (t == hd[k]) break
+        }
+      }
+      nh = 0; continue
+    }
+    out = out ch
+  }
+  printf "%s", out
+}'
+}
+
+# log_event <run_dir> <sid> <name> <tool> <decision> <detail> [<subject>]: a block line appends the
+# command or file path it judged as a 7th field; readers take the reason from field 6.
 log_event() {
-  printf '%s|%s|%s|%s|%s|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$3" "$4" "$5" "$(printf '%s' "$6" | tr '\n|' '  ')" >> "$1/events.log"
+  local tail=""
+  [ $# -ge 7 ] && tail="|$(printf '%s' "$7" | tr '\n|' '  ')"
+  printf '%s|%s|%s|%s|%s|%s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$3" "$4" "$5" "$(printf '%s' "$6" | tr '\n|' '  ')" "$tail" >> "$1/events.log"
 }

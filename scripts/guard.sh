@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # PreToolUse guard for orchestrated team sessions.
 # Exit 2 blocks the tool call and tells the session why; exit 0 lets it through.
-# Inert (exit 0, no side effects) for any session not registered in a run's sessions.json.
+# Inert (exit 0, no side effects) for any session not registered in a run's sessions.json, except one
+# running this plugin's agent, which orch has yet to register and is held until it is.
 set -u
 . "$(dirname "$0")/lib.sh"
 
@@ -10,22 +11,45 @@ sid=$(jq -r '.session_id // empty' <<<"$input")
 cwd=$(jq -r '.cwd // empty' <<<"$input")
 tool=$(jq -r '.tool_name // empty' <<<"$input")
 [ -n "$sid" ] && [ -n "$cwd" ] && [ -n "$tool" ] || exit 0
-[ -d "$cwd" ] || exit 0
+subject=$(jq -r '.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // empty' <<<"$input")
+subject=${subject:0:120}
 
-resolved=$(resolve_run "$cwd" "$sid") || exit 0
+resolved=$(resolve_run "$cwd" "$sid"); rc=$?
+if [ "$rc" -eq 1 ]; then
+  # orch launches a session with --agent orchestrator:<role> before it registers it; a subagent
+  # (agent_id set) of this plugin in some other session is not one.
+  case "$(jq -r '.agent_type // empty' <<<"$input")|$(jq -r '.agent_id // empty' <<<"$input")" in
+    'orchestrator:'*'|') ;;
+    *) exit 0 ;;
+  esac
+  waited=0
+  while [ "$rc" -eq 1 ]; do
+    if [ "$waited" -ge "${CLAUDE_ORCH_REGISTER_WAIT:-15}" ]; then
+      printf 'orchestrator guard: unregistered team session; the orchestrator must register or stop it\n' >&2
+      exit 2
+    fi
+    sleep 1; waited=$((waited + 1))
+    resolved=$(resolve_run "$cwd" "$sid"); rc=$?
+  done
+fi
 run_dir=${resolved%|*}
 in_repo=${resolved##*|}
+if [ "$rc" -eq 2 ]; then
+  log_event "$run_dir" "$sid" unknown "$tool" block "in the session index, no longer listed in its run" "$subject"
+  printf 'orchestrator guard: this session was registered in run %s and is no longer listed there, or its sessions.json is unreadable; stop and tell the orchestrator.\n' "$(basename "$run_dir")" >&2
+  exit 2
+fi
 rec=$(session_json "$run_dir" "$sid")
 if [ -z "$rec" ] || [ "$rec" = null ]; then
   # Removed from the run with orch forget and still running: held, never set free.
   gone=$(jq -r --arg s "$sid" "$MINE"' first(.[] | select(mine($s)) | .name) // "unknown"' "$run_dir/forgotten.json" 2>/dev/null)
-  log_event "$run_dir" "$sid" "${gone:-unknown}" "$tool" block "forgotten session"
+  log_event "$run_dir" "$sid" "${gone:-unknown}" "$tool" block "forgotten session" "$subject"
   printf 'orchestrator guard: this session (%s) was removed from run %s with orch forget and may not act in it any more; stop here.\n' "${gone:-unknown}" "$(basename "$run_dir")" >&2
   exit 2
 fi
 name=$(jq -r '.name' <<<"$rec")
 role=$(jq -r '.role' <<<"$rec")
-budget=$(jq -r '.budget // 0' <<<"$rec")
+budget=$(jq -r '.budget // empty' <<<"$rec")
 base=$(jq -r '.baseBranch // "main"' "$run_dir/plan.json" 2>/dev/null)
 [ -n "$base" ] && [ "$base" != null ] || base=main
 handoff="$run_dir/handoffs/$name.md"
@@ -35,7 +59,7 @@ auth_delete=$(jq -r '.authorize.deleteMerged // false' "$run_dir/plan.json" 2>/d
 auth_install=$(jq -r '.authorize.installTools // false' "$run_dir/plan.json" 2>/dev/null)
 
 block() {
-  log_event "$run_dir" "$sid" "$name" "$tool" block "$1"
+  log_event "$run_dir" "$sid" "$name" "$tool" block "$1" "$subject"
   printf 'orchestrator guard blocked this call for %s (%s): %s\nReport BLOCKED: to the orchestrator instead of working around it.\n' "$name" "$role" "$1" >&2
   exit 2
 }
@@ -49,31 +73,529 @@ allow_free() {
   exit 0
 }
 
-# sole_handoff_put <command> <own name>: the command is nothing but `orch handoff-put <run> <own name>`
+# sole_handoff_put <command> <own name> <own run>: the command is nothing but `orch handoff-put <own run> <own name>`
 # fed by a file or by a quoted heredoc whose terminator is the last line and appears once.
 # Only then is a heredoc body prose. A chained command, an unquoted delimiter (its body expands),
 # a second terminator line or a heredoc fed to anything else gets the full scan below.
 # The command word is bare `orch` or this plugin's own bin/orch, nothing else: a session can write
 # a file named orch inside its allowed paths, and a pattern-matched name would run it unscanned.
 sole_handoff_put() {
-  local cmd="$1" me="$2" first rest delim last own
+  local cmd="$1" me="$2" run="$3" first rest delim last own f wt
   own=$(cd "$(dirname "$0")/../bin" 2>/dev/null && pwd -P)/orch
   own=$(printf '%s' "$own" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
-  local head="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+[A-Za-z0-9._-]+[[:space:]]+([A-Za-z0-9-]+)[[:space:]]*"
-  local re_file="${head}<[[:space:]]*[A-Za-z0-9._/~-]+[[:space:]]*\$"
+  local head="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+([A-Za-z0-9._-]+)[[:space:]]+([A-Za-z0-9-]+)[[:space:]]*"
+  local re_file="${head}<[[:space:]]*([A-Za-z0-9._/~-]+)[[:space:]]*\$"
+  local re_opt="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+([A-Za-z0-9._-]+)[[:space:]]+([A-Za-z0-9-]+)[[:space:]]+--file[[:space:]]+([A-Za-z0-9._/-]+)[[:space:]]*\$"
   local re_doc="${head}<<[[:space:]]*(['\"])([A-Za-z_][A-Za-z0-9_]*)['\"][[:space:]]*\$"
   first=${cmd%%$'\n'*}
   if [ "$first" = "$cmd" ]; then
-    [[ "$cmd" =~ $re_file ]] && [ "${BASH_REMATCH[2]}" = "$me" ]
+    # --file (contract C1): orch reads the file itself, so it must lie in the session's own worktree.
+    if [[ "$cmd" =~ $re_opt ]]; then
+      [ "${BASH_REMATCH[2]}" = "$run" ] && [ "${BASH_REMATCH[3]}" = "$me" ] || return 1
+      own_file "${BASH_REMATCH[4]}"
+      return
+    fi
+    # < file: the same rule as --file, since orch reads what the shell hands it.
+    [[ "$cmd" =~ $re_file ]] && [ "${BASH_REMATCH[2]}" = "$run" ] && [ "${BASH_REMATCH[3]}" = "$me" ] && own_file "${BASH_REMATCH[4]}"
     return
   fi
   [[ "$first" =~ $re_doc ]] || return 1
-  [ "${BASH_REMATCH[2]}" = "$me" ] || return 1
-  delim=${BASH_REMATCH[4]}
+  [ "${BASH_REMATCH[2]}" = "$run" ] && [ "${BASH_REMATCH[3]}" = "$me" ] || return 1
+  delim=${BASH_REMATCH[5]}
   rest=${cmd#*$'\n'}
   [ "$(printf '%s\n' "$rest" | grep -cx -- "$delim")" -eq 1 ] || return 1
   last=$(printf '%s\n' "$rest" | awk 'NF {l=$0} END {print l}')
   [ "$last" = "$delim" ]
+}
+
+# canon <absolute path>: where a write to the path lands: its deepest existing directory resolved physically,
+# a symlink at its end followed, . and .. in the part still to be created folded.
+canon() {
+  local p="$1" d rest="" out="" c l n=0 IFS=/
+  while [ -L "$p" ] && [ "$n" -lt 8 ]; do
+    l=$(readlink "$p"); case "$l" in /*) p=$l ;; *) p=${p%/*}/$l ;; esac; n=$((n + 1))
+  done
+  d=$p
+  until [ -d "$d" ]; do rest="/${d##*/}$rest"; d=${d%/*}; d=${d:-/}; done
+  d=$(cd "$d" && pwd -P) || return 1
+  set -f
+  for c in $d$rest; do case "$c" in ''|.) ;; ..) out=${out%/*} ;; *) out=$out/$c ;; esac; done
+  set +f
+  printf '%s' "${out:-/}"
+}
+# under <path> <root>: the path is the root or inside it. An empty root holds nothing: as a prefix it would be /*.
+under() {
+  [ -n "$2" ] || return 1
+  case "$1/" in "$2"/*) return 0 ;; esac
+  return 1
+}
+# own_root: resolves own_wt, the session's worktree, in place; one that cannot be resolved confines nothing, so it blocks.
+own_root() {
+  own_wt=$(canon "$own_wt") && [ -n "$own_wt" ] && [ -d "$own_wt" ] || block "your worktree cannot be resolved; ask the orchestrator"
+}
+# own_file <path>: a file inside the session's own worktree, not the worktree itself. orch reads a handoff
+# from it, so a path outside would carry any readable file into the run dir; a ~ path is taken as $HOME's.
+own_file() {
+  local f="$1" wt
+  case "$f" in '~'|'~/'*) f=$HOME${f#\~} ;; /*) ;; *) f=$cwd/$f ;; esac
+  wt=$(jq -r '.worktree // ""' <<<"$rec")
+  [ -n "$wt" ] || wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+  [ -n "$wt" ] && wt=$(canon "$wt") && [ -d "$wt" ] && f=$(canon "$f") && [ "$f" != "$wt" ] && under "$f" "$wt"
+}
+
+# Write targets of a Bash command, collected by write_scan into tg (absolute paths); unres=1 when one cannot
+# be known: an expansion or glob in it, a relative one after a cd that cannot be followed, or code an
+# interpreter, eval or a shell -c runs.
+# tgt <token type> <word>: one target, taken relative to the effective cwd ecwd.
+tgt() {
+  if [ "$1" != W ]; then unres=1; return; fi
+  case "$2" in
+    /*) tg[${#tg[@]}]=$2 ;;
+    *) if [ -n "$ecwd" ]; then tg[${#tg[@]}]=$ecwd/$2; else unres=1; fi ;;
+  esac
+}
+# operands <options that take an argument>: the operands of the command at av[ci] into ov/ot.
+operands() {
+  local j=$((ci + 1)) end=0
+  ov=() ot=()
+  while [ "$j" -lt "${#av[@]}" ]; do
+    if [ "$end" = 0 ]; then
+      case "${av[$j]}" in
+        --) end=1; j=$((j + 1)); continue ;;
+        -?*) case " $1 " in *" ${av[$j]} "*) j=$((j + 1)) ;; esac; j=$((j + 1)); continue ;;
+      esac
+    fi
+    ov[${#ov[@]}]=${av[$j]}; ot[${#ot[@]}]=${at[$j]}; j=$((j + 1))
+  done
+}
+# all_ops [<first>]: every operand from <first> on is a target.
+all_ops() {
+  local j
+  for ((j = ${1:-0}; j < ${#ov[@]}; j++)); do tgt "${ot[$j]}" "${ov[$j]}"; done
+}
+# sub_cmd: judges nv/nt, built by the caller from a find -exec or xargs, as a command of its own.
+sub_cmd() {
+  local av at ci j
+  av=() at=()
+  for ((j = 0; j < ${#nv[@]}; j++)); do av[j]=${nv[$j]}; at[j]=${nt[$j]}; done
+  cmd_targets
+}
+# cmd_word: sets ci to the command word of the simple command in av/at, past env, exec, nohup, VAR=… and the
+# like; fails when there is none.
+cmd_word() {
+  local i=0 n=${#av[@]}
+  while [ "$i" -lt "$n" ]; do
+    case "${av[$i]}" in
+      '{'|'!'|if|then|else|elif|while|until|do|command|builtin|exec|nohup|time) ;;
+      env) while [ $((i + 1)) -lt "$n" ]; do case "${av[$((i + 1))]}" in -u|-S|-C) i=$((i + 2)) ;; -*|*=*) i=$((i + 1)) ;; *) break ;; esac; done ;;
+      timeout|nice) while [ $((i + 1)) -lt "$n" ]; do case "${av[$((i + 1))]}" in -n|-s|-k) i=$((i + 2)) ;; -*|[0-9]*) i=$((i + 1)) ;; *) break ;; esac; done ;;
+      *=*) [[ "${av[$i]%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || break ;;
+      *) break ;;
+    esac
+    i=$((i + 1))
+  done
+  ci=$i
+  [ "$i" -lt "$n" ]
+}
+# cmd_targets: adds the write targets of the simple command in av/at.
+cmd_targets() {
+  local n=${#av[@]} c j a k=0 ip=0 sc=0 nv nt
+  cmd_word || return 0
+  if [ "${at[$ci]}" = U ]; then unres=1; return 0; fi
+  c=${av[$ci]##*/}
+  case "$c" in
+    cd|pushd)
+      operands ""
+      if [ "${#ov[@]}" -eq 0 ]; then ecwd=$(canon "$HOME")
+      elif [ "${ot[0]}" != W ] || [ "${ov[0]}" = - ]; then ecwd=""
+      else
+        case "${ov[0]}" in /*) a=${ov[0]} ;; *) a=${ecwd:+$ecwd/${ov[0]}} ;; esac
+        if [ -n "$a" ] && a=$(canon "$a") && [ -d "$a" ]; then ecwd=$a; else ecwd=""; fi
+      fi ;;
+    popd) ecwd="" ;;
+    cp|mv|ln|install|gcp|gmv|gln|ginstall)
+      case "$c" in *install) operands "-m -o -g -B -f -S -t" ;; *) operands "-S -t" ;; esac
+      for ((j = ci + 1; j < n; j++)); do
+        case "${av[$j]}" in
+          -t) k=1; [ $((j + 1)) -lt "$n" ] && tgt "${at[$((j + 1))]}" "${av[$((j + 1))]}" ;;
+          -t?*) k=1; tgt "${at[$j]}" "${av[$j]#-t}" ;;
+          --target-directory=*) k=1; tgt "${at[$j]}" "${av[$j]#*=}" ;;
+          -d|--directory) case "$c" in *install) k=2 ;; esac ;;
+        esac
+      done
+      if [ "$k" = 2 ]; then all_ops
+      elif [ "$k" = 0 ] && [ "${#ov[@]}" -ge 2 ]; then all_ops $((${#ov[@]} - 1))
+      elif [ "$k" = 0 ] && [ "${#ov[@]}" -eq 1 ] && [ "${c#g}" = ln ]; then tgt "${ot[0]}" "${ov[0]##*/}"
+      fi ;;
+    rsync)
+      operands "-e -f -T --exclude --include --filter --exclude-from --include-from --files-from --rsh --temp-dir --backup-dir --link-dest --compare-dest --copy-dest --partial-dir --log-file --password-file --chmod --chown"
+      if [ "${#ov[@]}" -ge 2 ]; then
+        a=${ov[$((${#ov[@]} - 1))]}
+        # host:path and rsync:// are remote; a colon after a slash is part of a local name
+        case "${a%%:*}" in "$a"|*/*) tgt "${ot[$((${#ov[@]} - 1))]}" "$a" ;; esac
+      fi ;;
+    tee|rm|rmdir) operands ""; all_ops ;;
+    touch) operands "-t -r -d -A"; all_ops ;;
+    mkdir) operands "-m"; all_ops ;;
+    truncate) operands "-s -r"; all_ops ;;
+    chmod) operands ""; all_ops 1 ;;
+    dd) for ((j = ci + 1; j < n; j++)); do case "${av[$j]}" in of=*) tgt "${at[$j]}" "${av[$j]#of=}" ;; esac; done ;;
+    sed|gsed)
+      ov=() ot=()
+      for ((j = ci + 1; j < n; j++)); do
+        a=${av[$j]}
+        case "$a" in
+          # BSD sed takes the backup suffix as the next word, '' for none
+          -i|-[!-]*i) ip=1; case "${av[$((j + 1))]-x}" in ''|.*) j=$((j + 1)) ;; esac ;;
+          -i*|--in-place*) ip=1 ;;
+          -e|-f|--expression|--file|-[!-]*[ef]) sc=1; j=$((j + 1)) ;;
+          --expression=*|--file=*) sc=1 ;;
+          -?*) ;;
+          *) ov[${#ov[@]}]=$a; ot[${#ot[@]}]=${at[$j]} ;;
+        esac
+      done
+      [ "$ip" = 0 ] || all_ops $((1 - sc)) ;;
+    perl)
+      ov=() ot=()
+      for ((j = ci + 1; j < n; j++)); do
+        a=${av[$j]}
+        case "$a" in
+          -e|-E|-[anlpswWTtuUXc0]*[eE]) sc=1; j=$((j + 1)) ;;
+          -i*|-[anlpswWTtuUXc0]*i*) ip=1 ;;
+          -?*) ;;
+          *) ov[${#ov[@]}]=$a; ot[${#ot[@]}]=${at[$j]} ;;
+        esac
+      done
+      if [ "$ip" = 1 ]; then all_ops $((1 - sc))
+      elif [ "$sc" = 1 ] || [ "${#ov[@]}" -eq 0 ]; then unres=1
+      fi ;;
+    python|python[0-9]*|node|nodejs|bun|deno|ruby|php)
+      operands ""
+      for ((j = ci + 1; j < n; j++)); do
+        case "${av[$j]}" in
+          -c|-e|-p|-pe|--eval|--print|-|eval) sc=1 ;;
+          -m) k=1 ;;
+        esac
+      done
+      if [ "$sc" = 1 ] || { [ "$k" = 0 ] && [ "${#ov[@]}" -eq 0 ]; }; then unres=1; fi ;;
+    bash|sh|zsh|dash|ksh)
+      operands ""
+      for ((j = ci + 1; j < n; j++)); do case "${av[$j]}" in -c|-[!-]*c*|-s) sc=1 ;; esac; done
+      if [ "$sc" = 1 ] || [ "${#ov[@]}" -eq 0 ]; then unres=1; fi ;;
+    eval) unres=1 ;;
+    awk|gawk|nawk|mawk)
+      operands "-F -v"
+      for ((j = ci + 1; j < n; j++)); do case "${av[$j]}" in -f) sc=1 ;; esac; done
+      # an awk program writes only through print >, a pipe or system()
+      [ "$sc" = 1 ] && unres=1
+      case "${ov[0]-}" in *'>'*|*'|'*|*system*) unres=1 ;; esac ;;
+    xargs)
+      a="" j=$((ci + 1))
+      while [ "$j" -lt "$n" ]; do
+        case "${av[$j]}" in
+          -I|-J) a=${av[$((j + 1))]-}; j=$((j + 2)) ;;
+          -n|-P|-L|-s|-E|-d|-a) j=$((j + 2)) ;;
+          -I?*) a=${av[$j]#-I}; j=$((j + 1)) ;;
+          -*) j=$((j + 1)) ;;
+          *) break ;;
+        esac
+      done
+      nv=() nt=()
+      for ((; j < n; j++)); do
+        nv[${#nv[@]}]=${av[$j]}
+        if [ -n "$a" ] && [ "${av[$j]}" = "$a" ]; then nt[${#nt[@]}]=U; else nt[${#nt[@]}]=${at[$j]}; fi
+      done
+      # without -I, the words read from stdin are appended
+      if [ "${#nv[@]}" -gt 0 ]; then
+        [ -n "$a" ] || { nv[${#nv[@]}]=""; nt[${#nt[@]}]=U; }
+        sub_cmd
+      fi ;;
+    find)
+      operands ""
+      # shellcheck disable=SC2165,SC2167  # the scan resumes after an -exec's ; or +
+      for ((j = ci + 1; j < n; j++)); do
+        case "${av[$j]}" in
+          -delete)
+            # the roots are the operands before the first expression word
+            for ((k = ci + 1; k < n; k++)); do
+              case "${av[$k]}" in -*|'('|'!') break ;; esac
+              tgt "${at[$k]}" "${av[$k]}"
+            done ;;
+          -fprint|-fprint0|-fprintf|-fls) [ $((j + 1)) -lt "$n" ] && tgt "${at[$((j + 1))]}" "${av[$((j + 1))]}" ;;
+          -exec|-execdir|-ok|-okdir)
+            nv=() nt=()
+            for ((j = j + 1; j < n; j++)); do
+              case "${av[$j]}" in ';'|'+') break ;; esac
+              nv[${#nv[@]}]=${av[$j]}
+              if [ "${av[$j]}" = '{}' ]; then nt[${#nt[@]}]=U; else nt[${#nt[@]}]=${at[$j]}; fi
+            done
+            [ "${#nv[@]}" -eq 0 ] || sub_cmd ;;
+        esac
+      done ;;
+  esac
+}
+# write_scan <command>: fills tg and unres for the command, starting from the hook's cwd.
+write_scan() {
+  local t v redir="" ecwd stk ns=0
+  ecwd=$(cd "$cwd" 2>/dev/null && pwd -P)
+  stk=() av=() at=()
+  while IFS=$'\t' read -r t v; do
+    case "$t" in
+      W|U|G)
+        if [ -z "$redir" ]; then av[${#av[@]}]=$v; at[${#at[@]}]=$t
+        elif [ "$redir" = O ]; then tgt "$t" "$v"
+        elif [ "$redir" = D ]; then case "$v" in -|*[!0-9]*|'') [ "$v" = - ] || tgt "$t" "$v" ;; esac
+        fi
+        redir="" ;;
+      O|D|I) redir=$t ;;
+      *)
+        cmd_targets; av=() at=(); redir=""
+        case "$t" in
+          P) stk[ns]=$ecwd; ns=$((ns + 1)) ;;
+          p) if [ "$ns" -gt 0 ]; then ns=$((ns - 1)); ecwd=${stk[$ns]}; fi ;;
+          Q) ecwd=$(cd "$cwd" 2>/dev/null && pwd -P); ns=0 ;;
+        esac ;;
+    esac
+  done < <(printf '%s' "$1" | shell_tokens)
+  cmd_targets
+}
+# path_ok <path relative to the own worktree>: scratch, one of the session's pathsAllowed, or a directory whose contents are.
+path_ok() {
+  local pat
+  case "$1" in .scratch|.scratch/*) return 0 ;; esac
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
+    # shellcheck disable=SC2053  # the glob must stay unquoted to act as a pattern
+    if [[ "$1" == $pat ]] || [[ "$1/" == $pat ]]; then return 0; fi
+  done < <(jq -r '.pathsAllowed[]?' <<<"$rec")
+  return 1
+}
+# others: the worktrees of the run's other sessions, resolved, into op and their names into on; own_wt left out.
+others() {
+  local o_name o_wt
+  on=() op=()
+  while IFS='|' read -r o_name o_wt; do
+    [ -n "$o_wt" ] || continue
+    o_wt=$(canon "$o_wt"); [ "$o_wt" = "$own_wt" ] && continue
+    on[${#on[@]}]=$o_name; op[${#op[@]}]=$o_wt
+  done < <(jq -r --arg n "$name" '.[] | select(.name != $n) | "\(.name)|\(.worktree // "")"' "$run_dir/sessions.json" 2>/dev/null)
+}
+
+# orch: read-only subcommands and the handoff channel are the session's; the rest is the lead's.
+# judge_orch <subcommand> <run> <name> <architecture arguments are none or --check: 1|0>
+judge_orch() {
+  case "$1" in ''|-h|--help) return 0 ;; esac
+  # these take the run first and die on a run named -h before doing anything
+  case "$2" in -h|--help)
+    case "$1" in accept|acceptance|address|approve|architecture|authorize|budget|cancel|close|cost|decide|events|forget|handoff|handoff-put|interactive|paths|pause|qa-request|ready|resume|review|rm|spawn|stage-report|status|stop) return 0 ;; esac ;;
+  esac
+  case "$1" in
+    handoff-put)
+      [ "$2" = "$(basename "$run_dir")" ] || block "orch handoff-put may write only into your own run ($(basename "$run_dir")), not ${2:-<missing>}"
+      [ "$3" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${3:-<missing>}; run is $2" ;;
+    qa-request)
+      [ "$2" = "$(basename "$run_dir")" ] || block "orch qa-request may ask only in your own run ($(basename "$run_dir")), not ${2:-<missing>}"
+      [ "$3" = "$name" ] || block "orch qa-request may ask only for your own task ($name), not ${3:-<missing>}; run is $2" ;;
+    handoff|status|events|ready|doctor|tools) ;;
+    # --sync rewrites the generated rules every session loads; only the map's owner runs it.
+    architecture) [ "$role" = architect ] || [ "$4" = 1 ] || block "orch architecture takes only --check outside the architect's session; --sync regenerates the map's rules and is the architect's. Tell the architect what the map gets wrong." ;;
+    *) block "orch $1 is the orchestrator's command; a session may use only orch handoff-put, qa-request, handoff, status, events, ready, doctor, tools, architecture" ;;
+  esac
+}
+# orch_cmd <index>: judges the orch call in av/at whose orch word is at <index>. An argument built from an
+# expansion or a glob is not taken at its face value.
+orch_cmd() {
+  local k v
+  v=()
+  for ((k = $1 + 1; k < ${#av[@]}; k++)); do
+    if [ "${at[$k]}" = W ]; then v[${#v[@]}]=${av[$k]}; else v[${#v[@]}]="<an expansion>"; fi
+  done
+  k=0
+  if [ "${#v[@]}" -le 1 ] || { [ "${#v[@]}" -eq 2 ] && [ "${v[1]}" = --check ]; }; then k=1; fi
+  judge_orch "${v[0]-}" "${v[1]-}" "${v[2]-}" "$k"
+  # What orch reads a handoff from, < file or --file, lies in the own worktree (scan_cmds collects ir/it).
+  if [ "${v[0]-}" = handoff-put ]; then
+    local src_msg="orch handoff-put reads the handoff from a file in your own worktree, such as .scratch/handoff.md"
+    for ((k = 0; k < ${#ir[@]}; k++)); do
+      [ "${it[$k]}" = W ] && own_file "${ir[$k]}" || block "$src_msg, not ${ir[$k]}"
+    done
+    for ((k = $1 + 1; k < ${#av[@]}; k++)); do
+      case "${av[$k]}" in
+        --file) [ "${at[$((k + 1))]-}" = W ] && own_file "${av[$((k + 1))]-}" || block "$src_msg, not ${av[$((k + 1))]-<missing>}" ;;
+        --file=*) [ "${at[$k]}" = W ] && own_file "${av[$k]#--file=}" || block "$src_msg, not ${av[$k]#--file=}" ;;
+      esac
+    done
+  fi
+}
+# scan_one: for the simple command in av/at, judges orch, and sets code when it runs code (a shell, an interpreter,
+# eval, xargs, find) or its command word is an expansion; that code may hold anything, so the text rules apply.
+# Any word orch starts an orch call, unless the command is one that never runs its arguments: a wrapper the
+# guard does not know (caffeinate, flock, watch…) runs them all the same.
+scan_one() {
+  local k re='(^|[^A-Za-z-])[ew]([^A-Za-z]|$)'
+  cmd_word || return 0
+  if [ "${at[$ci]}" != W ]; then code=1; return 0; fi
+  case "${av[$ci]##*/}" in
+    bash|sh|zsh|dash|ksh|fish|csh|tcsh|python|python[0-9]*|node|nodejs|bun|deno|ruby|perl|php|lua|osascript|eval|source|.|xargs|find|awk|gawk|nawk|mawk|ssh) code=1 ;;
+    grep|egrep|fgrep|rg|ag|ack|git|echo|printf|cat|less|more|head|tail|wc|jq|ls|test|'['|diff|cmp|sort|uniq|cut|tr|basename|dirname|realpath|readlink|file|stat|du|df) return 0 ;;
+    # sed runs a shell through its e command and flag, like bash -c, and writes through w
+    sed|gsed)
+      for ((k = ci + 1; k < ${#av[@]}; k++)); do [[ "${av[$k]}" =~ $re ]] && break; done
+      [ "$k" -lt "${#av[@]}" ] || return 0
+      code=1 ;;
+  esac
+  for ((k = ci; k < ${#av[@]}; k++)); do
+    case "${av[$k]}" in orch|*/orch) orch_cmd "$k" ;; esac
+  done
+}
+# scan_cmds <command>: scan_one over every simple command of it, those in substitutions included.
+scan_cmds() {
+  local t v redir="" av at ci ir it
+  av=() at=() ir=() it=()
+  while IFS=$'\t' read -r t v; do
+    case "$t" in
+      W|U|G)
+        if [ -z "$redir" ]; then av[${#av[@]}]=$v; at[${#at[@]}]=$t
+        elif [ "$redir" = I ]; then ir[${#ir[@]}]=$v; it[${#it[@]}]=$t
+        fi
+        redir="" ;;
+      O|D|I) redir=$t ;;
+      *) scan_one; av=() at=() ir=() it=(); redir="" ;;
+    esac
+  done < <(printf '%s' "$1" | shell_tokens)
+  scan_one
+}
+
+# git_calls: reads a command's text, quotes and backslashes stripped, and prints every git call in it as
+# "G<tab><the dir -C, --git-dir or --work-tree gives it, . for none><tab><subcommand and arguments>", global options dropped and combined short
+# flags split, and every cd before one as "D<tab><dir>". Like the text rules, it takes any word git for a call.
+git_calls() {
+  awk '
+function flush() { if (g) print "G\t" dir "\t" sc args; g = 0 }
+{
+  gsub(/[0-9]*[<>]+&[0-9-]+/, " ")
+  gsub(/[0-9]*[<>]+&?/, " > ")
+  gsub(/[;&|()`]/, " ; ")
+  n = split($0, w, " "); seg = 1
+  for (i = 1; i <= n; i++) {
+    x = w[i]
+    if (x == ";") { flush(); seg = 1; continue }
+    if (x == ">") { if (w[i+1] != ";") i++; continue }
+    if (seg) {
+      if (x ~ /^([{!]|if|then|else|elif|do|while|until)$/) continue
+      seg = 0
+      if (x == "cd" || x == "pushd") {
+        if (i < n && w[i+1] != ";" && w[i+1] != ">") { i++; print "D\t" w[i] } else print "D\t~"
+        continue
+      }
+    }
+    if (x == "git" || x ~ /\/git$/) { flush(); g = 1; ph = 0; dir = "."; sc = ""; args = ""; eo = 0; gdir = 0; continue }
+    if (!g) continue
+    if (ph == 0) {
+      if (x == "-C") { if (i < n) { i++; dir = (w[i] ~ /^[\/~]/) ? w[i] : dir "/" w[i] } }
+      # the branch is read where HEAD lives: in the --git-dir, else in the --work-tree
+      else if (x ~ /^--(git-dir|work-tree)(=|$)/) {
+        v = x; sub(/^--[a-z-]+=?/, "", v)
+        if (v == "" && i < n) { i++; v = w[i] }
+        if (x ~ /^--git-dir/ || !gdir) dir = (v ~ /^[\/~]/) ? v : dir "/" v
+        if (x ~ /^--git-dir/) gdir = 1
+      }
+      else if (x ~ /^(-c|--namespace|--config-env|--attr-source|--super-prefix)$/) i++
+      else if (x !~ /^-/) { sc = x; ph = 1 }
+      continue
+    }
+    if (!eo && x == "--") eo = 1
+    else if (!eo && x ~ /^-[A-Za-z][A-Za-z]+$/) { for (k = 2; k <= length(x); k++) args = args " -" substr(x, k, 1); continue }
+    args = args " " x
+  }
+  flush()
+}'
+}
+# git_at <dir> <from>: the directory a cd or git -C lands in, resolved from <from>; the hook's cwd when it
+# cannot be known (an expansion, a directory still to be made), as before git calls were followed.
+git_at() {
+  local p=$1
+  case "$p" in \~) p=$HOME ;; \~/*) p=$HOME/${p#\~/} ;; esac
+  case "$p" in /*) ;; *) p=${2:-?}/$p ;; esac
+  (cd "$p" 2>/dev/null && pwd -P) || printf '%s' "$cwd0"
+}
+# base_write <what>: <what> changes the base branch, which is the integrator's, and only under push-base.
+base_write() {
+  [ "$role" = integrator ] && [ "$auth_push" = true ] && return 0
+  [ "$role" = integrator ] && block "$1 is not authorized in this run's plan. Report BLOCKED: and let the orchestrator set it with orch authorize <run> push-base on after the user says so."
+  block "$1 is the integrator's, and only when the plan authorizes it"
+}
+# judge_git <dir>: judges the git call in ga (subcommand first, as git_calls prints it), run in <dir>.
+judge_git() {
+  local d=$1 k a u dst pos force=0 all=0 del=0 tobase=0 dl=0 fo=0
+  pos=()
+  case "${ga[0]-}" in
+    push)
+      for ((k = 1; k < ${#ga[@]}; k++)); do
+        a=${ga[$k]}
+        case "$a" in
+          -f|--force|--force-with-lease|--force-with-lease=*) force=1 ;;
+          --all|--branches|--mirror) all=1 ;;
+          -d|--delete) del=1 ;;
+          -o|--push-option|--repo|--receive-pack|--exec) k=$((k + 1)) ;;
+          -*) ;;
+          *) pos[${#pos[@]}]=$a ;;
+        esac
+      done
+      # the first operand is the remote, the rest are refspecs [+]<src>[:<dst>]
+      for ((k = 1; k < ${#pos[@]}; k++)); do
+        a=${pos[$k]}
+        case "$a" in +*) force=1; a=${a#+} ;; esac
+        case "$a" in :) all=1 ;; :*) del=1 ;; esac
+        dst=${a##*:}; dst=${dst#refs/heads/}
+        case "$dst" in HEAD|@) [ -z "$d" ] || dst=$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null) ;; esac
+        [ "$dst" = "$base" ] && tobase=1
+      done
+      if [ "$all" = 1 ]; then tobase=1
+      elif [ "${#pos[@]}" -le 1 ] && [ -n "$d" ]; then
+        u=$(git -C "$d" rev-parse --abbrev-ref '@{u}' 2>/dev/null)
+        [ -n "$u" ] && [ "${u#*/}" = "$base" ] && tobase=1
+      fi
+      [ "$force" = 0 ] || block "force push is never allowed"
+      [ "$tobase" = 0 ] || base_write "pushing the base branch ($base)"
+      [ "$del" = 0 ] || block "destructive git command; ask the orchestrator" ;;
+    reset|clean|branch)
+      for ((k = 1; k < ${#ga[@]}; k++)); do
+        case "${ga[$k]}" in
+          --) break ;;
+          --hard) [ "${ga[0]}" = reset ] && fo=1 ;;
+          -f|--force) [ "${ga[0]}" = reset ] || fo=1 ;;
+          -D) dl=1; fo=1 ;;
+          -d|--delete) dl=1 ;;
+        esac
+      done
+      case "${ga[0]}" in
+        reset|clean) [ "$fo" = 0 ] || block "destructive git command; ask the orchestrator" ;;
+        branch)
+          [ "$dl" = 1 ] && [ "$fo" != 0 ] && block "destructive git command; ask the orchestrator"
+          [ "$dl" = 1 ] && del_merged ;;
+      esac ;;
+    worktree) [ "${ga[1]-}" = remove ] && del_merged ;;
+    # Restoring paths from the base or looking at it detached leaves the session's branch where it is.
+    checkout|switch)
+      [ "$role" = integrator ] && return 0
+      for ((k = 1; k < ${#ga[@]}; k++)); do
+        case "${ga[$k]}" in
+          --detach) return 0 ;;
+          --) [ $((k + 1)) -lt "${#ga[@]}" ] && return 0; break ;;
+          "$base") dl=1 ;;
+        esac
+      done
+      [ "$dl" = 0 ] || block "only the integrator works on the base branch ($base)" ;;
+    commit|merge|rebase|cherry-pick|am)
+      if [ "$role" != integrator ] && [ -n "$d" ] && [ "$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$base" ]; then
+        block "this git call runs on the base branch ($base) in $d; commits there are the integrator's. Move to your worktree."
+      fi ;;
+  esac
+}
+del_merged() {
+  [ "$role" = integrator ] && [ "$auth_delete" = true ] && return 0
+  block "deleting branches or worktrees needs role integrator and delete-merged in the plan's authorize block; verify containment in $base first and ask the orchestrator"
 }
 
 file_path=""
@@ -90,15 +612,35 @@ case "$tool" in
     ;;
 esac
 
+# A command that starts with `cd <dir in the own worktree>` then ends, or goes on after && ; or a newline,
+# runs from that dir: it is how a session that lost its cwd gets back, so the old cwd is not held against it.
+if [ "$tool" = Bash ] || [ "$tool" = Monitor ]; then
+  own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+  q="'" b='\' nl=$'\n'
+  re_cd="^[[:space:]]*cd[[:space:]]+(${q}[^${q}]*${q}|\"[^\"\$\`${b}]*\"|[^][:space:]${q}\"\$\`${b};&|<>(){}*?~[]+)[[:space:]]*(&&|;|${nl}|\$)"
+  if [ -n "$own_wt" ] && [[ "$(jq -r '.tool_input.command // empty' <<<"$input")" =~ $re_cd ]]; then
+    d=${BASH_REMATCH[1]}
+    case "$d" in "$q"*|\"*) d=${d:1:${#d}-2} ;; esac
+    case "$d" in /*) ;; *) if [ -d "$cwd" ]; then d=$cwd/$d; else d=""; fi ;; esac
+    own_root
+    if [ -n "$d" ] && d=$(canon "$d") && [ -d "$d" ] && under "$d" "$own_wt"; then
+      cwd=$d in_repo=1
+    fi
+  fi
+fi
+
 # A registered session whose working directory left the repository is held, not released.
 if [ "$in_repo" != 1 ]; then
+  [ -d "$cwd" ] || block "your working directory ($cwd) no longer exists; cd back into your worktree before running or editing anything"
   block "your working directory ($cwd) is outside the repository of run $(basename "$run_dir"); cd back into your worktree before running or editing anything"
 fi
 # Nor may it sit inside the orchestrator's own directories, where relative paths would dodge the checks below.
-cwd_real=$(cd "$cwd" && pwd -P)
-case "$cwd_real/" in
-  "$run_dir"/*|"$INDEX_DIR"/*) block "your working directory is inside the orchestrator's directory ($cwd_real); cd back into your worktree" ;;
-esac
+# Both sides physical: an index reached through a symlinked path must still read as the orchestrator's.
+cwd_real=$(cd "$cwd" && pwd -P) && [ -n "$cwd_real" ] || block "your working directory ($cwd) cannot be resolved; cd back into your worktree"
+idx_real=$(canon "$INDEX_DIR") && [ -n "$idx_real" ] || block "the session index $INDEX_DIR cannot be resolved; ask the orchestrator"
+if under "$cwd_real" "$run_dir" || under "$cwd_real" "$idx_real"; then
+  block "your working directory is inside the orchestrator's directory ($cwd_real); cd back into your worktree"
+fi
 
 # A session orch started inside its worktree stays there: claude rm keeps that worktree, but deletes
 # one the session made itself with its branch once the commits are pushed or merged. A session
@@ -112,7 +654,7 @@ fi
 
 # Handing off must always be possible: a session out of budget or paused is told to write its
 # handoff and stop, and the Stop hook demands one. Same standing as a Write of the handoff file.
-if [ "$tool" = Bash ] && sole_handoff_put "$(jq -r '.tool_input.command // empty' <<<"$input")" "$name"; then
+if [ "$tool" = Bash ] && sole_handoff_put "$(jq -r '.tool_input.command // empty' <<<"$input")" "$name" "$(basename "$run_dir")"; then
   allow_free "handoff-put"
 fi
 
@@ -124,15 +666,24 @@ if [ -f "$run_dir/PAUSE" ]; then
   block "the whole run is paused by the orchestrator: $(cat "$run_dir/PAUSE" 2>/dev/null). Wait for its message."
 fi
 
-# Budget: allowed guarded calls so far, before this one.
-if [ "$budget" -gt 0 ] 2>/dev/null; then
+# Budget: allowed guarded calls so far, before this one. 0 is no cap; one that is not a whole number is no licence.
+case "$budget" in ''|*[!0-9]*) block "budget unreadable; ask the orchestrator" ;; esac
+if [ "$budget" -gt 0 ]; then
+  # Held from the count to this call's own log line, or parallel calls of one message all pass the count.
+  lock="$run_dir/.budget-$name.lock" tries=0
+  until mkdir "$lock" 2>/dev/null; do
+    [ "$tries" -lt $(( ${CLAUDE_ORCH_LOCK_WAIT:-10} * 10 )) ] || block "budget lock $lock held for ${CLAUDE_ORCH_LOCK_WAIT:-10} s; tell the orchestrator, which removes it when no call of yours is running"
+    sleep 0.1; tries=$((tries + 1))
+  done
+  trap 'rmdir "$lock" 2>/dev/null' EXIT
   used=$(grep -c "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$run_dir/events.log" 2>/dev/null || true)
   used=${used:-0}
   if [ "$used" -ge "$budget" ]; then
     block "tool-call budget spent ($used of $budget). Send your handoff with Status partial — a command that is only 'orch handoff-put $(basename "$run_dir") $name' with a quoted heredoc or '< file' is outside the budget — and stop; the orchestrator decides what happens next."
   fi
   # From 80%, hold one call so the work lands in a partial handoff while the session can still write one.
-  if [ $((used * 5)) -ge $((budget * 4)) ] && ! grep -q "^[^|]*|$sid|[^|]*|[^|]*|nudge|" "$run_dir/events.log" 2>/dev/null; then
+  # Its nudge line carries the count; a loop-suspect nudge is another reminder and does not stand for it.
+  if [ $((used * 5)) -ge $((budget * 4)) ] && ! grep -q "^[^|]*|$sid|[^|]*|[^|]*|nudge|[0-9]" "$run_dir/events.log" 2>/dev/null; then
     log_event "$run_dir" "$sid" "$name" "$tool" nudge "$used of $budget"
     printf 'orchestrator guard for %s: %s of %s guarded calls used (80%%). Send a partial handoff now — orch handoff-put %s %s < .scratch/handoff.md — so the work survives if the budget runs out, then repeat this call. This reminder comes once.\n' "$name" "$used" "$budget" "$(basename "$run_dir")" "$name" >&2
     exit 2
@@ -142,20 +693,27 @@ fi
 case "$tool" in
   Edit|Write|MultiEdit|NotebookEdit)
     [ -n "$file_path" ] || allow
-    case "$file_path" in
-      "$run_dir"/handoffs/*) block "that handoff belongs to another session; you may write only $handoff" ;;
-      "$run_dir"/*) block "the run directory is the orchestrator's; you may write only $handoff" ;;
-    esac
-    wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || block "edits are allowed only inside your git worktree"
-    common=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null)
-    case "$common" in /*) ;; *) common="$(cd "$cwd" && cd "$common" && pwd -P)";; esac
-    if [ "$(dirname "$common")" = "$wt" ]; then
-      block "this is the main checkout; move into your own worktree under .claude/worktrees/ before editing"
+    under "${file_path%/*}" "$run_dir/handoffs" && block "that handoff belongs to another session; you may write only $handoff"
+    under "${file_path%/*}" "$run_dir" && block "the run directory is the orchestrator's; you may write only $handoff"
+    # The worktree is the session's own, from its record, else the one the file sits in; never the cwd's.
+    own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+    if [ -n "$own_wt" ]; then
+      own_root; wt=$own_wt
+    else
+      d=$(dirname "$file_path"); until [ -d "$d" ]; do d=$(dirname "$d"); done
+      wt=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || block "edits are allowed only inside your git worktree"
+      common=$(git -C "$d" rev-parse --git-common-dir 2>/dev/null)
+      case "$common" in /*) ;; *) common="$(cd "$d" && cd "$common" && pwd -P)";; esac
+      if [ "$(dirname "$common")" = "$wt" ]; then
+        block "this is the main checkout; move into your own worktree under .claude/worktrees/ before editing"
+      fi
+      others
+      for ((j = 0; j < ${#op[@]}; j++)); do
+        [ "$wt" = "${op[$j]}" ] && block "$file_path is in ${on[$j]}'s worktree; a session writes only in its own"
+      done
     fi
-    case "$file_path" in
-      "$wt"/*) rel=${file_path#"$wt"/} ;;
-      *) block "path is outside your worktree ($wt)" ;;
-    esac
+    under "${file_path%/*}" "$wt" || block "path is outside your worktree ($wt)"
+    rel=${file_path#"$wt"/}
     # Scratch space the team rules send every session to, whatever its task's paths.
     case "$rel" in .scratch/*) allow "$rel" ;; esac
     ok=0
@@ -167,78 +725,156 @@ case "$tool" in
     [ "$ok" -eq 1 ] || block "path $rel is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it: it grants a path with orch paths $(basename "$run_dir") $name add <glob>, never by editing sessions.json."
     allow "$rel"
     ;;
-  Bash)
+  # Monitor runs its command in the same shell Bash does.
+  Bash|Monitor)
     cmd=$(jq -r '.tool_input.command // empty' <<<"$input")
     [ -n "$cmd" ] || allow
+    # orch is judged where it is a command: the start of one, after a separator, in a substitution, after env,
+    # command or exec, by name or by a path ending in /orch; not in the arguments of another command.
+    code=0
+    scan_cmds "$cmd"
     # Quotes and backslashes stripped, whitespace collapsed: `git "push" --force` reads as `git push --force`.
-    flat=$(printf '%s' "$cmd" | tr -d '"'"'"'\\' | tr -s '[:space:]' ' ')
-    # git with any global options before the subcommand: git -C dir push, git --git-dir=x reset …
-    GIT='git( -[A-Za-z=/._-]+( [^ -][^ ]*)?)*'
+    # A quoted heredoc's body is data and left out, unless the command runs code that may read it as a script.
+    if [ "$code" = 1 ]; then text=$cmd; else text=$(printf '%s' "$cmd" | strip_quoted_heredocs); fi
+    flat=$(printf '%s' "$text" | tr -d '"'"'"'\\' | tr -s '[:space:]' ' ')
     has() { printf '%s' "$flat" | grep -Eq "$1"; }
-    # orch: read-only subcommands and the handoff channel are the session's; the rest is the lead's.
-    # Every occurrence is checked, however orch is reached (bare, by path, via bash), and
-    # handoff-put may name only the caller's own session.
-    if has '(^|[;&| /])orch +[a-z-]'; then
+    # A command that runs code gets the text scan as well: every mention of orch is taken for a call.
+    if [ "$code" = 1 ] && has '(^|[;&| /])orch +[a-z-]'; then
       while IFS=' ' read -r sub _run arg2 _; do
-        case "$sub" in
-          handoff-put)
-            [ "$arg2" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${arg2:-<missing>}; run is $_run" ;;
-          handoff|status|events|ready|doctor|tools|architecture) ;;
-          *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools, architecture" ;;
-        esac
-      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^.*orch +//')
-    fi
-    if has "${GIT} push[^|;&]*( -f( |$)|--force)"; then block "force push is never allowed"; fi
-    if has "${GIT} push[^|;&]*(^| |:|\+)$base( |$)"; then
-      if [ "$role" = integrator ] && [ "$auth_push" = true ]; then
-        :  # the plan carries the user's standing authorization for this run
-      elif [ "$role" = integrator ]; then
-        block "pushing the base branch ($base) is not authorized in this run's plan. Report BLOCKED: and let the orchestrator set it with orch authorize <run> push-base on after the user says so."
-      else
-        block "pushing the base branch ($base) is the integrator's, and only when the plan authorizes it"
+        [ "$sub" = architecture ] || judge_orch "$sub" "$_run" "$arg2" 1
+      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^[;&| /]?orch +//')
+      # An allowlist over everything up to the next separator, not a match on --sync: a variable,
+      # a substitution or ${IFS} glued to the subcommand would hide the flag.
+      while IFS= read -r arch_tail; do
+        case "$arch_tail" in ''|' --check') ;; *) judge_orch architecture "" "" 0 ;; esac
+      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +architecture[^;&|<>]*' | sed -E 's/^[;&| /]?orch +architecture//; s/ +$//')
+      # Inside code the file a handoff is read from cannot be checked; the command form can.
+      if has '(^|[;&| /])orch +handoff-put[^;&|]*(<[^<]|--file)'; then
+        block "run orch handoff-put … < .scratch/handoff.md as a command of its own, not inside a shell or an interpreter"
       fi
     fi
-    if has "${GIT} reset --hard|${GIT} branch -D|${GIT} clean -[a-zA-Z]*f|${GIT} push[^|;&]*--delete"; then block "destructive git command; ask the orchestrator"; fi
-    if has "${GIT} (branch -d|worktree remove)( |$)"; then
-      if [ "$role" = integrator ] && [ "$auth_delete" = true ]; then
-        :  # cleanup of merged branches and worktrees is authorized for this run
-      else
-        block "deleting branches or worktrees needs role integrator and delete-merged in the plan's authorize block; verify containment in $base first and ask the orchestrator"
-      fi
+    # Each git call is judged in the directory it runs in: its -C, else the last cd before it, else the cwd.
+    cwd0=$(cd "$(jq -r '.cwd' <<<"$input")" 2>/dev/null && pwd -P)
+    gd=$cwd0
+    while IFS=$'\t' read -r kind dir gargs; do
+      if [ "$kind" = D ]; then gd=$(git_at "$dir" "$gd"); continue; fi
+      read -r -a ga <<<"$gargs"
+      judge_git "$(git_at "$dir" "$gd")"
+    done < <(printf '%s\n' "${text//\\$'\n'/ }" | tr -d '"'"'"'\\' | git_calls)
+    if has '(^|[;&|( /])gh pr merge( |$)|(^|[;&|( /])gh api [^;&|]*(/merges|/pulls/[^ /]+/merge)( |$|\?)|(^|[;&|( /])gh api graphql [^;&|]*merge(PullRequest|Branch)'; then
+      base_write "merging a pull request or branch through gh"
     fi
     if has '(^|[;&| ])claude (stop|kill|rm|respawn)( |$)'; then block "sessions are stopped only by the orchestrator or the user"; fi
     # A session started here is one orch never registered, so the run could not remove it when it ends.
     if has '(^|[;&| /])claude [^|;&]*--(bg|background)( |=|$)'; then block "a team session starts no background session; ask the orchestrator for a teammate"; fi
     # Installing tooling onto the machine is the user's call, given once at plan approval (install-tools).
     # A project-local `npm install` or `bun install` is the project's own dependency step and passes.
-    if [ "$auth_install" != true ] && has '(^|[;&| ])(brew|apt|apt-get|dnf|yum|pacman|apk|choco|winget|pipx|cargo|gem) +(install|add)( |$)|(^|[;&| ])(npm|pnpm|yarn|bun) +(install|add|i)( [^|;&]*)? +(-g|--global)( |$)|(^|[;&| ])(pip3?|uv) +(install|pip install|tool install)( |$)|(^|[;&| ])npx +playwright +install|(^|[;&| ])playwright +install|(^|[;&| ])claude +mcp +add( |$)'; then
-      block "installing tooling on this machine is not authorized in this run's plan; report BLOCKED: with the tool and the install command from 'orch tools', the orchestrator asks the user and runs orch authorize <run> install-tools on"
+    # pip by a path inside the own worktree is its venv's, and uv pip installs into the project's venv unless told --system.
+    if [ "$auth_install" != true ]; then
+      inst_msg="installing tooling on this machine is not authorized in this run's plan; report BLOCKED: with the tool and the install command from 'orch tools', the orchestrator asks the user and runs orch authorize <run> install-tools on"
+      if has '(^|[;&| /])(brew|apt|apt-get|dnf|yum|pacman|apk|choco|winget|pipx|cargo|gem) +(install|add)( |$)|(^|[;&| /])(npm|pnpm|yarn|bun)( [^|;&]*)? ((install|add|i)( [^|;&]*)? (-g|--global)|(-g|--global)( [^|;&]*)? (install|add|i))( |$)|(^|[;&| /])yarn +global +add( |$)|(^|[;&| /])(go|deno) +install( |$)|(^|[;&| /])uv +(tool +install|pip +install( [^|;&]*)? --system)( |=|$)|(^|[;&| /])playwright(@[^ ]+)? +install( |$)|(^|[;&| /])claude +mcp +add( |$)'; then
+        block "$inst_msg"
+      fi
+      while IFS= read -r pw; do
+        pw=${pw#[;&| ]}
+        case "$pw" in uv\ *) continue ;; */*) ;; *) block "$inst_msg" ;; esac
+        pw=${pw%% *}; case "$pw" in /*) ;; *) pw=$cwd/$pw ;; esac
+        own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+        [ -n "$own_wt" ] || own_wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+        own_root
+        pw=$(canon "$pw") && under "$pw" "$own_wt" || block "$inst_msg"
+      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| ])(uv +)?([^ ;&|]*/)?pip[0-9.]* +install( |$)')
+      # Where the package lands decides it, not only which pip or npm runs: a project tool pointed at a
+      # prefix, target, interpreter or directory outside the worktree installs onto the machine.
+      while IFS= read -r seg; do
+        seg=${seg#[;&| ]}
+        # The tool is the first word's name, never a substring: a package called pipx must not make yarn read as pip.
+        tool_w=${seg%% *}; opts=""
+        case "${tool_w##*/}" in
+          uv) opts=" --python -p --target --prefix " ;;
+          pip|pip[0-9]*) opts=" --prefix --root --target -t "; case " $seg " in *" --user "*) block "$inst_msg" ;; esac ;;
+          npm) opts=" --prefix " ;;
+          pnpm) opts=" --dir -C --global-dir --modules-dir " ;;
+          yarn) opts=" --modules-folder --cwd --global-folder " ;;
+          bun) opts=" --cwd " ;;
+          *) block "$inst_msg" ;;
+        esac
+        set -f; set -- $seg; set +f
+        while [ $# -gt 0 ]; do
+          dest=""
+          case "$1" in
+            --*=*) case "$opts" in *" ${1%%=*} "*) dest=${1#*=} ;; esac ;;
+            *) case "$opts" in *" $1 "*) dest=${2-}; shift ;; esac ;;
+          esac
+          shift
+          [ -n "$dest" ] || continue
+          case "$dest" in *'$'*|*'`'*|'~'*) block "$inst_msg" ;; /*) ;; *) dest=$cwd/$dest ;; esac
+          own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+          [ -n "$own_wt" ] || own_wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+          own_root
+          dest=$(canon "$dest") && under "$dest" "$own_wt" || block "$inst_msg"
+        done
+      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| ])((uv +)?([^ ;&|]*/)?pip[0-9.]*|npm|pnpm|yarn|bun) +(install|add|i)( [^;&|]*)?')
     fi
     if has '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
     if has '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
-    touches_state=0
-    has '(\.orchestrator/|orchestrator-sessions)' && touches_state=1
-    printf '%s' "$flat" | grep -qF -- "$INDEX_DIR" && touches_state=1
-    if [ "$touches_state" -eq 1 ] && has '(>|(^|[;&| ])(tee|mv|cp|rm|truncate|ln|chmod|touch|mkdir|rmdir)( |$)|sed -i|jq[^|;&]* -i|python[^|;&]* -c|perl -[a-zA-Z]*i)'; then
-      block "the run directory and the session index are written only by the orchestrator; send your handoff with 'orch handoff-put $(basename "$run_dir") $name' on stdin, or write $handoff with the Write tool when you are not inside a worktree"
-    fi
-    if has '(^|[;&| ])rm -[a-zA-Z]*[rR]'; then
-      tail_part=${flat#*rm }
-      for tok in $tail_part; do
-        case "$tok" in
-          -*) ;;
-          /*|~*|..*|\$HOME*) block "rm -r may target only relative paths inside your worktree (saw $tok)" ;;
-        esac
+    state_msg="the run directory and the session index are written only by the orchestrator; send your handoff with 'orch handoff-put $(basename "$run_dir") $name' on stdin, or write $handoff with the Write tool when you are not inside a worktree"
+    tg=() unres=0
+    write_scan "$cmd"
+    if [ "${#tg[@]}" -gt 0 ]; then
+      orch_dir=$(canon "${run_dir%/*}") && [ -n "$orch_dir" ] || block "the orchestrator's directory ${run_dir%/*} cannot be resolved; ask the orchestrator"
+      own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+      [ -n "$own_wt" ] || own_wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+      own_root
+      others
+      for ((k = 0; k < ${#tg[@]}; k++)); do
+        case "${tg[$k]}" in /dev/null|/dev/stdout|/dev/stderr|/dev/fd/*) continue ;; esac
+        t=$(canon "${tg[$k]}") || { unres=1; continue; }
+        if under "$t" "$orch_dir" || under "$t" "$idx_real"; then block "$state_msg (this command writes $t)"; fi
+        for ((j = 0; j < ${#op[@]}; j++)); do
+          under "$t" "${op[$j]}" && block "$t is in ${on[$j]}'s worktree; a session writes only in its own"
+        done
+        under "$t" "$own_wt" || block "$t is outside your worktree ($own_wt); a session writes only in its own"
+        rel=${t#"$own_wt"}; rel=${rel#/}
+        path_ok "$rel" || block "path ${rel:-.} is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it: it grants a path with orch paths $(basename "$run_dir") $name add <glob>, never by editing sessions.json."
       done
     fi
-    if [ "$role" != integrator ]; then
-      if has "${GIT} (checkout|switch)( [^ ]*)* $base( |$)"; then block "only the integrator works on the base branch ($base)"; fi
-      cur=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
-      if [ "$cur" = "$base" ] && has "${GIT} (commit|merge|rebase|cherry-pick|am)( |$)"; then
-        block "you are on the base branch ($base); commits there are the integrator's. Move to your worktree."
-      fi
+    # A target the scan cannot resolve is judged by the text: naming the run dir or the index is enough.
+    # This is a tripwire, not the fence: what such a write changed in the worktree is caught by the diff orch accept checks.
+    if [ "$unres" = 1 ]; then
+      has '(\.orchestrator|orchestrator-sessions)' && block "$state_msg"
+      printf '%s' "$flat" | grep -qF -- "$INDEX_DIR" && block "$state_msg"
     fi
-    allow "$(printf '%s' "$cmd" | cut -c1-120)"
+    # rm -r, its flags split or not, is judged up to the end of its own command; an expansion there is unknown.
+    tok=$(printf '%s\n' "${text//\\$'\n'/ }" | tr -d '"'"'"'\\' | awk '
+{
+  gsub(/[0-9]*[<>]+&[0-9-]+/, " "); gsub(/[0-9]*[<>]+&?/, " > "); gsub(/[;&|()`]/, " ; ")
+  n = split($0, w, " "); rm = 0
+  for (i = 1; i <= n + 1; i++) {
+    x = (i > n) ? ";" : w[i]
+    if (x == ";") { if (r && bad != "") { print bad; exit } rm = 0; r = 0; bad = ""; continue }
+    if (x == ">") { if (w[i+1] != ";") i++; continue }
+    if (!rm) { if (x == "rm" || x ~ /\/rm$/) { rm = 1; r = 0; eo = 0; bad = "" } continue }
+    if (!eo && x == "--") eo = 1
+    else if (!eo && x == "--recursive") r = 1
+    else if (!eo && x ~ /^-[^-]/) { if (x ~ /[rR]/) r = 1 }
+    else if (bad == "" && x ~ /^(\/|~|\.\.|\$)/) bad = x
+  }
+}')
+    [ -z "$tok" ] || block "rm -r may target only relative paths inside your worktree (saw $tok)"
+    detail=$(printf '%s' "$cmd" | cut -c1-120)
+    # The same command a third time in a row may be a loop: said once per streak, never refused.
+    key=$(printf '%s' "$detail" | tr '\n|' '  ' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+    if [ "$(grep "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$run_dir/events.log" 2>/dev/null | tail -n 3 | T="$tool" K="$key" awk -F'|' '
+      { d = $6; gsub(/[[:space:]]+/, " ", d); sub(/^ /, "", d); sub(/ $/, "", d); s[NR] = ($4 == ENVIRON["T"] && d == ENVIRON["K"]) }
+      END { print (NR >= 2 && s[NR] && s[NR-1] && !s[NR-2]) ? 1 : 0 }')" = 1 ]; then
+      log_event "$run_dir" "$sid" "$name" "$tool" nudge loop-suspect
+      loop_msg="orchestrator guard for $name: this is the same command a third time in a row. If it keeps giving the same result, change the approach, or send a partial handoff and tell the orchestrator what holds you."
+      printf '%s\n' "$loop_msg" >&2
+      # On exit 0 only additionalContext reaches the model; without a permissionDecision it approves nothing.
+      jq -cn --arg m "$loop_msg" '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $m}}'
+    fi
+    allow "$detail"
     ;;
   Agent|Task)
     # A team session starts no subagent but the MCP helpers orch spawn gave this very session:
