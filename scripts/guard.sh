@@ -194,11 +194,11 @@ case "$tool" in
                   ''|' --check') ;;
                   *) block "orch architecture takes only --check outside the architect's session; --sync regenerates the map's rules and is the architect's. Tell the architect what the map gets wrong." ;;
                 esac
-              done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +architecture[^;&|<>]*' | sed -E 's/^.*orch +architecture//; s/ +$//')
+              done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +architecture[^;&|<>]*' | sed -E 's/^[;&| /]?orch +architecture//; s/ +$//')
             fi ;;
           *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools, architecture" ;;
         esac
-      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^.*orch +//')
+      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^[;&| /]?orch +//')
     fi
     if has "${GIT} push[^|;&]*( -f( |$)|--force)"; then block "force push is never allowed"; fi
     if has "${GIT} push[^|;&]*(^| |:|\+)$base( |$)"; then
