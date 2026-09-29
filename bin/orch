@@ -906,10 +906,20 @@ render_brief() {
     local qa_dev qa_read="git diff $base...<its branch>"
     qa_dev=$(jq -r --arg id "$(jq -r '.qaOf // ""' <<<"$task")" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
     [ -n "$qa_dev" ] && qa_read="$(target_ref "$d" "$qa_dev"); git -C $(task_worktree "$d" "$qa_dev") diff $base...HEAD"
-    review_line="qa of ${qa_dev:-the developer task named in your goal} — round $round of $max_rounds.
+    # A qa that depends on its developer was asked for after the code (orch qa-request): it checks, it does not lead.
+    local qa_after=0
+    [ "$(jq -r '(.qaOf // "") as $q | (.dependsOn // []) | index($q) != null' <<<"$task")" = true ] && qa_after=1
+    if [ "$qa_after" -eq 1 ]; then
+      review_line="qa of ${qa_dev:-the developer task named in your goal} — round $round of $max_rounds.
+  Its developer asked for this check after writing the code; what to check is in your goal. Write tests for it in your allowed paths — the case asked about, its edges and failure paths, and the acceptance criteria it touches — and run them against its branch ($qa_read). Audit its own tests too: every case covered by a test that fails when the behaviour breaks; nothing skipped, disabled, focused or weakened; no mock standing in for the unit under test; its baseline, red and green runs real — re-run them. Findings go to $qa_dev as Q:, the verdict into your handoff. A later round checks the fixes the same way."
+    else
+      review_line="qa of ${qa_dev:-the developer task named in your goal} — round $round of $max_rounds.
   Before the developer writes code: TDD test cases for its task in your allowed paths — every acceptance criterion, edge and failure case, each with its observable result. FYI: $qa_dev with the path, send a partial handoff, and wait for its DONE.
   After DONE, audit its branch ($qa_read): every case covered by a test that fails when the behaviour breaks; nothing skipped, disabled, focused or weakened; no mock standing in for the unit under test; its baseline, red and green runs real — re-run them. Findings go to $qa_dev as Q:, the verdict into your handoff. A later round audits the fixes the same way."
-    if [ "$(jq -r '.interactive // false' "$d/plan.json")" = true ]; then
+    fi
+    if [ "$(jq -r '.interactive // false' "$d/plan.json")" = true ] || [ "$qa_after" -eq 1 ]; then
+      [ "$(jq -r '.interactive // false' "$d/plan.json")" = true ] || review_line="$review_line
+  When what you were asked to check needs the app running (a UI state, a flow), run it as below; otherwise tests are enough."
       review_line="$review_line
   Run the application from its worktree the way the repository documents (README, package scripts, Makefile, docker compose), exercise every acceptance criterion as a user would, and capture evidence for each: screenshots, recordings, terminal transcripts, HTTP responses, logs. Evidence goes under .scratch/evidence/ in your worktree, named by criterion; paths go into the handoff.
   Means: run 'orch tools' first and pick from what is available for this target. Nothing is installed by you; when the run has no suitable means, report BLOCKED: with the exact tool and install command from 'orch tools' so the orchestrator can ask the user."

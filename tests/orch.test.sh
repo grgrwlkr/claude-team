@@ -1280,6 +1280,9 @@ printf '# d17\n## Status\ndone\n' | "$ORCH" handoff-put r17 d17 > /dev/null
 expect_grep '^qa-impl$' "$TMP_BASE/v" "and is ready once the developer's handoff says done"
 expect_exit 0 "its brief renders" "$ORCH" brief r17 qa-impl
 expect_grep 'qa of d17' "$TMP_BASE/out" "as the qa of the developer"
+expect_no_grep 'Before the developer writes code' "$TMP_BASE/out" "a qa asked for after the code is not told to write cases before it"
+expect_grep 'asked for this check' "$TMP_BASE/out" "it is told the developer asked, after coding"
+expect_grep 'Run the application' "$TMP_BASE/out" "and may run the app when what it was asked to check needs it"
 expect_exit 1 "a second request for the same task is refused" "$ORCH" qa-request r17 d17 "more"
 expect_grep 'already has qa task qa-d17' "$TMP_BASE/err" "naming the qa task it has, by the name to message"
 expect_exit 1 "so is one for a task with a planned qa task, by a round's session name" "$ORCH" qa-request r17 e17-r2 "x"
