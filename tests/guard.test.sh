@@ -307,6 +307,55 @@ expect_grep "$WT" "$TMP_BASE/err" "the refusal names the session's own worktree"
 expect_exit 2 "so is entering another worktree" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" EnterWorktree '{"path":"'"$REPO"'/.claude/worktrees/other"}')"
 expect_exit 0 "entering its own worktree passes" bash "$GUARD" <<< "$(hook_input sid-dev "$REPO" EnterWorktree '{"path":"'"$WT"'"}')"
 
+echo "# audit guard F1, F3; tests-guard F11, F12: a Bash write is judged by its target, not by the text around it"
+W2="$REPO/.claude/worktrees/w2"
+mkdir -p "$W2/src" "$RUN/canvas/boards"
+jq --arg w2 "$W2" 'map(if .name == "dev-1" then .budget = 500 elif .name == "int-1" then .budget = 500 | .worktree = $w2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+: > "$RUN/events.log"
+dev_cmd() { expect_exit "$1" "$2" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "$3")"; }
+dev_cmd 0 "a read of the run dir with stderr silenced passes" "cat $RUN/plan.json 2>/dev/null"
+dev_cmd 0 "so does a listing with 2>&1 into a pipe" "ls $RUN/handoffs/ 2>&1 | tail -n 5; ls >&2"
+dev_cmd 0 "copying out of the run dir into scratch passes" "cp $RUN/plan.json .scratch/plan.json"
+dev_cmd 0 "so does making scratch and copying a canvas into it" "mkdir -p .scratch && mkdir -p .scratch/canvas && cp -R $RUN/canvas/boards .scratch/canvas/"
+dev_cmd 0 "a read of the run dir redirected into scratch passes" "grep allow $RUN/events.log > .scratch/ev.txt"
+dev_cmd 0 "a heredoc body is text, not redirects" "gh pr create --title t --body-file - <<'PR'${NL}> a quoted note about $RUN/plan.json${NL}PR"
+dev_cmd 0 "a > inside quotes is not a redirect" "git commit -m 'a > docs/x.md'"
+dev_cmd 0 "a write inside the task's paths passes" "echo x > src/new.ts"
+dev_cmd 0 "so does making a directory whose contents are the task's" "mkdir -p test"
+dev_cmd 0 "an interpreter running a module over the run dir reads it" "python3 -m json.tool $RUN/plan.json"
+dev_cmd 0 "find -exec with a reader passes" "find $RUN -name '*.md' -exec cat {} +"
+dev_cmd 0 "an unresolvable target that names neither the run dir nor the index is left alone" 'touch $TMPDIR/x.log'
+dev_cmd 2 "a redirect outside the task's paths is blocked" "echo x > docs/secret.md"
+expect_grep 'outside your allowed paths' "$TMP_BASE/err" "and names the allowed paths"
+dev_cmd 2 "so is sed -i on a file outside them" "sed -i '' 's/a/b/' docs/x.md"
+dev_cmd 2 "and cp into one" "cp src/a.ts docs/b.md"
+dev_cmd 2 "and tee" "echo x | tee -a docs/x.md"
+dev_cmd 2 "a write into another session's worktree is blocked" "touch $W2/src/x.ts"
+expect_grep 'int-1' "$TMP_BASE/err" "and names whose worktree it is"
+n=0
+for form in "dd if=/dev/zero of=$RUN/plan.json count=1" "install -m 644 src/a.ts $RUN/x" "rsync -a src/ $RUN/copy/" \
+  "ln -s /tmp/x $RUN/link" "truncate -s 0 $RUN/events.log" "perl -pi -e 's/a/b/' $RUN/plan.json" "mkdir $RUN/x" \
+  "rm $RUN/PAUSE-dev-1" "echo x | tee -a $RUN/events.log" "mv .scratch/h.md $RUN/handoffs/dev-1.md" "cp -t $RUN src/a.ts" \
+  "chmod a-w $RUN/plan.json" "echo x >> $CLAUDE_ORCH_STATE/sid-dev" "find $RUN -name PAUSE -delete" "cd $RUN && touch PAUSE"; do
+  n=$((n + 1)); dev_cmd 2 "a write into the run dir or the index is blocked, form $n: ${form%% *}" "$form"
+done
+expect_exit 2 "the integrator's ** does not reach the run dir" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "echo x > $RUN/plan.json")"
+dev_cmd 2 "a subshell's cd does not move the command after it" "(cd /tmp); touch docs/x.md"
+ln -s "$RUN/plan.json" "$WT/src/pl"
+dev_cmd 2 "a write through a symlink is judged where it lands" "echo x > src/pl"
+rm "$WT/src/pl"
+dev_cmd 2 "an unresolvable target is blocked when the text names the run dir" 'd=.orchestrator; touch $d/r1/PAUSE'
+dev_cmd 2 "so is a substitution" "touch \$(echo $RUN)/PAUSE"
+dev_cmd 2 "node -e naming the run dir is blocked" "node -e 'require(\"fs\").appendFileSync(\"$RUN/sessions.json\", \"x\")'"
+dev_cmd 2 "so is a python3 heredoc" "python3 - <<'EOF'${NL}open('$RUN/sessions.json', 'a').write('x')${NL}EOF"
+dev_cmd 2 "xargs feeding a writer is judged like the writer" "echo $RUN/PAUSE | xargs touch"
+dev_cmd 2 "a shell -c naming the run dir is blocked" "bash -c \"touch $RUN/PAUSE\""
+dev_cmd 0 "an awk program that only prints reads the run dir" "awk '{print \$1}' $RUN/events.log"
+MSG="git commit -m \"\$(cat <<'EOF'${NL}fix: don't (re)write .orchestrator/r1 by hand${NL}EOF${NL})\""
+dev_cmd 0 "a commit message in a heredoc inside \$( ) is text, apostrophes and parens included" "$MSG && echo x > src/ok.ts"
+dev_cmd 2 "and the command after it is still judged" "$MSG && echo x > $RUN/plan.json"
+jq 'map(if .name == "dev-1" then .budget = 2 else . end | del(.worktree | select(. == $w2)))' --arg w2 "$W2" "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
 expect_exit 2 "stop: no handoff blocks" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"

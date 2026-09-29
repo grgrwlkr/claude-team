@@ -100,6 +100,243 @@ sole_handoff_put() {
   [ "$last" = "$delim" ]
 }
 
+# canon <absolute path>: where a write to the path lands: its deepest existing directory resolved physically,
+# a symlink at its end followed, . and .. in the part still to be created folded.
+canon() {
+  local p="$1" d rest="" out="" c l n=0 IFS=/
+  while [ -L "$p" ] && [ "$n" -lt 8 ]; do
+    l=$(readlink "$p"); case "$l" in /*) p=$l ;; *) p=${p%/*}/$l ;; esac; n=$((n + 1))
+  done
+  d=$p
+  until [ -d "$d" ]; do rest="/${d##*/}$rest"; d=${d%/*}; d=${d:-/}; done
+  d=$(cd "$d" && pwd -P) || return 1
+  set -f
+  for c in $d$rest; do case "$c" in ''|.) ;; ..) out=${out%/*} ;; *) out=$out/$c ;; esac; done
+  set +f
+  printf '%s' "${out:-/}"
+}
+
+# Write targets of a Bash command, collected by write_scan into tg (absolute paths); unres=1 when one cannot
+# be known: an expansion or glob in it, a relative one after a cd that cannot be followed, or code an
+# interpreter, eval or a shell -c runs.
+# tgt <token type> <word>: one target, taken relative to the effective cwd ecwd.
+tgt() {
+  if [ "$1" != W ]; then unres=1; return; fi
+  case "$2" in
+    /*) tg[${#tg[@]}]=$2 ;;
+    *) if [ -n "$ecwd" ]; then tg[${#tg[@]}]=$ecwd/$2; else unres=1; fi ;;
+  esac
+}
+# operands <options that take an argument>: the operands of the command at av[ci] into ov/ot.
+operands() {
+  local j=$((ci + 1)) end=0
+  ov=() ot=()
+  while [ "$j" -lt "${#av[@]}" ]; do
+    if [ "$end" = 0 ]; then
+      case "${av[$j]}" in
+        --) end=1; j=$((j + 1)); continue ;;
+        -?*) case " $1 " in *" ${av[$j]} "*) j=$((j + 1)) ;; esac; j=$((j + 1)); continue ;;
+      esac
+    fi
+    ov[${#ov[@]}]=${av[$j]}; ot[${#ot[@]}]=${at[$j]}; j=$((j + 1))
+  done
+}
+# all_ops [<first>]: every operand from <first> on is a target.
+all_ops() {
+  local j
+  for ((j = ${1:-0}; j < ${#ov[@]}; j++)); do tgt "${ot[$j]}" "${ov[$j]}"; done
+}
+# sub_cmd: judges nv/nt, built by the caller from a find -exec or xargs, as a command of its own.
+sub_cmd() {
+  local av at ci j
+  av=() at=()
+  for ((j = 0; j < ${#nv[@]}; j++)); do av[j]=${nv[$j]}; at[j]=${nt[$j]}; done
+  cmd_targets
+}
+# cmd_targets: adds the write targets of the simple command in av/at.
+cmd_targets() {
+  local i=0 n=${#av[@]} c j a k=0 ip=0 sc=0 nv nt
+  while [ "$i" -lt "$n" ]; do
+    case "${av[$i]}" in
+      '{'|'!'|if|then|else|elif|while|until|do|command|builtin|exec|nohup|time) ;;
+      env) while [ $((i + 1)) -lt "$n" ]; do case "${av[$((i + 1))]}" in -u|-S|-C) i=$((i + 2)) ;; -*|*=*) i=$((i + 1)) ;; *) break ;; esac; done ;;
+      timeout|nice) while [ $((i + 1)) -lt "$n" ]; do case "${av[$((i + 1))]}" in -n|-s|-k) i=$((i + 2)) ;; -*|[0-9]*) i=$((i + 1)) ;; *) break ;; esac; done ;;
+      *=*) [[ "${av[$i]%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || break ;;
+      *) break ;;
+    esac
+    i=$((i + 1))
+  done
+  [ "$i" -lt "$n" ] || return 0
+  if [ "${at[$i]}" = U ]; then unres=1; return 0; fi
+  ci=$i c=${av[$i]##*/}
+  case "$c" in
+    cd|pushd)
+      operands ""
+      if [ "${#ov[@]}" -eq 0 ]; then ecwd=$(canon "$HOME")
+      elif [ "${ot[0]}" != W ] || [ "${ov[0]}" = - ]; then ecwd=""
+      else
+        case "${ov[0]}" in /*) a=${ov[0]} ;; *) a=${ecwd:+$ecwd/${ov[0]}} ;; esac
+        if [ -n "$a" ] && a=$(canon "$a") && [ -d "$a" ]; then ecwd=$a; else ecwd=""; fi
+      fi ;;
+    popd) ecwd="" ;;
+    cp|mv|ln|install|gcp|gmv|gln|ginstall)
+      case "$c" in *install) operands "-m -o -g -B -f -S -t" ;; *) operands "-S -t" ;; esac
+      for ((j = ci + 1; j < n; j++)); do
+        case "${av[$j]}" in
+          -t) k=1; [ $((j + 1)) -lt "$n" ] && tgt "${at[$((j + 1))]}" "${av[$((j + 1))]}" ;;
+          -t?*) k=1; tgt "${at[$j]}" "${av[$j]#-t}" ;;
+          --target-directory=*) k=1; tgt "${at[$j]}" "${av[$j]#*=}" ;;
+          -d|--directory) case "$c" in *install) k=2 ;; esac ;;
+        esac
+      done
+      if [ "$k" = 2 ]; then all_ops
+      elif [ "$k" = 0 ] && [ "${#ov[@]}" -ge 2 ]; then all_ops $((${#ov[@]} - 1))
+      elif [ "$k" = 0 ] && [ "${#ov[@]}" -eq 1 ] && [ "${c#g}" = ln ]; then tgt "${ot[0]}" "${ov[0]##*/}"
+      fi ;;
+    rsync)
+      operands "-e -f -T --exclude --include --filter --exclude-from --include-from --files-from --rsh --temp-dir --backup-dir --link-dest --compare-dest --copy-dest --partial-dir --log-file --password-file --chmod --chown"
+      if [ "${#ov[@]}" -ge 2 ]; then
+        a=${ov[$((${#ov[@]} - 1))]}
+        # host:path and rsync:// are remote; a colon after a slash is part of a local name
+        case "${a%%:*}" in "$a"|*/*) tgt "${ot[$((${#ov[@]} - 1))]}" "$a" ;; esac
+      fi ;;
+    tee|rm|rmdir) operands ""; all_ops ;;
+    touch) operands "-t -r -d -A"; all_ops ;;
+    mkdir) operands "-m"; all_ops ;;
+    truncate) operands "-s -r"; all_ops ;;
+    chmod) operands ""; all_ops 1 ;;
+    dd) for ((j = ci + 1; j < n; j++)); do case "${av[$j]}" in of=*) tgt "${at[$j]}" "${av[$j]#of=}" ;; esac; done ;;
+    sed|gsed)
+      ov=() ot=()
+      for ((j = ci + 1; j < n; j++)); do
+        a=${av[$j]}
+        case "$a" in
+          # BSD sed takes the backup suffix as the next word, '' for none
+          -i|-[!-]*i) ip=1; case "${av[$((j + 1))]-x}" in ''|.*) j=$((j + 1)) ;; esac ;;
+          -i*|--in-place*) ip=1 ;;
+          -e|-f|--expression|--file|-[!-]*[ef]) sc=1; j=$((j + 1)) ;;
+          --expression=*|--file=*) sc=1 ;;
+          -?*) ;;
+          *) ov[${#ov[@]}]=$a; ot[${#ot[@]}]=${at[$j]} ;;
+        esac
+      done
+      [ "$ip" = 0 ] || all_ops $((1 - sc)) ;;
+    perl)
+      ov=() ot=()
+      for ((j = ci + 1; j < n; j++)); do
+        a=${av[$j]}
+        case "$a" in
+          -e|-E|-[anlpswWTtuUXc0]*[eE]) sc=1; j=$((j + 1)) ;;
+          -i*|-[anlpswWTtuUXc0]*i*) ip=1 ;;
+          -?*) ;;
+          *) ov[${#ov[@]}]=$a; ot[${#ot[@]}]=${at[$j]} ;;
+        esac
+      done
+      if [ "$ip" = 1 ]; then all_ops $((1 - sc))
+      elif [ "$sc" = 1 ] || [ "${#ov[@]}" -eq 0 ]; then unres=1
+      fi ;;
+    python|python[0-9]*|node|nodejs|bun|deno|ruby|php)
+      operands ""
+      for ((j = ci + 1; j < n; j++)); do
+        case "${av[$j]}" in
+          -c|-e|-p|-pe|--eval|--print|-|eval) sc=1 ;;
+          -m) k=1 ;;
+        esac
+      done
+      if [ "$sc" = 1 ] || { [ "$k" = 0 ] && [ "${#ov[@]}" -eq 0 ]; }; then unres=1; fi ;;
+    bash|sh|zsh|dash|ksh)
+      operands ""
+      for ((j = ci + 1; j < n; j++)); do case "${av[$j]}" in -c|-[!-]*c*|-s) sc=1 ;; esac; done
+      if [ "$sc" = 1 ] || [ "${#ov[@]}" -eq 0 ]; then unres=1; fi ;;
+    eval) unres=1 ;;
+    awk|gawk|nawk|mawk)
+      operands "-F -v"
+      for ((j = ci + 1; j < n; j++)); do case "${av[$j]}" in -f) sc=1 ;; esac; done
+      # an awk program writes only through print >, a pipe or system()
+      [ "$sc" = 1 ] && unres=1
+      case "${ov[0]-}" in *'>'*|*'|'*|*system*) unres=1 ;; esac ;;
+    xargs)
+      a="" j=$((ci + 1))
+      while [ "$j" -lt "$n" ]; do
+        case "${av[$j]}" in
+          -I|-J) a=${av[$((j + 1))]-}; j=$((j + 2)) ;;
+          -n|-P|-L|-s|-E|-d|-a) j=$((j + 2)) ;;
+          -I?*) a=${av[$j]#-I}; j=$((j + 1)) ;;
+          -*) j=$((j + 1)) ;;
+          *) break ;;
+        esac
+      done
+      nv=() nt=()
+      for ((; j < n; j++)); do
+        nv[${#nv[@]}]=${av[$j]}
+        if [ -n "$a" ] && [ "${av[$j]}" = "$a" ]; then nt[${#nt[@]}]=U; else nt[${#nt[@]}]=${at[$j]}; fi
+      done
+      # without -I, the words read from stdin are appended
+      if [ "${#nv[@]}" -gt 0 ]; then
+        [ -n "$a" ] || { nv[${#nv[@]}]=""; nt[${#nt[@]}]=U; }
+        sub_cmd
+      fi ;;
+    find)
+      operands ""
+      # shellcheck disable=SC2165,SC2167  # the scan resumes after an -exec's ; or +
+      for ((j = ci + 1; j < n; j++)); do
+        case "${av[$j]}" in
+          -delete)
+            # the roots are the operands before the first expression word
+            for ((k = ci + 1; k < n; k++)); do
+              case "${av[$k]}" in -*|'('|'!') break ;; esac
+              tgt "${at[$k]}" "${av[$k]}"
+            done ;;
+          -fprint|-fprint0|-fprintf|-fls) [ $((j + 1)) -lt "$n" ] && tgt "${at[$((j + 1))]}" "${av[$((j + 1))]}" ;;
+          -exec|-execdir|-ok|-okdir)
+            nv=() nt=()
+            for ((j = j + 1; j < n; j++)); do
+              case "${av[$j]}" in ';'|'+') break ;; esac
+              nv[${#nv[@]}]=${av[$j]}
+              if [ "${av[$j]}" = '{}' ]; then nt[${#nt[@]}]=U; else nt[${#nt[@]}]=${at[$j]}; fi
+            done
+            [ "${#nv[@]}" -eq 0 ] || sub_cmd ;;
+        esac
+      done ;;
+  esac
+}
+# write_scan <command>: fills tg and unres for the command, starting from the hook's cwd.
+write_scan() {
+  local t v redir="" ecwd stk ns=0
+  ecwd=$(cd "$cwd" 2>/dev/null && pwd -P)
+  stk=() av=() at=()
+  while IFS=$'\t' read -r t v; do
+    case "$t" in
+      W|U|G)
+        if [ -z "$redir" ]; then av[${#av[@]}]=$v; at[${#at[@]}]=$t
+        elif [ "$redir" = O ]; then tgt "$t" "$v"
+        elif [ "$redir" = D ]; then case "$v" in -|*[!0-9]*|'') [ "$v" = - ] || tgt "$t" "$v" ;; esac
+        fi
+        redir="" ;;
+      O|D|I) redir=$t ;;
+      *)
+        cmd_targets; av=() at=(); redir=""
+        case "$t" in
+          P) stk[ns]=$ecwd; ns=$((ns + 1)) ;;
+          p) if [ "$ns" -gt 0 ]; then ns=$((ns - 1)); ecwd=${stk[$ns]}; fi ;;
+          Q) ecwd=$(cd "$cwd" 2>/dev/null && pwd -P); ns=0 ;;
+        esac ;;
+    esac
+  done < <(printf '%s' "$1" | shell_tokens)
+  cmd_targets
+}
+# path_ok <path relative to the own worktree>: scratch, one of the session's pathsAllowed, or a directory whose contents are.
+path_ok() {
+  local pat
+  case "$1" in .scratch|.scratch/*) return 0 ;; esac
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
+    # shellcheck disable=SC2053  # the glob must stay unquoted to act as a pattern
+    if [[ "$1" == $pat ]] || [[ "$1/" == $pat ]]; then return 0; fi
+  done < <(jq -r '.pathsAllowed[]?' <<<"$rec")
+  return 1
+}
+
 file_path=""
 case "$tool" in
   Edit|Write|MultiEdit|NotebookEdit)
@@ -263,11 +500,40 @@ case "$tool" in
     fi
     if has '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
     if has '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
-    touches_state=0
-    has '(\.orchestrator/|orchestrator-sessions)' && touches_state=1
-    printf '%s' "$flat" | grep -qF -- "$INDEX_DIR" && touches_state=1
-    if [ "$touches_state" -eq 1 ] && has '(>|(^|[;&| ])(tee|mv|cp|rm|truncate|ln|chmod|touch|mkdir|rmdir)( |$)|sed -i|jq[^|;&]* -i|python[^|;&]* -c|perl -[a-zA-Z]*i)'; then
-      block "the run directory and the session index are written only by the orchestrator; send your handoff with 'orch handoff-put $(basename "$run_dir") $name' on stdin, or write $handoff with the Write tool when you are not inside a worktree"
+    state_msg="the run directory and the session index are written only by the orchestrator; send your handoff with 'orch handoff-put $(basename "$run_dir") $name' on stdin, or write $handoff with the Write tool when you are not inside a worktree"
+    tg=() unres=0
+    write_scan "$cmd"
+    if [ "${#tg[@]}" -gt 0 ]; then
+      orch_dir=${run_dir%/*}
+      idx_real=$(canon "$INDEX_DIR")
+      own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+      [ -n "$own_wt" ] || own_wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+      [ -z "$own_wt" ] || own_wt=$(canon "$own_wt")
+      on=() op=()
+      while IFS='|' read -r o_name o_wt; do
+        [ -n "$o_wt" ] || continue
+        o_wt=$(canon "$o_wt"); [ "$o_wt" = "$own_wt" ] && continue
+        on[${#on[@]}]=$o_name; op[${#op[@]}]=$o_wt
+      done < <(jq -r --arg n "$name" '.[] | select(.name != $n) | "\(.name)|\(.worktree // "")"' "$run_dir/sessions.json" 2>/dev/null)
+      for ((k = 0; k < ${#tg[@]}; k++)); do
+        t=$(canon "${tg[$k]}") || { unres=1; continue; }
+        case "$t/" in "$orch_dir"/*|"$idx_real"/*) block "$state_msg (this command writes $t)" ;; esac
+        for ((j = 0; j < ${#op[@]}; j++)); do
+          case "$t/" in "${op[$j]}"/*) block "$t is in ${on[$j]}'s worktree; a session writes only in its own" ;; esac
+        done
+        if [ -n "$own_wt" ]; then
+          case "$t/" in
+            "$own_wt"/*)
+              rel=${t#"$own_wt"}; rel=${rel#/}
+              path_ok "$rel" || block "path ${rel:-.} is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it: it grants a path with orch paths $(basename "$run_dir") $name add <glob>, never by editing sessions.json." ;;
+          esac
+        fi
+      done
+    fi
+    # A target the scan cannot resolve is judged by the text: naming the run dir or the index is enough.
+    if [ "$unres" = 1 ]; then
+      has '(\.orchestrator|orchestrator-sessions)' && block "$state_msg"
+      printf '%s' "$flat" | grep -qF -- "$INDEX_DIR" && block "$state_msg"
     fi
     if has '(^|[;&| ])rm -[a-zA-Z]*[rR]'; then
       tail_part=${flat#*rm }
