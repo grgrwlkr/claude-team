@@ -185,9 +185,17 @@ case "$tool" in
             [ "$arg2" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${arg2:-<missing>}; run is $_run" ;;
           handoff|status|events|ready|doctor|tools) ;;
           # --sync rewrites the generated rules every session loads; only the map's owner runs it. An
-          # allowlist, not a match on --sync: a variable or substitution would hide the flag.
+          # allowlist over everything up to the next separator, not a match on --sync: a variable,
+          # a substitution or ${IFS} glued to the subcommand would hide the flag.
           architecture)
-            [ "$role" = architect ] || [ -z "$_run" ] || [ "$_run" = --check ] || block "orch architecture takes only --check outside the architect's session; --sync regenerates the map's rules and is the architect's. Tell the architect what the map gets wrong." ;;
+            if [ "$role" != architect ]; then
+              while IFS= read -r arch_tail; do
+                case "$arch_tail" in
+                  ''|' --check') ;;
+                  *) block "orch architecture takes only --check outside the architect's session; --sync regenerates the map's rules and is the architect's. Tell the architect what the map gets wrong." ;;
+                esac
+              done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +architecture[^;&|<>]*' | sed -E 's/^.*orch +architecture//; s/ +$//')
+            fi ;;
           *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools, architecture" ;;
         esac
       done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^.*orch +//')
