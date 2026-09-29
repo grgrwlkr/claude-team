@@ -61,20 +61,20 @@ session_json() {
   jq -c --arg s "$2" "$MINE"' map(select(mine($s))) | .[0]' "$1/sessions.json"
 }
 
-# norm_path <absolute path>: canonical form (symlinks and . / .. resolved) for an existing parent dir;
-# for a not-yet-existing parent, the path is accepted only when it has no . or .. segments. Fails otherwise.
+# norm_path <absolute path>: canonical form, its deepest existing directory resolved with symlinks and . / ..,
+# the part still to be created appended. A path whose parent does not exist yet is accepted only without
+# . or .. segments. Fails otherwise.
 norm_path() {
-  local p="$1" d b
+  local p="$1" d b rest=""
   case "$p" in /*) ;; *) return 1 ;; esac
   b=$(basename "$p"); d=$(dirname "$p")
   case "$b" in .|..) return 1 ;; esac
-  if [ -d "$d" ]; then
-    d=$(cd "$d" 2>/dev/null && pwd -P) || return 1
-    printf '%s/%s' "$d" "$b"
-  else
+  if [ ! -d "$d" ]; then
     case "/$p/" in */../*|*/./*) return 1 ;; esac
-    printf '%s' "$p"
+    until [ -d "$d" ]; do rest="/$(basename "$d")$rest"; d=$(dirname "$d"); done
   fi
+  d=$(cd "$d" 2>/dev/null && pwd -P) || return 1
+  printf '%s%s/%s' "${d%/}" "$rest" "$b"
 }
 
 # shell_tokens: reads a shell command on stdin and prints its tokens, one per line as "<type><tab><value>":

@@ -336,6 +336,16 @@ path_ok() {
   done < <(jq -r '.pathsAllowed[]?' <<<"$rec")
   return 1
 }
+# others: the worktrees of the run's other sessions, resolved, into op and their names into on; own_wt left out.
+others() {
+  local o_name o_wt
+  on=() op=()
+  while IFS='|' read -r o_name o_wt; do
+    [ -n "$o_wt" ] || continue
+    o_wt=$(canon "$o_wt"); [ "$o_wt" = "$own_wt" ] && continue
+    on[${#on[@]}]=$o_name; op[${#op[@]}]=$o_wt
+  done < <(jq -r --arg n "$name" '.[] | select(.name != $n) | "\(.name)|\(.worktree // "")"' "$run_dir/sessions.json" 2>/dev/null)
+}
 
 file_path=""
 case "$tool" in
@@ -416,11 +426,22 @@ case "$tool" in
       "$run_dir"/handoffs/*) block "that handoff belongs to another session; you may write only $handoff" ;;
       "$run_dir"/*) block "the run directory is the orchestrator's; you may write only $handoff" ;;
     esac
-    wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || block "edits are allowed only inside your git worktree"
-    common=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null)
-    case "$common" in /*) ;; *) common="$(cd "$cwd" && cd "$common" && pwd -P)";; esac
-    if [ "$(dirname "$common")" = "$wt" ]; then
-      block "this is the main checkout; move into your own worktree under .claude/worktrees/ before editing"
+    # The worktree is the session's own, from its record, else the one the file sits in; never the cwd's.
+    own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+    if [ -n "$own_wt" ]; then
+      wt=$(canon "$own_wt")
+    else
+      d=$(dirname "$file_path"); until [ -d "$d" ]; do d=$(dirname "$d"); done
+      wt=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || block "edits are allowed only inside your git worktree"
+      common=$(git -C "$d" rev-parse --git-common-dir 2>/dev/null)
+      case "$common" in /*) ;; *) common="$(cd "$d" && cd "$common" && pwd -P)";; esac
+      if [ "$(dirname "$common")" = "$wt" ]; then
+        block "this is the main checkout; move into your own worktree under .claude/worktrees/ before editing"
+      fi
+      others
+      for ((j = 0; j < ${#op[@]}; j++)); do
+        [ "$wt" = "${op[$j]}" ] && block "$file_path is in ${on[$j]}'s worktree; a session writes only in its own"
+      done
     fi
     case "$file_path" in
       "$wt"/*) rel=${file_path#"$wt"/} ;;
@@ -509,12 +530,7 @@ case "$tool" in
       own_wt=$(jq -r '.worktree // ""' <<<"$rec")
       [ -n "$own_wt" ] || own_wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
       [ -z "$own_wt" ] || own_wt=$(canon "$own_wt")
-      on=() op=()
-      while IFS='|' read -r o_name o_wt; do
-        [ -n "$o_wt" ] || continue
-        o_wt=$(canon "$o_wt"); [ "$o_wt" = "$own_wt" ] && continue
-        on[${#on[@]}]=$o_name; op[${#op[@]}]=$o_wt
-      done < <(jq -r --arg n "$name" '.[] | select(.name != $n) | "\(.name)|\(.worktree // "")"' "$run_dir/sessions.json" 2>/dev/null)
+      others
       for ((k = 0; k < ${#tg[@]}; k++)); do
         t=$(canon "${tg[$k]}") || { unres=1; continue; }
         case "$t/" in "$orch_dir"/*|"$idx_real"/*) block "$state_msg (this command writes $t)" ;; esac

@@ -356,6 +356,32 @@ dev_cmd 0 "a commit message in a heredoc inside \$( ) is text, apostrophes and p
 dev_cmd 2 "and the command after it is still judged" "$MSG && echo x > $RUN/plan.json"
 jq 'map(if .name == "dev-1" then .budget = 2 else . end | del(.worktree | select(. == $w2)))' --arg w2 "$W2" "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 
+echo "# audit guard F15, tests-guard F10: a Write is judged where it lands, through a symlinked ancestor too"
+W3="$REPO/.claude/worktrees/w3"
+git -C "$REPO" worktree add -q -b w3 "$W3" main
+set_rec() { jq --arg n "$1" --arg w3 "$W3" --arg wt "$WT" "map(if .name == \$n then $2 else . end)" "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"; }
+set_rec dev-1 '.budget = 500'
+set_rec int-1 '.worktree = $w3'
+: > "$RUN/events.log"
+ln -s "$TMP_BASE/outside" "$WT/src/ln"
+expect_exit 2 "a Write under a symlinked dir, into a level still to be made, is blocked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/src/ln/new/f.ts"}')"
+expect_grep 'outside your worktree' "$TMP_BASE/err" "as outside the worktree"
+rm "$WT/src/ln"
+expect_exit 0 "a Write into directories still to be made inside the paths passes" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Write '{"file_path":"'"$WT"'/src/new/deep/f.ts"}')"
+
+echo "# audit guard F4, F11: Edit and Write take the worktree from the file, not from the cwd"
+expect_exit 0 "a Write into the own worktree from the main checkout passes" bash "$GUARD" <<< "$(hook_input sid-dev "$REPO" Write '{"file_path":"'"$WT"'/src/y.ts"}')"
+expect_exit 2 "a Write into another session's worktree is blocked from inside it" bash "$GUARD" <<< "$(hook_input sid-dev "$W3" Write '{"file_path":"'"$W3"'/src/p.ts"}')"
+expect_grep "outside your worktree ($WT)" "$TMP_BASE/err" "and names the session's own worktree"
+set_rec dev-1 'del(.worktree)'
+expect_exit 0 "with no worktree on record, the file's worktree counts, not the cwd's" bash "$GUARD" <<< "$(hook_input sid-dev "$REPO" Write '{"file_path":"'"$WT"'/src/y.ts"}')"
+expect_exit 2 "and one registered to another session is still refused" bash "$GUARD" <<< "$(hook_input sid-dev "$W3" Edit '{"file_path":"'"$W3"'/src/p.ts"}')"
+expect_grep "int-1's worktree" "$TMP_BASE/err" "naming whose it is"
+expect_exit 2 "and so is the main checkout, from inside the own worktree" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Edit '{"file_path":"'"$REPO"'/src/a.ts"}')"
+expect_grep 'main checkout' "$TMP_BASE/err" "as the main checkout"
+set_rec dev-1 '.worktree = $wt'
+set_rec dev-1 '.budget = 2'
+
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
 expect_exit 2 "stop: no handoff blocks" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
