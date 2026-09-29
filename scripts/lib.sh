@@ -223,6 +223,67 @@ END { nq = 0; tok(s); for (qi = 1; qi <= nq; qi++) { print "Q\t"; tok(q[qi]) } }
 '
 }
 
+# strip_quoted_heredocs: reads a shell command on stdin and prints it without the bodies of heredocs whose delimiter
+# is quoted (<<'X', <<"X", <<\X, <<-'X'): such a body is data. A body under an unquoted delimiter expands, and stays.
+# Heredocs inside $( ), backticks and double-quoted substitutions count; quotes and comments hide <<.
+strip_quoted_heredocs() {
+  awk '
+{ s = s (NR > 1 ? "\n" : "") $0 }
+END {
+  n = split(s, c, ""); out = ""; sp = 0; m[0] = "u"; nh = 0
+  for (i = 1; i <= n; i++) {
+    ch = c[i]; md = m[sp]
+    if (ch == "\\") { out = out ch c[i+1]; i++; continue }
+    if (md == "d") {
+      if (ch == "\"") sp--
+      else if (ch == "$" && c[i+1] == "(") { m[++sp] = "s"; dp[sp] = 0; out = out ch; ch = c[++i] }
+      else if (ch == "`") m[++sp] = "b"
+      out = out ch; continue
+    }
+    if (ch == "\047") { for (j = i + 1; j <= n && c[j] != "\047"; j++) ; out = out substr(s, i, j - i + 1); i = j; continue }
+    if (ch == "\"") m[++sp] = "d"
+    else if (ch == "`") { if (md == "b") sp--; else m[++sp] = "b" }
+    else if (ch == "$" && c[i+1] == "(") { m[++sp] = "s"; dp[sp] = 0; out = out ch; ch = c[++i] }
+    else if (ch == "(" && md == "s") dp[sp]++
+    else if (ch == ")" && md == "s") { if (dp[sp] == 0) sp--; else dp[sp]-- }
+    else if (ch == "#" && (i == 1 || index(" \t\n;&|()", c[i-1]))) {
+      for (j = i; j < n && c[j+1] != "\n"; j++) ;
+      out = out substr(s, i, j - i + 1); i = j; continue
+    }
+    else if (ch == "<" && c[i+1] == "<" && c[i+2] == "<") { out = out "<<<"; i += 2; continue }
+    else if (ch == "<" && c[i+1] == "<") {
+      j = i + 2; dash = 0; quo = 0; dl = ""
+      if (c[j] == "-") { dash = 1; j++ }
+      while (j <= n && (c[j] == " " || c[j] == "\t")) j++
+      while (j <= n && !index(" \t\n;&|<>()", c[j])) {
+        if (c[j] == "\047" || c[j] == "\"") { q = c[j]; quo = 1; for (j++; j <= n && c[j] != q; j++) dl = dl c[j] }
+        else if (c[j] == "\\") { quo = 1; j++; dl = dl c[j] }
+        else dl = dl c[j]
+        j++
+      }
+      hd[++nh] = dl; hq[nh] = quo; hdash[nh] = dash
+      out = out substr(s, i, j - i); i = j - 1; continue
+    }
+    else if (ch == "\n" && nh) {
+      out = out ch
+      for (k = 1; k <= nh; k++) {
+        while (i < n) {
+          for (j = i + 1; j <= n && c[j] != "\n"; j++) ;
+          line = substr(s, i + 1, j - i - 1); t = line
+          if (hdash[k]) sub(/^\t+/, "", t)
+          if (!hq[k] || t == hd[k]) out = out line (j <= n ? "\n" : "")
+          i = (j <= n ? j : n)
+          if (t == hd[k]) break
+        }
+      }
+      nh = 0; continue
+    }
+    out = out ch
+  }
+  printf "%s", out
+}'
+}
+
 # log_event <run_dir> <sid> <name> <tool> <decision> <detail> [<subject>]: a block line appends the
 # command or file path it judged as a 7th field; readers take the reason from field 6.
 log_event() {

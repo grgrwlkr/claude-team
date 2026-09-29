@@ -545,7 +545,9 @@ case "$tool" in
     code=0
     scan_cmds "$cmd"
     # Quotes and backslashes stripped, whitespace collapsed: `git "push" --force` reads as `git push --force`.
-    flat=$(printf '%s' "$cmd" | tr -d '"'"'"'\\' | tr -s '[:space:]' ' ')
+    # A quoted heredoc's body is data and left out, unless the command runs code that may read it as a script.
+    if [ "$code" = 1 ]; then text=$cmd; else text=$(printf '%s' "$cmd" | strip_quoted_heredocs); fi
+    flat=$(printf '%s' "$text" | tr -d '"'"'"'\\' | tr -s '[:space:]' ' ')
     # git with any global options before the subcommand: git -C dir push, git --git-dir=x reset …
     GIT='git( -[A-Za-z=/._-]+( [^ -][^ ]*)?)*'
     has() { printf '%s' "$flat" | grep -Eq "$1"; }

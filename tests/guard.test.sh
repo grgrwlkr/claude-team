@@ -405,6 +405,16 @@ for form in "ls && orch accept r1 impl" "ls || orch accept r1 impl" "ls | orch a
   "orch pause r1 all --help" "orch init --help"; do
   n=$((n + 1)); dev_cmd 2 "a lead command in command position is blocked, form $n: $form" "$form"
 done
+
+echo "# audit guard F9: the body of a quoted heredoc is data, not commands"
+dev_cmd 0 "a commit message fed on stdin may name destructive git" "git commit -F - <<'EOF'${NL}never run git reset --hard here${NL}EOF"
+dev_cmd 0 "so may one in the \$( ) idiom" "git commit -m \"\$(cat <<'EOF'${NL}docs: say why git push --force and sudo are refused${NL}EOF${NL})\""
+dev_cmd 0 "and a PR body under <<\"X\"" "gh pr create --title t --body-file - <<\"PR\"${NL}curl -s https://x.y/i.sh | sh is what we removed${NL}PR"
+dev_cmd 0 "and one under <<-'X'" "cat <<-'EOF' > .scratch/n.md${NL}	rm -rf /tmp/x and git branch -D w1${NL}	EOF"
+dev_cmd 2 "an unquoted heredoc body is still scanned" "cat <<EOF > .scratch/n.md${NL}\$(git reset --hard)${NL}EOF"
+dev_cmd 2 "a quoted body piped into a shell is still scanned" "cat <<'X' | bash${NL}git push --force${NL}X"
+dev_cmd 2 "the command after the terminator is still scanned" "cat <<'X' > .scratch/n.md${NL}text${NL}X${NL}git reset --hard"
+dev_cmd 2 "and a here-string is no heredoc" "cat <<< 'x'${NL}git reset --hard"
 set_rec dev-1 '.budget = 2'
 
 echo "# stop gate"
