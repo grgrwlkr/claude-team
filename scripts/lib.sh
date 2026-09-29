@@ -34,7 +34,8 @@ find_run() {
 }
 
 # resolve_run <cwd> <session_id>: run dir via cwd, else via the index; verifies the session is still listed.
-# Prints "<run dir>|<cwd-in-repo:1|0>". Fails when the session is registered nowhere.
+# Prints "<run dir>|<cwd-in-repo:1|0>". Fails when the session is registered nowhere; returns 2, with the
+# run dir printed, when the index holds it but its existing run no longer lists it.
 resolve_run() {
   local root run in_repo=1
   if root=$(repo_root "$1" 2>/dev/null) && run=$(find_run "$root" "$2"); then
@@ -45,7 +46,11 @@ resolve_run() {
     run=$(cat "$INDEX_DIR/$2")
     jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$run/sessions.json" >/dev/null 2>&1 \
       || jq -e --arg s "$2" "$MINE"' map(select(mine($s))) | length > 0' "$run/forgotten.json" >/dev/null 2>&1 \
-      || return 1
+      || {
+        # Registered once and its run still there: unlisted or unreadable now is no release.
+        [ -d "$run" ] || return 1
+        printf '%s|0' "$run"; return 2
+      }
   fi
   mkdir -p "$INDEX_DIR" 2>/dev/null && printf '%s' "$run" > "$INDEX_DIR/$2" 2>/dev/null
   printf '%s|%s' "$run" "$in_repo"

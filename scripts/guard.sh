@@ -11,9 +11,9 @@ sid=$(jq -r '.session_id // empty' <<<"$input")
 cwd=$(jq -r '.cwd // empty' <<<"$input")
 tool=$(jq -r '.tool_name // empty' <<<"$input")
 [ -n "$sid" ] && [ -n "$cwd" ] && [ -n "$tool" ] || exit 0
-[ -d "$cwd" ] || exit 0
 
-resolved=$(resolve_run "$cwd" "$sid") || {
+resolved=$(resolve_run "$cwd" "$sid"); rc=$?
+if [ "$rc" -eq 1 ]; then
   # orch launches a session with --agent orchestrator:<role> before it registers it; a subagent
   # (agent_id set) of this plugin in some other session is not one.
   case "$(jq -r '.agent_type // empty' <<<"$input")|$(jq -r '.agent_id // empty' <<<"$input")" in
@@ -21,16 +21,22 @@ resolved=$(resolve_run "$cwd" "$sid") || {
     *) exit 0 ;;
   esac
   waited=0
-  until resolved=$(resolve_run "$cwd" "$sid"); do
+  while [ "$rc" -eq 1 ]; do
     if [ "$waited" -ge "${CLAUDE_ORCH_REGISTER_WAIT:-15}" ]; then
       printf 'orchestrator guard: unregistered team session; the orchestrator must register or stop it\n' >&2
       exit 2
     fi
     sleep 1; waited=$((waited + 1))
+    resolved=$(resolve_run "$cwd" "$sid"); rc=$?
   done
-}
+fi
 run_dir=${resolved%|*}
 in_repo=${resolved##*|}
+if [ "$rc" -eq 2 ]; then
+  log_event "$run_dir" "$sid" unknown "$tool" block "in the session index, no longer listed in its run"
+  printf 'orchestrator guard: this session was registered in run %s and is no longer listed there, or its sessions.json is unreadable; stop and tell the orchestrator.\n' "$(basename "$run_dir")" >&2
+  exit 2
+fi
 rec=$(session_json "$run_dir" "$sid")
 if [ -z "$rec" ] || [ "$rec" = null ]; then
   # Removed from the run with orch forget and still running: held, never set free.
@@ -108,6 +114,7 @@ esac
 
 # A registered session whose working directory left the repository is held, not released.
 if [ "$in_repo" != 1 ]; then
+  [ -d "$cwd" ] || block "your working directory ($cwd) no longer exists; cd back into your worktree before running or editing anything"
   block "your working directory ($cwd) is outside the repository of run $(basename "$run_dir"); cd back into your worktree before running or editing anything"
 fi
 # Nor may it sit inside the orchestrator's own directories, where relative paths would dodge the checks below.
