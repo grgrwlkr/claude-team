@@ -392,6 +392,19 @@ dev_at 2 "a cd into another session's worktree gets no pass" /tmp "cd $W3 && ls"
 dev_at 2 "nor a cd that runs in the background" /tmp "cd $WT & ls"
 dev_at 2 "nor a cd into the run dir" "$WT" "cd $RUN && touch x"
 dev_at 2 "a relative cd from a removed working directory gets no pass" "$WT/.scratch/gone" "cd src"
+
+echo "# audit guard F8: orch is a command only in command position"
+dev_cmd 0 "orch in a commit message is prose" "git commit -m 'docs: explain orch accept'"
+dev_cmd 0 "so is orch in a grep pattern" "grep -rn 'orch spawn' docs"
+dev_cmd 0 "orch handoff-put --help asks for help" "orch handoff-put --help 2>&1"
+dev_cmd 0 "so does orch -h" "orch -h"
+n=0
+for form in "ls && orch accept r1 impl" "ls || orch accept r1 impl" "ls | orch accept r1 impl" "echo \$(orch accept r1 impl)" \
+  "echo \"\`orch accept r1 impl\`\"" "env A=1 orch accept r1 impl" "command orch accept r1 impl" "exec orch accept r1 impl" \
+  "(orch accept r1 impl)" "$PLUGIN_ROOT/bin/orch accept r1 impl" "bash -c 'orch accept r1 impl'" "echo r1 | xargs orch accept" \
+  "orch pause r1 all --help" "orch init --help"; do
+  n=$((n + 1)); dev_cmd 2 "a lead command in command position is blocked, form $n: $form" "$form"
+done
 set_rec dev-1 '.budget = 2'
 
 echo "# stop gate"

@@ -153,9 +153,10 @@ sub_cmd() {
   for ((j = 0; j < ${#nv[@]}; j++)); do av[j]=${nv[$j]}; at[j]=${nt[$j]}; done
   cmd_targets
 }
-# cmd_targets: adds the write targets of the simple command in av/at.
-cmd_targets() {
-  local i=0 n=${#av[@]} c j a k=0 ip=0 sc=0 nv nt
+# cmd_word: sets ci to the command word of the simple command in av/at, past env, exec, nohup, VAR=… and the
+# like; fails when there is none.
+cmd_word() {
+  local i=0 n=${#av[@]}
   while [ "$i" -lt "$n" ]; do
     case "${av[$i]}" in
       '{'|'!'|if|then|else|elif|while|until|do|command|builtin|exec|nohup|time) ;;
@@ -166,9 +167,15 @@ cmd_targets() {
     esac
     i=$((i + 1))
   done
-  [ "$i" -lt "$n" ] || return 0
-  if [ "${at[$i]}" = U ]; then unres=1; return 0; fi
-  ci=$i c=${av[$i]##*/}
+  ci=$i
+  [ "$i" -lt "$n" ]
+}
+# cmd_targets: adds the write targets of the simple command in av/at.
+cmd_targets() {
+  local n=${#av[@]} c j a k=0 ip=0 sc=0 nv nt
+  cmd_word || return 0
+  if [ "${at[$ci]}" = U ]; then unres=1; return 0; fi
+  c=${av[$ci]##*/}
   case "$c" in
     cd|pushd)
       operands ""
@@ -347,6 +354,60 @@ others() {
   done < <(jq -r --arg n "$name" '.[] | select(.name != $n) | "\(.name)|\(.worktree // "")"' "$run_dir/sessions.json" 2>/dev/null)
 }
 
+# orch: read-only subcommands and the handoff channel are the session's; the rest is the lead's.
+# judge_orch <subcommand> <run> <name> <architecture arguments are none or --check: 1|0>
+judge_orch() {
+  case "$1" in ''|-h|--help) return 0 ;; esac
+  # these take the run first and die on a run named -h before doing anything
+  case "$2" in -h|--help)
+    case "$1" in accept|acceptance|address|approve|architecture|authorize|budget|cancel|close|cost|decide|events|forget|handoff|handoff-put|interactive|paths|pause|ready|resume|review|rm|spawn|stage-report|status|stop) return 0 ;; esac ;;
+  esac
+  case "$1" in
+    handoff-put)
+      [ "$2" = "$(basename "$run_dir")" ] || block "orch handoff-put may write only into your own run ($(basename "$run_dir")), not ${2:-<missing>}"
+      [ "$3" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${3:-<missing>}; run is $2" ;;
+    handoff|status|events|ready|doctor|tools) ;;
+    # --sync rewrites the generated rules every session loads; only the map's owner runs it.
+    architecture) [ "$role" = architect ] || [ "$4" = 1 ] || block "orch architecture takes only --check outside the architect's session; --sync regenerates the map's rules and is the architect's. Tell the architect what the map gets wrong." ;;
+    *) block "orch $1 is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools, architecture" ;;
+  esac
+}
+# orch_cmd: judges the simple command in av/at, whose command word at ci is orch. An argument built from an
+# expansion or a glob is not taken at its face value.
+orch_cmd() {
+  local k v
+  v=()
+  for ((k = ci + 1; k < ${#av[@]}; k++)); do
+    if [ "${at[$k]}" = W ]; then v[${#v[@]}]=${av[$k]}; else v[${#v[@]}]="<an expansion>"; fi
+  done
+  k=0
+  if [ "${#v[@]}" -le 1 ] || { [ "${#v[@]}" -eq 2 ] && [ "${v[1]}" = --check ]; }; then k=1; fi
+  judge_orch "${v[0]-}" "${v[1]-}" "${v[2]-}" "$k"
+}
+# scan_one: for the simple command in av/at, judges orch, and sets code when it runs code (a shell, an interpreter,
+# eval, xargs, find) or its command word is an expansion; that code may hold anything, so the text rules apply.
+scan_one() {
+  cmd_word || return 0
+  if [ "${at[$ci]}" != W ]; then code=1; return 0; fi
+  case "${av[$ci]##*/}" in
+    orch) orch_cmd ;;
+    bash|sh|zsh|dash|ksh|fish|csh|tcsh|python|python[0-9]*|node|nodejs|bun|deno|ruby|perl|php|lua|osascript|eval|source|.|xargs|find|awk|gawk|nawk|mawk|ssh) code=1 ;;
+  esac
+}
+# scan_cmds <command>: scan_one over every simple command of it, those in substitutions included.
+scan_cmds() {
+  local t v redir="" av at ci
+  av=() at=()
+  while IFS=$'\t' read -r t v; do
+    case "$t" in
+      W|U|G) [ -n "$redir" ] || { av[${#av[@]}]=$v; at[${#at[@]}]=$t; }; redir="" ;;
+      O|D|I) redir=$t ;;
+      *) scan_one; av=() at=(); redir="" ;;
+    esac
+  done < <(printf '%s' "$1" | shell_tokens)
+  scan_one
+}
+
 file_path=""
 case "$tool" in
   Edit|Write|MultiEdit|NotebookEdit)
@@ -479,36 +540,25 @@ case "$tool" in
   Bash|Monitor)
     cmd=$(jq -r '.tool_input.command // empty' <<<"$input")
     [ -n "$cmd" ] || allow
+    # orch is judged where it is a command: the start of one, after a separator, in a substitution, after env,
+    # command or exec, by name or by a path ending in /orch; not in the arguments of another command.
+    code=0
+    scan_cmds "$cmd"
     # Quotes and backslashes stripped, whitespace collapsed: `git "push" --force` reads as `git push --force`.
     flat=$(printf '%s' "$cmd" | tr -d '"'"'"'\\' | tr -s '[:space:]' ' ')
     # git with any global options before the subcommand: git -C dir push, git --git-dir=x reset …
     GIT='git( -[A-Za-z=/._-]+( [^ -][^ ]*)?)*'
     has() { printf '%s' "$flat" | grep -Eq "$1"; }
-    # orch: read-only subcommands and the handoff channel are the session's; the rest is the lead's.
-    # Every occurrence is checked, however orch is reached (bare, by path, via bash), and
-    # handoff-put may name only the caller's own session.
-    if has '(^|[;&| /])orch +[a-z-]'; then
+    # A command that runs code gets the text scan as well: every mention of orch is taken for a call.
+    if [ "$code" = 1 ] && has '(^|[;&| /])orch +[a-z-]'; then
       while IFS=' ' read -r sub _run arg2 _; do
-        case "$sub" in
-          handoff-put)
-            [ "$_run" = "$(basename "$run_dir")" ] || block "orch handoff-put may write only into your own run ($(basename "$run_dir")), not ${_run:-<missing>}"
-            [ "$arg2" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${arg2:-<missing>}; run is $_run" ;;
-          handoff|status|events|ready|doctor|tools) ;;
-          # --sync rewrites the generated rules every session loads; only the map's owner runs it. An
-          # allowlist over everything up to the next separator, not a match on --sync: a variable,
-          # a substitution or ${IFS} glued to the subcommand would hide the flag.
-          architecture)
-            if [ "$role" != architect ]; then
-              while IFS= read -r arch_tail; do
-                case "$arch_tail" in
-                  ''|' --check') ;;
-                  *) block "orch architecture takes only --check outside the architect's session; --sync regenerates the map's rules and is the architect's. Tell the architect what the map gets wrong." ;;
-                esac
-              done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +architecture[^;&|<>]*' | sed -E 's/^[;&| /]?orch +architecture//; s/ +$//')
-            fi ;;
-          *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools, architecture" ;;
-        esac
+        [ "$sub" = architecture ] || judge_orch "$sub" "$_run" "$arg2" 1
       done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^[;&| /]?orch +//')
+      # An allowlist over everything up to the next separator, not a match on --sync: a variable,
+      # a substitution or ${IFS} glued to the subcommand would hide the flag.
+      while IFS= read -r arch_tail; do
+        case "$arch_tail" in ''|' --check') ;; *) judge_orch architecture "" "" 0 ;; esac
+      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +architecture[^;&|<>]*' | sed -E 's/^[;&| /]?orch +architecture//; s/ +$//')
     fi
     if has "${GIT} push[^|;&]*( -f( |$)|--force)"; then block "force push is never allowed"; fi
     if has "${GIT} push[^|;&]*(^| |:|\+)$base( |$)"; then
