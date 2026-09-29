@@ -298,8 +298,18 @@ expect_exit 0 "entering its own worktree passes" bash "$GUARD" <<< "$(hook_input
 echo "# stop gate"
 expect_exit 0 "stop: unknown session passes" bash "$STOP" <<< "$(printf '{"session_id":"nobody","cwd":"%s","stop_hook_active":false}' "$WT")"
 expect_exit 2 "stop: no handoff blocks" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
+echo "wait for me" > "$RUN/PAUSE-dev-1"
+expect_exit 0 "audit guard F13: a session paused by name may stop without a handoff" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
+rm "$RUN/PAUSE-dev-1"
+echo "hold" > "$RUN/PAUSE"
+expect_exit 0 "audit guard F13: so may any session while the whole run is paused" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
+rm "$RUN/PAUSE"
 printf '# dev-1\n## Status\ndone\n' > "$RUN/handoffs/dev-1.md"
+: > "$RUN/events.log"
 expect_exit 0 "stop: handoff with Status passes" bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
+expect_grep '|sid-dev|dev-1|Stop|stop|' "$RUN/events.log" "audit cost F1: the stop is logged with decision stop"
+bash "$STOP" <<< "$(printf '{"session_id":"sid-dev","cwd":"%s","stop_hook_active":false}' "$WT")"
+expect_exit 0 "audit cost F1: stops do not spend the budget (dev-1 budget 2, two stops logged)" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
 expect_exit 0 "stop: second stop attempt passes to avoid loops" bash "$STOP" <<< "$(printf '{"session_id":"sid-int","cwd":"%s","stop_hook_active":true}' "$WT")"
 
 summary
