@@ -1557,8 +1557,9 @@ WT22="$REPO/.claude/worktrees/r22-dev-22"
 echo 'export const b = 2' > "$WT22/src/b.ts"; git -C "$WT22" add src/b.ts; git -C "$WT22" commit -qm 'b'
 echo 'export const c = 3' > "$WT22/src/c.ts"
 expect_exit 1 "continue refuses a task that is not a developer's" "$ORCH" continue r22 rev
+expect_grep 'for a developer task' "$TMP_BASE/err" "and says why"
 "$ORCH" review r22 rounds 1 > /dev/null
-: > "$TMP_BASE/claude.calls"
+: > "$TMP_BASE/claude.calls"; : > "$TMP_BASE/claude.cwd"
 expect_exit 0 "continue the developer that ran out of budget" "$ORCH" continue r22 dev-22 --budget 7
 expect_grep '--name dev-22-r2 ' "$TMP_BASE/claude.calls" "as the next round of the task, past the review rounds"
 expect_grep 'stopped at its budget' "$TMP_BASE/claude.calls" "the brief says why it continues"
