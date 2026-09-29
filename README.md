@@ -71,7 +71,7 @@ The plugin's `PreToolUse` hook watches every session registered in a run and blo
 - `git push --force`, `git reset --hard`, `git branch -D`, `git clean -f`, `sudo`, `curl … | sh`, `rm -r` on absolute paths;
 - pushing the base branch, and deleting branches or worktrees, unless the plan authorizes it and the session is the integrator; checkout of, or commits on, the base branch by anyone but the integrator;
 - package installs (`brew`, `apt`, `npm -g`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless the plan authorizes `install-tools`; a project-local `npm install` passes;
-- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `budget`, `task`, `paths`, `grant`, `cancel`, `stop`, `forget`, `cost`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`;
+- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `budget`, `task`, `paths`, `grant`, `cancel`, `stop`, `forget`, `cost`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`, `architecture` (`--sync` only the architect);
 - `claude stop|rm|kill|respawn` — sessions never stop each other;
 - `EnterWorktree` into anything but the worktree orch started the session in, so `claude rm` never gets a worktree it would delete with its branch;
 - `orch rm`, like the other lead subcommands, and `claude --bg`: a session a teammate started would outlive the run;

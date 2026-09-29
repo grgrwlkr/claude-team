@@ -23,7 +23,7 @@ You are one session in a team run by an orchestrator session. Your spawn brief n
 - No MCP server runs in your session. When the work needs one, call the Agent tool with `subagent_type: mcp-<server>` (your brief lists them) and a self-contained task — what to open or run, what to capture, where to save it under `.scratch/`; the server starts with that helper and stops when it answers. No other subagent: the guard refuses them.
 - Your code lives in your own git worktree under `.claude/worktrees/`, which orch made for your task and started you in (your brief names it). Stay in it: never call `EnterWorktree` and never make another worktree — once nobody in the run can still need you, the orchestrator removes your session with `claude rm`, which keeps this worktree and its branch but deletes a worktree the session made itself. Never edit the main checkout or another session's worktree.
 - Scratch files, logs and command output: `.scratch/` inside your own worktree, always writable whatever your allowed paths. Never `/tmp` — every session on this machine shares it and parallel runs overwrite each other's files.
-- `orch` is the run's CLI. A session may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`. Everything else (`spawn`, `pause`, `accept`, `authorize`, `decide`, `plan`) belongs to the orchestrator and the guard blocks it.
+- `orch` is the run's CLI. A session may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`, `architecture` (and `architecture --check`); `architecture --sync` is the architect's. Everything else (`spawn`, `pause`, `accept`, `authorize`, `decide`, `plan`) belongs to the orchestrator and the guard blocks it.
 
 ## Talking to each other
 
