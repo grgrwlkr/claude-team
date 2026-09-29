@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # PreToolUse guard for orchestrated team sessions.
 # Exit 2 blocks the tool call and tells the session why; exit 0 lets it through.
-# Inert (exit 0, no side effects) for any session not registered in a run's sessions.json.
+# Inert (exit 0, no side effects) for any session not registered in a run's sessions.json, except one
+# running this plugin's agent, which orch has yet to register and is held until it is.
 set -u
 . "$(dirname "$0")/lib.sh"
 
@@ -12,7 +13,22 @@ tool=$(jq -r '.tool_name // empty' <<<"$input")
 [ -n "$sid" ] && [ -n "$cwd" ] && [ -n "$tool" ] || exit 0
 [ -d "$cwd" ] || exit 0
 
-resolved=$(resolve_run "$cwd" "$sid") || exit 0
+resolved=$(resolve_run "$cwd" "$sid") || {
+  # orch launches a session with --agent orchestrator:<role> before it registers it; a subagent
+  # (agent_id set) of this plugin in some other session is not one.
+  case "$(jq -r '.agent_type // empty' <<<"$input")|$(jq -r '.agent_id // empty' <<<"$input")" in
+    'orchestrator:'*'|') ;;
+    *) exit 0 ;;
+  esac
+  waited=0
+  until resolved=$(resolve_run "$cwd" "$sid"); do
+    if [ "$waited" -ge "${CLAUDE_ORCH_REGISTER_WAIT:-15}" ]; then
+      printf 'orchestrator guard: unregistered team session; the orchestrator must register or stop it\n' >&2
+      exit 2
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+}
 run_dir=${resolved%|*}
 in_repo=${resolved##*|}
 rec=$(session_json "$run_dir" "$sid")

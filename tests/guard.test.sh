@@ -218,6 +218,18 @@ expect_exit 2 "a session may not run orch forget" bash "$GUARD" <<< "$(hook_bash
 rm "$RUN/forgotten.json"
 expect_exit 0 "an unregistered session stays unguarded" bash "$GUARD" <<< "$(hook_input dddd4444-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"
 
+echo "# audit F19: a session running one of this plugin's agents is a team session, registered or not"
+as_agent() { jq -c --arg t "$1" '. + {agent_type: $t}'; }
+expect_exit 2 "an unregistered orchestrator: agent session is held, not set free" env CLAUDE_ORCH_REGISTER_WAIT=1 bash "$GUARD" <<< "$(hook_input abab1212-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}' | as_agent orchestrator:developer)"
+expect_grep 'unregistered team session' "$TMP_BASE/err" "and is told the orchestrator must register or stop it"
+( sleep 1; jq '. + [{"taskId":"impl","name":"dev-late","role":"developer","id":"abab1212","sessionId":"","pathsAllowed":["src/**"],"budget":50}]' "$RUN/sessions.json" > "$RUN/late.tmp" && mv "$RUN/late.tmp" "$RUN/sessions.json" ) &
+expect_exit 2 "a session orch registers while the guard waits is judged by its record" env CLAUDE_ORCH_REGISTER_WAIT=10 bash "$GUARD" <<< "$(hook_input abab1212-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}' | as_agent orchestrator:developer)"
+wait
+expect_grep 'outside your allowed paths' "$TMP_BASE/err" "refused for its paths, not for being unregistered"
+expect_exit 0 "a subagent of this plugin in someone else's session is not a team session" env CLAUDE_ORCH_REGISTER_WAIT=1 bash "$GUARD" <<< "$(hook_input dddd4444-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}' | as_agent orchestrator:reviewer | jq -c '. + {agent_id: "agent-1"}')"
+expect_exit 0 "another plugin's agent session is not ours" env CLAUDE_ORCH_REGISTER_WAIT=1 bash "$GUARD" <<< "$(hook_input dddd4444-0000-4000-8000-000000000000 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}' | as_agent other:developer)"
+expect_exit 0 "the guard hooks outlast the registration wait, or a timeout would let the call through" jq -e '[.hooks.PreToolUse[].hooks[].timeout] | min > 15' "$PLUGIN_ROOT/hooks/hooks.json"
+
 echo "# a session stays in the worktree orch started it in"
 jq -r '.hooks.PreToolUse[].matcher' "$PLUGIN_ROOT/hooks/hooks.json" > "$TMP_BASE/matchers"
 expect_grep 'EnterWorktree' "$TMP_BASE/matchers" "PreToolUse routes EnterWorktree through the guard"

@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.sh\"",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       },
@@ -17,7 +17,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.sh\"",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       },
@@ -27,7 +27,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.sh\"",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       },
@@ -37,7 +37,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.sh\"",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }
