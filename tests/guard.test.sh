@@ -99,6 +99,11 @@ expect_exit 2 "orch reached by path is still policed" bash "$GUARD" <<< "$(hook_
 expect_exit 2 "orch via bash is still policed" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"bash /x/bin/orch authorize r1 push-base on"}')"
 expect_exit 2 "handoff-put under another session name is blocked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 int-1 < h.md"}')"
 expect_exit 0 "handoff-put under own name is allowed" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 dev-1 < h.md"}')"
+expect_exit 2 "audit F14: handoff-put into another run is blocked" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r2 dev-1 < h.md"}')"
+expect_grep 'own run (r1)' "$TMP_BASE/err" "the refusal names the session's own run"
+touch "$RUN/PAUSE-int-1"
+expect_exit 2 "audit F14: and gets no free pass while paused" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Bash '{"command":"orch handoff-put r2 int-1 < h.md"}')"
+rm "$RUN/PAUSE-int-1"
 
 echo "# installs are gated by the install-tools authorization"
 : > "$RUN/events.log"

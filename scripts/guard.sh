@@ -71,27 +71,27 @@ allow_free() {
   exit 0
 }
 
-# sole_handoff_put <command> <own name>: the command is nothing but `orch handoff-put <run> <own name>`
+# sole_handoff_put <command> <own name> <own run>: the command is nothing but `orch handoff-put <own run> <own name>`
 # fed by a file or by a quoted heredoc whose terminator is the last line and appears once.
 # Only then is a heredoc body prose. A chained command, an unquoted delimiter (its body expands),
 # a second terminator line or a heredoc fed to anything else gets the full scan below.
 # The command word is bare `orch` or this plugin's own bin/orch, nothing else: a session can write
 # a file named orch inside its allowed paths, and a pattern-matched name would run it unscanned.
 sole_handoff_put() {
-  local cmd="$1" me="$2" first rest delim last own
+  local cmd="$1" me="$2" run="$3" first rest delim last own
   own=$(cd "$(dirname "$0")/../bin" 2>/dev/null && pwd -P)/orch
   own=$(printf '%s' "$own" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
-  local head="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+[A-Za-z0-9._-]+[[:space:]]+([A-Za-z0-9-]+)[[:space:]]*"
+  local head="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+([A-Za-z0-9._-]+)[[:space:]]+([A-Za-z0-9-]+)[[:space:]]*"
   local re_file="${head}<[[:space:]]*[A-Za-z0-9._/~-]+[[:space:]]*\$"
   local re_doc="${head}<<[[:space:]]*(['\"])([A-Za-z_][A-Za-z0-9_]*)['\"][[:space:]]*\$"
   first=${cmd%%$'\n'*}
   if [ "$first" = "$cmd" ]; then
-    [[ "$cmd" =~ $re_file ]] && [ "${BASH_REMATCH[2]}" = "$me" ]
+    [[ "$cmd" =~ $re_file ]] && [ "${BASH_REMATCH[2]}" = "$run" ] && [ "${BASH_REMATCH[3]}" = "$me" ]
     return
   fi
   [[ "$first" =~ $re_doc ]] || return 1
-  [ "${BASH_REMATCH[2]}" = "$me" ] || return 1
-  delim=${BASH_REMATCH[4]}
+  [ "${BASH_REMATCH[2]}" = "$run" ] && [ "${BASH_REMATCH[3]}" = "$me" ] || return 1
+  delim=${BASH_REMATCH[5]}
   rest=${cmd#*$'\n'}
   [ "$(printf '%s\n' "$rest" | grep -cx -- "$delim")" -eq 1 ] || return 1
   last=$(printf '%s\n' "$rest" | awk 'NF {l=$0} END {print l}')
@@ -135,7 +135,7 @@ fi
 
 # Handing off must always be possible: a session out of budget or paused is told to write its
 # handoff and stop, and the Stop hook demands one. Same standing as a Write of the handoff file.
-if [ "$tool" = Bash ] && sole_handoff_put "$(jq -r '.tool_input.command // empty' <<<"$input")" "$name"; then
+if [ "$tool" = Bash ] && sole_handoff_put "$(jq -r '.tool_input.command // empty' <<<"$input")" "$name" "$(basename "$run_dir")"; then
   allow_free "handoff-put"
 fi
 
@@ -206,6 +206,7 @@ case "$tool" in
       while IFS=' ' read -r sub _run arg2 _; do
         case "$sub" in
           handoff-put)
+            [ "$_run" = "$(basename "$run_dir")" ] || block "orch handoff-put may write only into your own run ($(basename "$run_dir")), not ${_run:-<missing>}"
             [ "$arg2" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${arg2:-<missing>}; run is $_run" ;;
           handoff|status|events|ready|doctor|tools) ;;
           # --sync rewrites the generated rules every session loads; only the map's owner runs it. An
