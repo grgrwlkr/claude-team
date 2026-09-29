@@ -578,6 +578,16 @@ dev_cmd 0 "and after echo" "echo orch accept r1 impl"
 dev_cmd 0 "a session command behind a wrapper passes" "caffeinate orch status r1"
 dev_cmd 2 "sed's e command runs a shell, so its script is scanned" "sed -n '1e orch accept r1 impl' src/a.ts"
 dev_cmd 0 "a sed script that only substitutes is text" "sed -e 's/orch accept/x/' src/a.ts"
+
+echo "# stage Q: a developer asks for qa under its own name only"
+dev_cmd 0 "orch qa-request for the own name passes" "orch qa-request r1 dev-1 'the parser edge cases'"
+dev_cmd 2 "under another session's name it is blocked" "orch qa-request r1 int-1 'x'"
+expect_grep 'orch qa-request may ask only for your own task (dev-1)' "$TMP_BASE/err" "the own name is the reason"
+dev_cmd 2 "so is one into another run" "orch qa-request r2 dev-1 'x'"
+dev_cmd 2 "and one without a name" "orch qa-request r1"
+dev_cmd 2 "and another name inside code" "bash -c 'orch qa-request r1 int-1 x'"
+dev_cmd 2 "and behind a wrapper" "caffeinate orch qa-request r1 int-1 x"
+dev_cmd 0 "orch qa-request --help asks for help" "orch qa-request --help"
 set_rec dev-1 '.budget = 2'
 
 echo "# stop gate"

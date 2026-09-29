@@ -380,16 +380,19 @@ judge_orch() {
   case "$1" in ''|-h|--help) return 0 ;; esac
   # these take the run first and die on a run named -h before doing anything
   case "$2" in -h|--help)
-    case "$1" in accept|acceptance|address|approve|architecture|authorize|budget|cancel|close|cost|decide|events|forget|handoff|handoff-put|interactive|paths|pause|ready|resume|review|rm|spawn|stage-report|status|stop) return 0 ;; esac ;;
+    case "$1" in accept|acceptance|address|approve|architecture|authorize|budget|cancel|close|cost|decide|events|forget|handoff|handoff-put|interactive|paths|pause|qa-request|ready|resume|review|rm|spawn|stage-report|status|stop) return 0 ;; esac ;;
   esac
   case "$1" in
     handoff-put)
       [ "$2" = "$(basename "$run_dir")" ] || block "orch handoff-put may write only into your own run ($(basename "$run_dir")), not ${2:-<missing>}"
       [ "$3" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${3:-<missing>}; run is $2" ;;
+    qa-request)
+      [ "$2" = "$(basename "$run_dir")" ] || block "orch qa-request may ask only in your own run ($(basename "$run_dir")), not ${2:-<missing>}"
+      [ "$3" = "$name" ] || block "orch qa-request may ask only for your own task ($name), not ${3:-<missing>}; run is $2" ;;
     handoff|status|events|ready|doctor|tools) ;;
     # --sync rewrites the generated rules every session loads; only the map's owner runs it.
     architecture) [ "$role" = architect ] || [ "$4" = 1 ] || block "orch architecture takes only --check outside the architect's session; --sync regenerates the map's rules and is the architect's. Tell the architect what the map gets wrong." ;;
-    *) block "orch $1 is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools, architecture" ;;
+    *) block "orch $1 is the orchestrator's command; a session may use only orch handoff-put, qa-request, handoff, status, events, ready, doctor, tools, architecture" ;;
   esac
 }
 # orch_cmd <index>: judges the orch call in av/at whose orch word is at <index>. An argument built from an

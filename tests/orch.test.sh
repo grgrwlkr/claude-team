@@ -1235,4 +1235,49 @@ rmdir .orchestrator/r16/.lock; wait "$P16"
 jq -r '.[] | select(.name == "d16") | .budget' .orchestrator/r16/sessions.json > "$TMP_BASE/v"
 expect_grep '^44$' "$TMP_BASE/v" "and writes once the lock is free"
 
+echo "# stage Q: the fast flow — a developer asks for qa with orch qa-request: run r17 (staged, one stage)"
+expect_exit 0 "init r17" "$ORCH" init r17 --base main
+"$ORCH" acceptance r17 off > /dev/null
+cat > "$TMP_BASE/r17.json" <<'JSON'
+{"run":"r17","baseBranch":"main","tasks":[
+ {"id":"impl","role":"developer","name":"d17","goal":"code a","pathsAllowed":["src/a/**"],"acceptance":["x"],"dependsOn":[],"mcp":[]},
+ {"id":"other","role":"developer","name":"e17","goal":"code b","pathsAllowed":["src/b/**"],"acceptance":["x"],"dependsOn":[],"mcp":[]},
+ {"id":"qa-other","role":"qa","qaOf":"other","name":"qe17","goal":"cases b","pathsAllowed":["tests/qa/b/**"],"acceptance":["x"],"dependsOn":[],"mcp":[]},
+ {"id":"rev","role":"reviewer","reviewOf":"impl","name":"rev-17","goal":"review a","pathsAllowed":[],"acceptance":["x"],"dependsOn":["impl"],"mcp":[]},
+ {"id":"rev-other","role":"reviewer","reviewOf":"other","name":"reo-17","goal":"review b","pathsAllowed":[],"acceptance":["x"],"dependsOn":["other"],"mcp":[]}
+]}
+JSON
+with_arch "$TMP_BASE/r17.json"
+jq '.mode = "staged" | .stages = ["s1"] | .tasks |= map(.stage = "s1")' "$TMP_BASE/r17.json" > "$TMP_BASE/r17.tmp" && mv "$TMP_BASE/r17.tmp" "$TMP_BASE/r17.json"
+expect_exit 0 "plan r17" "$ORCH" plan r17 "$TMP_BASE/r17.json"
+"$ORCH" accept r17 arch fixture --force > /dev/null
+expect_exit 0 "brief of a developer no qa task covers" "$ORCH" brief r17 impl
+expect_grep 'orch qa-request r17 d17 "<what to check>"' "$TMP_BASE/out" "tells it how to ask for qa"
+expect_grep 'logic below the acceptance tests, risky edge cases, a UI state that needs running' "$TMP_BASE/out" "and when"
+expect_exit 0 "brief of a developer a qa task covers" "$ORCH" brief r17 other
+expect_no_grep 'qa-request' "$TMP_BASE/out" "has no such line: its qa is planned"
+expect_exit 0 "spawn d17" "$ORCH" spawn r17 impl
+expect_exit 0 "qa-request from a registered developer" "$ORCH" qa-request r17 d17 "the empty-input edge"
+expect_grep '^message the orchestrator: QA: qa-impl$' "$TMP_BASE/out" "prints the line to send"
+jq -r '.tasks[] | select(.id == "qa-impl") | "\(.name) \(.role) \(.qaOf) \(.dependsOn | join(",")) \(.pathsAllowed | join(",")) \(.budget) \(.stage)"' .orchestrator/r17/plan.json > "$TMP_BASE/v"
+expect_grep '^qa-d17 qa impl impl qa/d17/\*\* 60 s1$' "$TMP_BASE/v" "adds a qa task: qaOf and dependsOn the developer, its own paths, qa's budget, the developer's stage"
+jq -r '.tasks[] | select(.id == "qa-impl") | .goal' .orchestrator/r17/plan.json > "$TMP_BASE/v"
+expect_grep 'the empty-input edge' "$TMP_BASE/v" "the goal carries what to check"
+expect_grep '|qa-request|d17|qa-impl|allow|the empty-input edge' .orchestrator/r17/events.log "and the request is logged"
+"$ORCH" ready r17 > "$TMP_BASE/v"
+expect_no_grep '^qa-impl$' "$TMP_BASE/v" "the qa task waits for the developer's done"
+printf '# d17\n## Status\ndone\n' | "$ORCH" handoff-put r17 d17 > /dev/null
+"$ORCH" ready r17 > "$TMP_BASE/v"
+expect_grep '^qa-impl$' "$TMP_BASE/v" "and is ready once the developer's handoff says done"
+expect_exit 0 "its brief renders" "$ORCH" brief r17 qa-impl
+expect_grep 'qa of d17' "$TMP_BASE/out" "as the qa of the developer"
+expect_exit 1 "a second request for the same task is refused" "$ORCH" qa-request r17 d17 "more"
+expect_grep 'already has qa task qa-d17' "$TMP_BASE/err" "naming the qa task it has, by the name to message"
+expect_exit 1 "so is one for a task with a planned qa task, by a round's session name" "$ORCH" qa-request r17 e17-r2 "x"
+expect_grep 'already has qa task qe17' "$TMP_BASE/err" "naming the planned one"
+expect_exit 1 "a reviewer cannot ask for qa" "$ORCH" qa-request r17 rev-17 "x"
+expect_grep 'rev is a reviewer task' "$TMP_BASE/err" "only a developer task gets qa"
+expect_exit 1 "qa-request needs what to check" "$ORCH" qa-request r17 d17
+expect_exit 1 "qa-request refuses an unknown name" "$ORCH" qa-request r17 nobody "x"
+
 summary

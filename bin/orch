@@ -129,6 +129,7 @@ orch status <run> [--no-live]                     roster joined with claude agen
 orch events <run> [--since <line>]                guard log (blocks, budgets, pauses)
 orch handoff <run> <name>                         print a session's latest round's handoff, naming the earlier rounds
 orch handoff-put <run> <name> [--file <path>] [--by-lead "<source>"]   write a session's handoff from the file or stdin (works from inside a worktree); --by-lead stamps it as written by the orchestrator from that source
+orch qa-request <run> <name> "<what to check>"      a developer asks for qa of its task: adds a qa task after it (paths qa/<task name>/**) and prints the line to send the orchestrator
 orch accept <run> <task-id|name> ["<note>"] [--force]   the lead accepts a task, records its branch head, prints what became ready and removes sessions no open task needs. Refused for a task never spawned, cancelled, or whose handoff is none, partial or blocked, and for a branch that changed files outside its pathsAllowed. An architect task is accepted only when orch architecture --check passes in its worktree on a committed map; --force accepts anyway and says why in the note
 orch task add <run> <file|->                      add a task (or an array of tasks) through the plan's validation
 orch task set <run> <task-id|name> <field> <json> change one field of a task; budget and pathsAllowed reach live sessions too
@@ -803,6 +804,28 @@ cmd_handoff_put() {
   echo "handoff stored: $d/handoffs/$name.md"
 }
 
+# cmd_qa_request: the fast flow. qa is optional unless the run is interactive, so a developer that wants
+# its work checked adds the qa task itself, through the plan's validation, and tells the lead.
+cmd_qa_request() {
+  local run="${1:-}" who="${2:-}" what="${3:-}"
+  [ -n "$run" ] && [ -n "$who" ] && [ -n "$what" ] || die "qa-request <run> <your name> \"<what to check>\""
+  local d; d=$(run_dir "$run")
+  local id task role has tmp="$d/plan.edit.json"
+  id=$(resolve_task "$d" "$who") || die "no task or session '$who' in run $run"
+  task=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$d/plan.json")
+  role=$(jq -r '.role' <<<"$task")
+  [ "$role" = developer ] || die "qa-request asks for qa of a developer task; $id is a $role task"
+  has=$(jq -r --arg id "$id" "$JQ_DEFS"'first(.tasks[] | as_qa | select(.role == "qa" and .qaOf == $id) | .name) // empty' "$d/plan.json")
+  [ -z "$has" ] || die "task $id already has qa task $has; message it what to check"
+  jq --arg id "$id" --arg what "$what" --argjson t "$task" '.tasks += [{id: ("qa-" + $id), role: "qa", qaOf: $id, name: ("qa-" + $t.name),
+      goal: ("qa of " + $t.name + ", asked for by its developer: " + $what), pathsAllowed: ["qa/" + $t.name + "/**"],
+      acceptance: [$what], dependsOn: [$id]} + (if $t.stage == null then {} else {stage: $t.stage} end)]' "$d/plan.json" > "$tmp"
+  ( cmd_plan "$run" "$tmp" --replan ) > /dev/null || { rm -f "$tmp"; exit 1; }
+  rm -f "$tmp"
+  ev "$d" qa-request "$who" "qa-$id" allow "$what"
+  echo "message the orchestrator: QA: qa-$id"
+}
+
 render_brief() {
   local d="$1" id="$2" round="${3:-1}" budget_override="${4:-}"
   local task; task=$(jq -c --arg id "$id" "$JQ_DEFS"'.tasks[] | select(.id == $id) | as_qa' "$d/plan.json")
@@ -895,8 +918,11 @@ render_brief() {
   local notes="" note_names
   if [ "$role" = developer ]; then
     note_names=$(jq -r --arg id "$id" '[.tasks[] | select(.role == "qa" and .qaOf == $id) | .name] | join(", ")' "$d/plan.json")
-    [ -n "$note_names" ] && notes="$notes
+    if [ -n "$note_names" ]; then notes="$notes
 TDD cases: $note_names writes them before you start; wait for its FYI, cover every case, answer its audit"
+    else notes="$notes
+qa on request: no qa task covers yours. When it has logic below the acceptance tests, risky edge cases, a UI state that needs running to check, run orch qa-request $run $name \"<what to check>\" and send the orchestrator the QA: line it prints"
+    fi
     note_names=$(jq -r '[.tasks[] | select(.role == "qa-lead" and .phase == "author") | .pathsAllowed[]] | unique | join(", ")' "$d/plan.json")
     [ -n "$note_names" ] && notes="$notes
 acceptance tests (the qa-lead's): $note_names — never edit them; the change is done when they pass"
@@ -1827,6 +1853,7 @@ case "$cmd" in
   events) cmd_events "$@" ;;
   handoff) cmd_handoff "$@" ;;
   handoff-put) cmd_handoff_put "$@" ;;
+  qa-request) cmd_qa_request "$@" ;;
   accept) cmd_accept "$@" ;;
   address) cmd_address "$@" ;;
   authorize) cmd_authorize "$@" ;;
