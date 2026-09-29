@@ -7,7 +7,7 @@ SELF="$0"
 while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
 PLUGIN_ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
 RULES="$PLUGIN_ROOT/skills/orchestrator/references/team-rules.md"
-ROLES="analyst developer designer qa tester reviewer integrator researcher architect design-reviewer qa-lead"
+ROLES="analyst developer designer qa reviewer integrator researcher architect design-reviewer qa-lead"
 # closure($p; $id): every task $id depends on, directly or through others; safe on cycles.
 JQ_DEFS='
 def bad(msg): "ERROR: " + msg;
@@ -27,6 +27,8 @@ def paths_meet($a; $b):
     elif $wb | not then $b | startswith($a | lit)
     elif $wa | not then $a | startswith($b | lit)
     else ($a | lit) as $x | ($b | lit) as $y | ($x | startswith($y)) or ($y | startswith($x)) end;
+# as_qa: a plan stored before the tester role merged into qa still holds tester tasks; they run as qa.
+def as_qa: if .role == "tester" then .role = "qa" | .qaOf = (.qaOf // .verifies) else . end;
 '
 # Globs as regexes. glob_re: Claude Code's paths — ** any depth, * and ? within one directory, {a,b}
 # alternatives; module paths use it because they become path-scoped rules. guard_re: the guard's
@@ -147,7 +149,7 @@ orch stage-report <run> <stage>                   staged mode: an HTML page of t
 orch architecture                                 the architecture map's state in this worktree, the size of the job and the graph tools this stack has
 orch architecture --check                         the map against the current tree: coverage by modules.json, dead paths, changes since built-at, generated rules in sync
 orch architecture --sync                          write .claude/rules/architecture/<module>.md from docs/architecture/modules.json
-orch interactive <run> <on|off>                   require a tester task per developer task: run the app, verify visually
+orch interactive <run> <on|off>                   require a qa task per developer task, which also runs the app and verifies visually
 orch tools [--refresh]                            inventory of the machine's means to run and watch an app; the MCP list is cached for an hour
 orch budget <run> <task-id|name> <n>              change a task's budget mid-run, in the plan and in the live session's record the guard reads
 orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
@@ -231,6 +233,12 @@ cmd_plan() {
   [ -f "$file" ] || die "no such file $file"
   local d; d=$(run_dir "$run")
   jq -e . "$file" >/dev/null 2>&1 || die "$file is not valid JSON"
+  local src="$file"
+  if jq -e 'any(.tasks[]?; .role == "tester")' "$file" >/dev/null; then
+    jq -r '.tasks[] | select(.role == "tester") | "orch: task \(.id): role tester is now qa; rewritten with qaOf \(.qaOf // .verifies // "unset")"' "$file" >&2
+    jq "$JQ_DEFS"'.tasks |= map(if .role == "tester" then as_qa | del(.verifies) | if .qaOf == null then del(.qaOf) else . end else . end)' "$file" > "$d/plan.rewritten.json"
+    file="$d/plan.rewritten.json"
+  fi
   local roles_json; roles_json=$(printf '%s\n' $ROLES | jq -R . | jq -sc .)
   local err
   err=$(jq -r --argjson roles "$roles_json" "$JQ_DEFS"'
@@ -240,7 +248,7 @@ cmd_plan() {
     + ( [ .tasks[].name ] | group_by(.) | map(select(length > 1) | bad("duplicate name \(.[0])")) )
     + ( [ .tasks[].id ] | group_by(.) | map(select(length > 1) | bad("duplicate id \(.[0])")) )
     + ( . as $p | [ .tasks[] | .dependsOn[]? as $dep | select(($p.tasks | map(.id) | index($dep)) == null) | bad("task \(.id): dependsOn unknown task \($dep)") ] )
-    + ( [ .tasks[] | select((.role | IN("reviewer", "tester", "design-reviewer") | not) and ((.pathsAllowed // []) | length) == 0) | bad("task \(.id): pathsAllowed is empty; only the reviewer, the tester and the design-reviewer may own no paths") ] )
+    + ( [ .tasks[] | select((.role | IN("reviewer", "qa", "design-reviewer") | not) and ((.pathsAllowed // []) | length) == 0) | bad("task \(.id): pathsAllowed is empty; only the reviewer, qa and the design-reviewer may own no paths") ] )
     + ( . as $p
         | [ $p.tasks[] | select(.role == "developer") as $t
             | select(([ $p.tasks[] | select(.role == "reviewer")
@@ -265,14 +273,10 @@ cmd_plan() {
             | select(($shared | length) > 0)
             | bad("developer task \($t.id) may write the paths of \($q.role) task \($q.id) (\($shared | join(", "))): tests a developer must never edit; narrow its pathsAllowed") ] )
     + ( . as $p
-        | [ {f: "reviewOf", r: "reviewer"}, {f: "qaOf", r: "qa"}, {f: "designOf", r: "design-reviewer"}, {f: "verifies", r: "tester"}
+        | [ {f: "reviewOf", r: "reviewer"}, {f: "qaOf", r: "qa"}, {f: "designOf", r: "design-reviewer"}
             | . as $k | $p.tasks[] | select(has($k.f)) as $t
             | (if $t.role != $k.r then bad("task \($t.id): \($k.f) belongs on a \($k.r) task, not on a \($t.role)") else empty end),
               (if any($p.tasks[]; .id == $t[$k.f] and .role == "developer") then empty else bad("task \($t.id): \($k.f) \($t[$k.f]) names no developer task of this plan") end) ] )
-    + ( . as $p
-        | [ $p.tasks[] | select(.role == "developer") as $t
-            | select(([ $p.tasks[] | select(.role == "qa" and (.qaOf // "") == $t.id) ] | length) == 0)
-            | bad("task \($t.id) writes code and no qa task covers it; add a qa task with qaOf: \"\($t.id)\" that writes its TDD cases first and audits the result") ] )
     + ( . as $p
         | [ $p.tasks[] | select(.role == "designer") | .id ] as $des
         | if ($des | length) == 0 then [] else
@@ -316,9 +320,8 @@ cmd_plan() {
       def bad(msg): "ERROR: " + msg;
       . as $p
       | [ $p.tasks[] | select(.role == "developer") as $t
-          | select(([ $p.tasks[] | select(.role == "tester")
-                      | select(((.verifies // "") == $t.id) or (((.dependsOn // []) | index($t.id)) != null)) ] | length) == 0)
-          | bad("interactive verification is on and task \($t.id) has no tester task; add a tester task with verifies: \"\($t.id)\" that runs the app and checks the criteria") ]
+          | select(([ $p.tasks[] | select(.role == "qa" and (.qaOf // "") == $t.id) ] | length) == 0)
+          | bad("interactive verification is on and task \($t.id) has no qa task; add a qa task with qaOf: \"\($t.id)\" that also runs the app and checks the criteria") ]
       | .[]' "$file")
     if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
   fi
@@ -339,7 +342,7 @@ cmd_plan() {
       | .[]' "$file")
     if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
   fi
-  jq -r --arg f "$file" --argjson s "{\"authorize\":$auth,\"review\":$review,\"interactive\":$interactive,\"acceptance\":$acceptance}" \
+  jq -r --arg f "$src" --argjson s "{\"authorize\":$auth,\"review\":$review,\"interactive\":$interactive,\"acceptance\":$acceptance}" \
     '. as $p | $s | keys[] | select(. as $k | $p | has($k) and .[$k] != $s[$k])
      | "orch: warning: \(.) in \($f) differs from the stored value; orch plan keeps the stored one — set it with orch \(.) <run> …"' "$file" >&2
   # task add and task set come through here with --replan; their copy of the plan changes one task at a time.
@@ -354,12 +357,13 @@ cmd_plan() {
   fi
   local old; old=$(cat "$d/plan.json")
   jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" --argjson auth "$auth" --argjson review "$review" --argjson inter "$interactive" --argjson acc "$acceptance" --argjson archb "$archb" --argjson pv "$pv" \
-     '{developer: 120, reviewer: 30, "design-reviewer": 25, qa: 60, tester: 50, integrator: 50, analyst: 50, researcher: 70, designer: 70} as $budgets
+     '{developer: 120, reviewer: 30, "design-reviewer": 25, qa: 60, integrator: 50, analyst: 50, researcher: 70, designer: 70} as $budgets
       | .run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t | .authorize = $auth | .review = $review | .interactive = $inter | .acceptance = $acc
       | (if $pv == null then del(.pluginVersion) else .pluginVersion = $pv end)
       | .tasks |= map(.budget = (.budget // (if .role == "qa-lead" then (if .phase == "accept" then 40 else 80 end) elif .role == "architect" then $archb else ($budgets[.role] // 150) end)) | .model = (.model // "opus") | .effort = (.effort // "high") | .dependsOn = (.dependsOn // []) | .pathsAllowed = (.pathsAllowed // []) | .acceptance = (.acceptance // [])
           | if .role == "architect" then .pathsAllowed += (["docs/architecture/**", ".claude/rules/architecture/**"] - .pathsAllowed) else . end)' \
      "$file" > "$d/plan.json.tmp" && mv "$d/plan.json.tmp" "$d/plan.json"
+  rm -f "$d/plan.rewritten.json"
   if [ "$replan" = 1 ]; then
     lock_run "$d"
     jq --argjson old "$old" --slurpfile new "$d/plan.json" '
@@ -421,7 +425,7 @@ stage_gate() {
     | if $i == null then empty else [ $all[:$i][] | select(. as $x | ($ap[0] | map(.stage) | index($x)) == null) ] | first // empty end' "$1/plan.json"
 }
 
-# open_tasks <run_dir> [stage]: tasks neither accepted nor cancelled. A reviewer, tester, qa or
+# open_tasks <run_dir> [stage]: tasks neither accepted nor cancelled. A reviewer, qa or
 # design-reviewer task is settled with the task it covers: the lead accepts code, not reviews.
 open_tasks() {
   [ -f "$1/cancelled.json" ] || echo '[]' > "$1/cancelled.json"
@@ -467,14 +471,14 @@ task_done() {
     return 0
   fi
   if [ "$role" = developer ]; then
-    case "${3:-}" in reviewer|tester|qa|design-reviewer) ;; *) return 1 ;; esac
+    case "${3:-}" in reviewer|qa|design-reviewer) ;; *) return 1 ;; esac
   fi
   local h; h=$(latest_handoff "$1" "$name")
   [ -f "$h" ] && [ "$(handoff_word "$h")" = "done" ]
 }
 
 # handoff_state <run_dir> <name> <task-id>: accepted | settled | done | partial | blocked | failed | none.
-# settled: the task a review, test, qa or design review covers is accepted, as open_tasks counts it.
+# settled: the task a review, qa or design review covers is accepted, as open_tasks counts it.
 handoff_state() {
   if is_cancelled "$1" "$3"; then printf 'cancelled'; return; fi
   if [ -f "$1/accepted.json" ] && jq -e --arg id "$3" 'map(select(.taskId == $id)) | length > 0' "$1/accepted.json" >/dev/null 2>&1; then
@@ -638,7 +642,7 @@ cmd_interactive() {
   case "$value" in on|true|yes) value=true ;; off|false|no) value=false ;; *) die "interactive <run> <on|off>" ;; esac
   jq --argjson v "$value" '.interactive = $v' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
   if [ "$value" = true ]; then
-    echo "interactive verification on: every developer task needs a tester task (verifies: <id>); orch plan enforces it"
+    echo "interactive verification on: every developer task needs a qa task (qaOf: <id>), which also runs the app; orch plan enforces it"
   else
     echo "interactive verification off"
   fi
@@ -684,7 +688,7 @@ cmd_tools() {
   [ "${1:-}" = --refresh ] && refresh=1
   mcps=$(mcp_list "$refresh")
   has_mcp() { printf '%s' "$mcps" | grep -qi -- "$1"; }
-  echo "Means of running and watching an app on this machine (for the tester role; the lead asks the user before anything is installed):"
+  echo "Means of running and watching an app on this machine (for the qa role; the lead asks the user before anything is installed):"
   printf '%-11s %-24s %-10s %s\n' GROUP TOOL STATUS "INSTALL HINT"
   tool_row browser "claude-in-chrome MCP" 'has_mcp claude-in-chrome' "Claude in Chrome extension + /chrome in a session"
   tool_row browser "chrome-devtools MCP" 'has_mcp chrome-devtools' "claude mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest"
@@ -801,11 +805,11 @@ cmd_handoff_put() {
 
 render_brief() {
   local d="$1" id="$2" round="${3:-1}" budget_override="${4:-}"
-  local task; task=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$d/plan.json")
+  local task; task=$(jq -c --arg id "$id" "$JQ_DEFS"'.tasks[] | select(.id == $id) | as_qa' "$d/plan.json")
   [ -n "$task" ] || die "no task '$id' in plan"
   local dep
   for dep in $(jq -r '.dependsOn[]' <<<"$task"); do
-    task_done "$d" "$dep" "$(jq -r '.role' <<<"$task")" || die "task '$id' depends on '$dep', which is not done yet: its handoff must say done, and a developer task must also be accepted (orch accept) before anything but its reviewer, tester or QA builds on it"
+    task_done "$d" "$dep" "$(jq -r '.role' <<<"$task")" || die "task '$id' depends on '$dep', which is not done yet: its handoff must say done, and a developer task must also be accepted (orch accept) before anything but its reviewer, qa or design-reviewer builds on it"
   done
   local gate; gate=$(stage_gate "$d" "$(jq -r '.stage // ""' <<<"$task")")
   [ -z "$gate" ] || die "task '$id' is in stage $(jq -r '.stage' <<<"$task"), which waits for the user's approval of stage $gate (orch approve)"
@@ -836,13 +840,18 @@ render_brief() {
       review_line="review venue: $target_branch, read with $target_read — round $round of $max_rounds.
   Findings go into your handoff, most severe first, each with file, line, claim and evidence. On a re-review read the diff again from scratch and mark each earlier finding fixed, not fixed, or new."
     fi
-  elif [ "$role" = tester ]; then
-    local verifies target
-    verifies=$(jq -r '.verifies // ""' <<<"$task")
-    target=$(jq -r --arg id "$verifies" '.tasks[] | select(.id == $id) | .name' "$d/plan.json" 2>/dev/null)
-    review_line="interactive verification of ${target:-the task named in your goal} — round $round of $max_rounds.
+  elif [ "$role" = qa ]; then
+    local qa_dev qa_read="git diff $base...<its branch>"
+    qa_dev=$(jq -r --arg id "$(jq -r '.qaOf // ""' <<<"$task")" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
+    [ -n "$qa_dev" ] && qa_read="$(target_ref "$d" "$qa_dev"); git -C $(task_worktree "$d" "$qa_dev") diff $base...HEAD"
+    review_line="qa of ${qa_dev:-the developer task named in your goal} — round $round of $max_rounds.
+  Before the developer writes code: TDD test cases for its task in your allowed paths — every acceptance criterion, edge and failure case, each with its observable result. FYI: $qa_dev with the path, send a partial handoff, and wait for its DONE.
+  After DONE, audit its branch ($qa_read): every case covered by a test that fails when the behaviour breaks; nothing skipped, disabled, focused or weakened; no mock standing in for the unit under test; its baseline, red and green runs real — re-run them. Findings go to $qa_dev as Q:, the verdict into your handoff. A later round audits the fixes the same way."
+    if [ "$(jq -r '.interactive // false' "$d/plan.json")" = true ]; then
+      review_line="$review_line
   Run the application from its worktree the way the repository documents (README, package scripts, Makefile, docker compose), exercise every acceptance criterion as a user would, and capture evidence for each: screenshots, recordings, terminal transcripts, HTTP responses, logs. Evidence goes under .scratch/evidence/ in your worktree, named by criterion; paths go into the handoff.
   Means: run 'orch tools' first and pick from what is available for this target. Nothing is installed by you; when the run has no suitable means, report BLOCKED: with the exact tool and install command from 'orch tools' so the orchestrator can ask the user."
+    fi
     if [ "$(jq -r '.authorize.installTools // false' "$d/plan.json")" = true ]; then
       review_line="$review_line
   authorized for this run: installing the verification tooling 'orch tools' lists as missing (and only that)."
@@ -857,13 +866,6 @@ render_brief() {
       review_line="$review_line
   NOT authorized: creating or changing data in shared development databases or services. Use the fixtures, throwaway database or test setup the repository provides; a criterion that cannot be exercised without writing shared data is BLOCKED: to the orchestrator."
     fi
-  elif [ "$role" = qa ]; then
-    local qa_dev qa_read="git diff $base...<its branch>"
-    qa_dev=$(jq -r --arg id "$(jq -r '.qaOf // ""' <<<"$task")" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
-    [ -n "$qa_dev" ] && qa_read="$(target_ref "$d" "$qa_dev"); git -C $(task_worktree "$d" "$qa_dev") diff $base...HEAD"
-    review_line="qa of ${qa_dev:-the developer task named in your goal} — round $round of $max_rounds.
-  Before the developer writes code: TDD test cases for its task in your allowed paths — every acceptance criterion, edge and failure case, each with its observable result. FYI: $qa_dev with the path, send a partial handoff, and wait for its DONE.
-  After DONE, audit its branch ($qa_read): every case covered by a test that fails when the behaviour breaks; nothing skipped, disabled, focused or weakened; no mock standing in for the unit under test; its baseline, red and green runs real — re-run them. Findings go to $qa_dev as Q:, the verdict into your handoff. A later round audits the fixes the same way."
   elif [ "$role" = qa-lead ]; then
     if [ "$(jq -r '.phase' <<<"$task")" = author ]; then
       review_line="qa-lead, phase author: acceptance tests for the whole change, from the spec's criteria (or the OpenSpec change's scenarios), in your allowed paths and the repository's test framework. They fail now and pass when the change is done: run them once against $base and paste the red run. Developers make them green and never edit them; an untestable criterion is a Q: to the analyst."
@@ -875,7 +877,7 @@ render_brief() {
     dr_dev=$(jq -r --arg id "$(jq -r '.designOf // ""' <<<"$task")" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
     dr_des=$(jq -r '[.tasks[] | select(.role == "designer") | .name] | join(", ")' "$d/plan.json")
     review_line="design review of ${dr_dev:-the task named in your goal} against the brief and tokens of ${dr_des:-the designer} — round $round of $max_rounds.
-  Read the design handoff, then the implementation: run it from its worktree${dr_dev:+ ($(target_ref "$d" "$dr_dev"))} or use the tester's evidence, capture every screen and state the brief names into .scratch/evidence/, and compare layout, spacing, type, colour, states and motion. Each finding: the design reference, the screenshot, severity. Questions about intent go to ${dr_des:-the designer} as Q:; you edit nothing."
+  Read the design handoff, then the implementation: run it from its worktree${dr_dev:+ ($(target_ref "$d" "$dr_dev"))} or use qa's evidence, capture every screen and state the brief names into .scratch/evidence/, and compare layout, spacing, type, colour, states and motion. Each finding: the design reference, the screenshot, severity. Questions about intent go to ${dr_des:-the designer} as Q:; you edit nothing."
   elif [ "$role" = architect ]; then
     local map_rules="Keep docs/architecture/modules.json — every module with name, doc, paths (globs as in Claude Code: ** any depth, * within one directory) and summary, and ignore for what no module owns — then run 'orch architecture --sync', which writes .claude/rules/architecture/<module>.md: Claude Code loads each one when any session opens a file of that module. Commit the map and the rules on your branch. You are done only when 'orch architecture --check' passes in your worktree: the lead's orch accept runs it again there and refuses a map that fails or is not committed."
     if [ "$(jq -r '.phase' <<<"$task")" = design ]; then
@@ -1158,7 +1160,7 @@ listed_sessions() {
 spawn_one() {
   local d="$1" id="$2" dry="$3" round="${4:-1}" budget="${5:-}"
   local task name role model effort max_rounds
-  task=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$d/plan.json")
+  task=$(jq -c --arg id "$id" "$JQ_DEFS"'.tasks[] | select(.id == $id) | as_qa' "$d/plan.json")
   [ -n "$task" ] || die "no task '$id' in plan"
   # A later round usually needs less than the first; --budget sets this session's own brake.
   [ -n "$budget" ] && task=$(jq -c --argjson b "$budget" '.budget = $b' <<<"$task")
@@ -1753,7 +1755,7 @@ cmd_architecture() {
 cmd_close() {
   local d; d=$(run_dir "${1:-}"); local force=0
   [ "${2:-}" = --force ] && force=1
-  # A reviewer or tester task is settled with the task it covers: the lead accepts the code and
+  # A reviewer or qa task is settled with the task it covers: the lead accepts the code and
   # reads the review as its evidence.
   local open; open=$(open_tasks "$d") || die "could not work out which tasks are accepted; refusing to close"
   open=$(printf '%s' "$open" | tr '\n' ' ')

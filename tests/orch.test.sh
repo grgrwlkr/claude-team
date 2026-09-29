@@ -156,7 +156,7 @@ expect_exit 0 "round 2 dry-run" "$ORCH" spawn r1 rev --round 2 --dry-run
 expect_grep '--name rev-1-r2' "$TMP_BASE/out" "round 2 gets its own session name"
 expect_exit 1 "round beyond maxRounds is refused" "$ORCH" spawn r1 rev --round 3 --dry-run
 
-echo "# interactive verification: tools inventory, tester role, install authorization"
+echo "# interactive verification: tools inventory, qa runs the app, install authorization"
 expect_exit 0 "tools inventory runs" "$ORCH" tools
 expect_grep 'playwright MCP  *available' "$TMP_BASE/out" "inventory reads the stubbed claude, never the real one"
 expect_exit 0 "tools inventory runs again" "$ORCH" tools
@@ -169,31 +169,37 @@ expect_grep 'did not finish' "$TMP_BASE/err" "the timeout is said out loud"
 expect_grep 'browser' "$TMP_BASE/out" "inventory covers browser automation"
 expect_grep 'screenshot' "$TMP_BASE/out" "inventory covers screenshots"
 expect_grep 'available' "$TMP_BASE/out" "inventory marks each tool"
+expect_grep 'for the qa role' "$TMP_BASE/out" "the inventory is for qa, which runs the app"
+expect_exit 0 "qa brief with interactive off" "$ORCH" brief r1 qa
+expect_no_grep 'Run the application' "$TMP_BASE/out" "qa runs the app only when interactive is on"
 expect_exit 0 "interactive on" "$ORCH" interactive r1 on
 expect_grep '"interactive": true' .orchestrator/r1/plan.json "interactive flag stored"
-expect_exit 1 "plan with interactive on refuses a developer task without a tester" "$ORCH" plan r1 "$TMP_BASE/reviewed.json"
-expect_grep 'tester' "$TMP_BASE/err" "the refusal names the tester role"
+expect_grep 'needs a qa task' "$TMP_BASE/out" "interactive on says qa is required"
+jq 'del(.tasks[] | select(.id == "qa"))' "$TMP_BASE/reviewed.json" > "$TMP_BASE/noqa.json"
+expect_exit 1 "plan with interactive on refuses a developer task without a qa task" "$ORCH" plan r1 "$TMP_BASE/noqa.json"
+expect_grep 'task impl has no qa task; add a qa task with qaOf: "impl"' "$TMP_BASE/err" "the refusal names qa and qaOf"
 cat > "$TMP_BASE/tested.json" <<'JSON'
 {"run":"r1","baseBranch":"main","tasks":[
  {"id":"impl","role":"developer","name":"d1","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":50},
  {"id":"qa","role":"qa","name":"qa-1","goal":"cases and audit","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":[],"qaOf":"impl","budget":40},
  {"id":"rev","role":"reviewer","name":"rev-1","goal":"review impl","pathsAllowed":[],"acceptance":["findings cited"],"dependsOn":["impl"],"reviewOf":"impl","budget":40},
- {"id":"run","role":"tester","name":"tester-1","goal":"run the app and exercise the criteria","pathsAllowed":[],"acceptance":["every criterion has evidence"],"dependsOn":["impl"],"verifies":"impl","budget":80},
+ {"id":"run","role":"qa","name":"qa-run-1","goal":"run the app and exercise the criteria","pathsAllowed":[],"acceptance":["every criterion has evidence"],"dependsOn":["impl"],"qaOf":"impl","budget":80},
  {"id":"merge-task","role":"integrator","name":"int-1","goal":"merge","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":["rev","run"],"budget":60}
 ]}
 JSON
 with_arch "$TMP_BASE/tested.json"
-expect_exit 0 "plan with a tester per developer task is accepted" "$ORCH" plan r1 "$TMP_BASE/tested.json"
+expect_exit 0 "plan with a qa task per developer task is accepted" "$ORCH" plan r1 "$TMP_BASE/tested.json"
 expect_grep '"interactive": true' .orchestrator/r1/plan.json "interactive survives orch plan"
-"$ORCH" accept r1 impl "for the tester brief" --force > /dev/null
-expect_exit 0 "tester brief renders" "$ORCH" brief r1 run
-expect_grep 'evidence' "$TMP_BASE/out" "tester brief demands evidence"
-expect_grep 'orch tools' "$TMP_BASE/out" "tester brief points at the inventory"
-expect_grep 'install' "$TMP_BASE/out" "tester brief states the install policy"
+"$ORCH" accept r1 impl "for the qa brief" --force > /dev/null
+expect_exit 0 "qa brief renders" "$ORCH" brief r1 run
+expect_grep 'Run the application' "$TMP_BASE/out" "with interactive on the qa brief runs the app"
+expect_grep 'evidence' "$TMP_BASE/out" "qa brief demands evidence"
+expect_grep 'orch tools' "$TMP_BASE/out" "qa brief points at the inventory"
+expect_grep 'install' "$TMP_BASE/out" "qa brief states the install policy"
 expect_exit 0 "authorize install-tools" "$ORCH" authorize r1 install-tools on
 expect_grep '"installTools": true' .orchestrator/r1/plan.json "install authorization stored"
 expect_exit 0 "interactive off" "$ORCH" interactive r1 off
-expect_exit 0 "plan without testers is accepted again when interactive is off" "$ORCH" plan r1 "$TMP_BASE/reviewed.json"
+expect_exit 0 "plan without the app-running qa is accepted again when interactive is off" "$ORCH" plan r1 "$TMP_BASE/reviewed.json"
 
 echo "# acceptance gates what builds on code; verification roles start on the developer's done"
 expect_exit 0 "init second run" "$ORCH" init r2 --base main
@@ -298,7 +304,7 @@ cat > "$TMP_BASE/r4.json" <<'JSON'
  {"id":"impl","role":"developer","name":"d4","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":20,"mcp":["userA"]},
  {"id":"qa4","role":"qa","name":"qa-4","goal":"cases and audit","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":[],"qaOf":"impl","budget":10},
  {"id":"rev","role":"reviewer","name":"rev-4","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"reviewOf":"impl","budget":10},
- {"id":"run","role":"tester","name":"test-4","goal":"run the app","pathsAllowed":[],"acceptance":["z"],"dependsOn":["impl"],"verifies":"impl","budget":10},
+ {"id":"run","role":"qa","name":"test-4","goal":"run the app","pathsAllowed":[],"acceptance":["z"],"dependsOn":["impl"],"qaOf":"impl","budget":10},
  {"id":"merge-task","role":"integrator","name":"int-4","goal":"merge","pathsAllowed":["**"],"acceptance":["g"],"dependsOn":["impl","rev"],"budget":10},
  {"id":"docs","role":"researcher","name":"res-4","goal":"facts","pathsAllowed":["docs/research/**"],"acceptance":["q"],"dependsOn":[],"budget":10,"mcp":"inherit"}
 ]}
@@ -328,7 +334,14 @@ expect_exit 0 "developer hands off" sh -c "'$ORCH' handoff-put r4 d4 < '$TMP_BAS
 expect_exit 0 "a task without a list gets the repository's servers" "$ORCH" spawn r4 run --dry-run
 jq -r 'keys | join(",")' .orchestrator/r4/mcp/test-4.agents.json > "$TMP_BASE/keys"
 expect_grep '^mcp-repoB$' "$TMP_BASE/keys" "only .mcp.json by default: user and local servers carry personal credentials and need naming"
-expect_exit 0 "tester brief" "$ORCH" brief r4 run
+cp .orchestrator/r4/plan.json "$TMP_BASE/r4-plan.saved"
+jq '(.tasks[] | select(.id == "run")) |= (.role = "tester" | .verifies = .qaOf | del(.qaOf))' "$TMP_BASE/r4-plan.saved" > .orchestrator/r4/plan.json
+expect_exit 0 "a stored plan's tester task still spawns" "$ORCH" spawn r4 run --dry-run
+expect_grep '--agent orchestrator:qa ' "$TMP_BASE/out" "a stored tester task spawns the qa agent"
+expect_exit 0 "a stored tester task's brief renders" "$ORCH" brief r4 run
+expect_grep 'qa of d4 .* round 1' "$TMP_BASE/out" "and it is the qa brief, aimed at the task its verifies names"
+cp "$TMP_BASE/r4-plan.saved" .orchestrator/r4/plan.json
+expect_exit 0 "qa brief" "$ORCH" brief r4 run
 expect_grep 'MCP servers start on demand' "$TMP_BASE/out" "the brief says how servers start"
 expect_grep 'mcp-repoB' "$TMP_BASE/out" "and names the helpers"
 expect_exit 0 "a task can be given none" "$ORCH" task set r4 rev mcp '[]'
@@ -407,11 +420,11 @@ expect_grep 'knip.json' "$TMP_BASE/v" "the live session's record, which the guar
 expect_exit 1 "paths refuses an unknown task" "$ORCH" paths r4 nobody add x
 expect_exit 1 "paths needs at least one glob" "$ORCH" paths r4 d4 add
 
-echo "# wave 4: tester may or may not change dev data"
-expect_exit 0 "tester brief before" "$ORCH" brief r4 run
+echo "# wave 4: qa may or may not change dev data"
+expect_exit 0 "qa brief before" "$ORCH" brief r4 run
 expect_grep 'NOT authorized: creating or changing' "$TMP_BASE/out" "the default forbids writing shared dev data"
 expect_exit 0 "authorize mutate-data" "$ORCH" authorize r4 mutate-data on
-expect_exit 0 "tester brief after" "$ORCH" brief r4 run
+expect_exit 0 "qa brief after" "$ORCH" brief r4 run
 expect_grep 'authorized for this run: creating or changing' "$TMP_BASE/out" "the authorization reaches the brief"
 
 echo "# wave 4: cancel a task"
@@ -475,8 +488,7 @@ cat > "$TMP_BASE/r5.json" <<'JSON'
 JSON
 variant() { jq "$1" "$TMP_BASE/r5.json" > "$TMP_BASE/r5v.json"; }
 variant 'del(.tasks[] | select(.id == "qa"))'
-expect_exit 1 "a developer task without its qa task is refused" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
-expect_grep 'qaOf' "$TMP_BASE/err" "the refusal names qaOf"
+expect_exit 0 "a developer task without a qa task is accepted: qa is optional unless interactive is on" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
 variant 'del(.tasks[] | select(.id == "drev"))'
 expect_exit 1 "a developer task built on a design, with no design reviewer, is refused" "$ORCH" plan r5 "$TMP_BASE/r5v.json"
 expect_grep 'design-reviewer' "$TMP_BASE/err" "the refusal names the design-reviewer"
@@ -519,6 +531,7 @@ expect_grep 'audit' "$TMP_BASE/out" "and an audit after"
 "$ORCH" accept r5 impl ok --force > /dev/null
 expect_exit 0 "design reviewer brief" "$ORCH" brief r5 drev
 expect_grep 'des-5' "$TMP_BASE/out" "the design reviewer names the designer whose brief it checks"
+expect_grep "use qa's evidence" "$TMP_BASE/out" "the design reviewer may use qa's evidence"
 expect_exit 0 "qa-lead author brief" "$ORCH" brief r5 qal-a
 expect_grep 'acceptance tests for the whole change' "$TMP_BASE/out" "author phase"
 expect_exit 0 "architect brief" "$ORCH" brief r5 arch
@@ -1059,7 +1072,7 @@ cat > "$TMP_BASE/r15.json" <<'JSON'
  {"id":"rev-a","role":"reviewer","reviewOf":"a","name":"rev-a-15","goal":"review a","pathsAllowed":[],"acceptance":["x"],"dependsOn":["a"]},
  {"id":"rev-b","role":"reviewer","reviewOf":"b","name":"rev-b-15","goal":"review b","pathsAllowed":[],"acceptance":["x"],"dependsOn":["b"]},
  {"id":"drev","role":"design-reviewer","designOf":"a","name":"drev-15","goal":"check a","pathsAllowed":[],"acceptance":["x"],"dependsOn":["a"]},
- {"id":"run","role":"tester","verifies":"a","name":"test-15","goal":"run a","pathsAllowed":[],"acceptance":["x"],"dependsOn":["a"]},
+ {"id":"run","role":"qa","qaOf":"a","name":"test-15","goal":"run a","pathsAllowed":[],"acceptance":["x"],"dependsOn":["a"]},
  {"id":"int","role":"integrator","name":"int-15","goal":"merge","pathsAllowed":["**"],"acceptance":["x"],"dependsOn":["spec","res","des","acc","a","b","qa-a","qa-b","rev-a","rev-b","drev","run"]},
  {"id":"fin","role":"qa-lead","phase":"accept","name":"fin-15","goal":"accept","pathsAllowed":["docs/acceptance/**"],"acceptance":["x"],"dependsOn":["int"]}
 ]}
@@ -1088,9 +1101,14 @@ expect_grep 'developer task b may write the paths of qa-lead task acc' "$TMP_BAS
 r15_variant '(.tasks[] | select(.id == "rev-a") | .reviewOf) = "nope"'
 expect_exit 1 "plan refuses a reviewOf that names no task" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
 expect_grep 'task rev-a: reviewOf nope names no developer task' "$TMP_BASE/err" "the dangling reviewOf is the reason"
-r15_variant '(.tasks[] | select(.id == "run") | .verifies) = "spec"'
-expect_exit 1 "plan refuses a verifies that names an analyst task" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
-expect_grep 'task run: verifies spec names no developer task' "$TMP_BASE/err" "the wrong target role is the reason"
+r15_variant '(.tasks[] | select(.id == "run")) |= (.role = "tester" | .verifies = "spec" | del(.qaOf))'
+expect_exit 1 "plan refuses a tester whose verifies names an analyst task" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'task run: qaOf spec names no developer task' "$TMP_BASE/err" "the rewritten qaOf is checked like any other"
+r15_variant '(.tasks[] | select(.id == "run")) |= (.role = "tester" | .verifies = .qaOf | del(.qaOf))'
+expect_exit 0 "plan rewrites a tester task" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'task run: role tester is now qa; rewritten with qaOf a' "$TMP_BASE/err" "the rewrite is said on stderr"
+jq -r '.tasks[] | select(.id == "run") | "\(.role) \(.qaOf) \(has("verifies"))"' .orchestrator/r15/plan.json > "$TMP_BASE/v"
+expect_grep '^qa a false$' "$TMP_BASE/v" "the stored task is a qa task with qaOf, verifies gone"
 r15_variant '(.tasks[] | select(.id == "rev-b") | .designOf) = "b"'
 expect_exit 1 "plan refuses designOf on a reviewer" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
 expect_grep 'task rev-b: designOf belongs on a design-reviewer task' "$TMP_BASE/err" "the carrier's role is the reason"
@@ -1100,7 +1118,7 @@ expect_grep 'task qa-b: qaOf rev-a names no developer task' "$TMP_BASE/err" "a r
 expect_exit 0 "plan r15 without budgets" "$ORCH" plan r15 "$TMP_BASE/r15-ok.json"
 jq -r '.tasks | map("\(.id)=\(.budget)") | join(" ")' .orchestrator/r15/plan.json > "$TMP_BASE/v"
 ARCH15=$((40 + $(git ls-files | wc -l | tr -d ' ') / 20))
-expect_grep "^arch=$ARCH15 spec=50 res=70 des=70 acc=80 a=120 b=120 qa-a=60 qa-b=60 rev-a=30 rev-b=30 drev=25 run=50 int=50 fin=40\$" "$TMP_BASE/v" "every role gets its own default budget, the architect the orch architecture heuristic"
+expect_grep "^arch=$ARCH15 spec=50 res=70 des=70 acc=80 a=120 b=120 qa-a=60 qa-b=60 rev-a=30 rev-b=30 drev=25 run=60 int=50 fin=40\$" "$TMP_BASE/v" "every role gets its own default budget, the architect the orch architecture heuristic"
 "$ORCH" accept r15 arch fixture --force > /dev/null
 jq '.interactive = true | .authorize.pushBase = true' "$TMP_BASE/r15-ok.json" > "$TMP_BASE/r15-v.json"
 expect_exit 0 "plan with other run settings than the stored ones" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
