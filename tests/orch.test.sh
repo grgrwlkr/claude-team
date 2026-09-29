@@ -1043,4 +1043,80 @@ expect_grep '1 image reference(s) not found' "$TMP_BASE/out" "the report counts 
 expect_grep 'rev-14 <span class="role">reviewer</span></h2><p class="state">settled<' .orchestrator/r14/stages/s1/index.html "a review whose task is accepted reads settled"
 expect_exit 0 "a relative evidence path of a removed session resolves in its worktree" test -f .orchestrator/r14/stages/s1/img/d14-rel.png
 
+echo "# plan validation: live-together overlap, test paths, cover fields, default budgets, replan: run r15"
+expect_exit 0 "init r15" "$ORCH" init r15 --base main
+"$ORCH" acceptance r15 off > /dev/null
+cat > "$TMP_BASE/r15.json" <<'JSON'
+{"run":"r15","baseBranch":"main","tasks":[
+ {"id":"spec","role":"analyst","name":"an-15","goal":"spec","pathsAllowed":["docs/spec/**"],"acceptance":["x"],"dependsOn":[]},
+ {"id":"res","role":"researcher","name":"res-15","goal":"research","pathsAllowed":["docs/research/**"],"acceptance":["x"],"dependsOn":[]},
+ {"id":"des","role":"designer","name":"des-15","goal":"design","pathsAllowed":["docs/design/**"],"acceptance":["x"],"dependsOn":[]},
+ {"id":"acc","role":"qa-lead","phase":"author","name":"acc-15","goal":"acceptance tests","pathsAllowed":["tests/acceptance/**"],"acceptance":["x"],"dependsOn":[]},
+ {"id":"a","role":"developer","name":"da-15","goal":"code a","pathsAllowed":["src/a/**"],"acceptance":["x"],"dependsOn":[]},
+ {"id":"b","role":"developer","name":"db-15","goal":"code b","pathsAllowed":["src/b/**"],"acceptance":["x"],"dependsOn":[]},
+ {"id":"qa-a","role":"qa","qaOf":"a","name":"qa-a-15","goal":"cases a","pathsAllowed":["tests/qa/a/**"],"acceptance":["x"],"dependsOn":[]},
+ {"id":"qa-b","role":"qa","qaOf":"b","name":"qa-b-15","goal":"cases b","pathsAllowed":["tests/qa/b/**"],"acceptance":["x"],"dependsOn":[]},
+ {"id":"rev-a","role":"reviewer","reviewOf":"a","name":"rev-a-15","goal":"review a","pathsAllowed":[],"acceptance":["x"],"dependsOn":["a"]},
+ {"id":"rev-b","role":"reviewer","reviewOf":"b","name":"rev-b-15","goal":"review b","pathsAllowed":[],"acceptance":["x"],"dependsOn":["b"]},
+ {"id":"drev","role":"design-reviewer","designOf":"a","name":"drev-15","goal":"check a","pathsAllowed":[],"acceptance":["x"],"dependsOn":["a"]},
+ {"id":"run","role":"tester","verifies":"a","name":"test-15","goal":"run a","pathsAllowed":[],"acceptance":["x"],"dependsOn":["a"]},
+ {"id":"int","role":"integrator","name":"int-15","goal":"merge","pathsAllowed":["**"],"acceptance":["x"],"dependsOn":["spec","res","des","acc","a","b","qa-a","qa-b","rev-a","rev-b","drev","run"]},
+ {"id":"fin","role":"qa-lead","phase":"accept","name":"fin-15","goal":"accept","pathsAllowed":["docs/acceptance/**"],"acceptance":["x"],"dependsOn":["int"]}
+]}
+JSON
+with_arch "$TMP_BASE/r15.json"
+jq '.tasks[0] |= del(.budget)' "$TMP_BASE/r15.json" > "$TMP_BASE/r15-ok.json"
+r15_variant() { jq "$1" "$TMP_BASE/r15-ok.json" > "$TMP_BASE/r15-v.json"; }
+r15_variant '(.tasks[] | select(.id == "b") | .pathsAllowed) = ["src/a/ui/**"]'
+expect_exit 1 "plan refuses a glob inside another live task's glob" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'tasks a and b share paths src/a/\*\* ~ src/a/ui/\*\*' "$TMP_BASE/err" "the overlap is found by the literal prefix, not by equal strings"
+r15_variant '(.tasks[] | select(.id == "b")) |= (.pathsAllowed = ["src/a/**"] | .dependsOn = ["spec"])'
+expect_exit 1 "plan refuses equal globs of tasks with different dependencies that can run together" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'tasks a and b share paths src/a/\*\*' "$TMP_BASE/err" "different dependsOn is no sequencing"
+grep -c . "$TMP_BASE/err" > "$TMP_BASE/v"
+expect_grep '^1$' "$TMP_BASE/v" "each error is printed once"
+r15_variant '(.tasks[] | select(.id == "b")) |= (.pathsAllowed = ["src/a/**"] | .dependsOn = ["spec", "a"])'
+expect_exit 0 "plan accepts the same paths for a task that depends on the other" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+r15_variant '.mode = "staged" | .stages = ["s1", "s2"] | .tasks |= map(.stage = (if .id | IN("b", "rev-b", "int", "fin") then "s2" else "s1" end)) | (.tasks[] | select(.id == "b") | .pathsAllowed) = ["src/a/**"]'
+expect_exit 0 "plan accepts the same paths in two stages, which never run together" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+r15_variant '(.tasks[] | select(.id == "a")) |= (.pathsAllowed += ["tests/qa/a/cases.test.ts"] | .dependsOn = ["qa-a"])'
+expect_exit 1 "plan refuses a developer path inside its qa task's paths" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'developer task a may write the paths of qa task qa-a' "$TMP_BASE/err" "the qa task is named"
+r15_variant '(.tasks[] | select(.id == "b")) |= (.pathsAllowed += ["tests/**"] | .dependsOn = ["acc", "qa-a", "qa-b"])'
+expect_exit 1 "plan refuses a developer glob over the acceptance tests" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'developer task b may write the paths of qa-lead task acc' "$TMP_BASE/err" "the qa-lead author task is named"
+r15_variant '(.tasks[] | select(.id == "rev-a") | .reviewOf) = "nope"'
+expect_exit 1 "plan refuses a reviewOf that names no task" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'task rev-a: reviewOf nope names no developer task' "$TMP_BASE/err" "the dangling reviewOf is the reason"
+r15_variant '(.tasks[] | select(.id == "run") | .verifies) = "spec"'
+expect_exit 1 "plan refuses a verifies that names an analyst task" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'task run: verifies spec names no developer task' "$TMP_BASE/err" "the wrong target role is the reason"
+r15_variant '(.tasks[] | select(.id == "rev-b") | .designOf) = "b"'
+expect_exit 1 "plan refuses designOf on a reviewer" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'task rev-b: designOf belongs on a design-reviewer task' "$TMP_BASE/err" "the carrier's role is the reason"
+r15_variant '(.tasks[] | select(.id == "qa-b") | .qaOf) = "rev-a"'
+expect_exit 1 "plan refuses a qaOf that names a reviewer" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'task qa-b: qaOf rev-a names no developer task' "$TMP_BASE/err" "a reviewer is not a developer task"
+expect_exit 0 "plan r15 without budgets" "$ORCH" plan r15 "$TMP_BASE/r15-ok.json"
+jq -r '.tasks | map("\(.id)=\(.budget)") | join(" ")' .orchestrator/r15/plan.json > "$TMP_BASE/v"
+ARCH15=$((40 + $(git ls-files | wc -l | tr -d ' ') / 20))
+expect_grep "^arch=$ARCH15 spec=50 res=70 des=70 acc=80 a=120 b=120 qa-a=60 qa-b=60 rev-a=30 rev-b=30 drev=25 run=50 int=50 fin=40\$" "$TMP_BASE/v" "every role gets its own default budget, the architect the orch architecture heuristic"
+"$ORCH" accept r15 arch fixture --force > /dev/null
+jq '.interactive = true | .authorize.pushBase = true' "$TMP_BASE/r15-ok.json" > "$TMP_BASE/r15-v.json"
+expect_exit 0 "plan with other run settings than the stored ones" "$ORCH" plan r15 "$TMP_BASE/r15-v.json"
+expect_grep 'interactive in .* differs from the stored value' "$TMP_BASE/err" "plan warns that interactive stays as stored"
+expect_grep 'authorize in .* differs from the stored value' "$TMP_BASE/err" "and that authorize does"
+jq -r '.interactive' .orchestrator/r15/plan.json > "$TMP_BASE/v"
+expect_grep '^false$' "$TMP_BASE/v" "the stored value is kept"
+expect_exit 0 "spawn a" "$ORCH" spawn r15 a
+expect_exit 1 "plan refuses once a session is registered" "$ORCH" plan r15 "$TMP_BASE/r15-ok.json"
+expect_grep '--replan' "$TMP_BASE/err" "the refusal names --replan"
+jq '(.tasks[] | select(.id == "a")) |= (.budget = 77 | .pathsAllowed = ["src/a/**", "src/shared/**"])' "$TMP_BASE/r15-ok.json" > "$TMP_BASE/r15-v.json"
+expect_exit 0 "plan --replan" "$ORCH" plan r15 "$TMP_BASE/r15-v.json" --replan
+jq -r '.[] | select(.taskId == "a") | "\(.budget) \(.pathsAllowed | join(","))"' .orchestrator/r15/sessions.json > "$TMP_BASE/v"
+expect_grep '^77 src/a/\*\*,src/shared/\*\*$' "$TMP_BASE/v" "--replan syncs budget and pathsAllowed into the live session"
+expect_exit 0 "task set still works with a registered session" "$ORCH" task set r15 a budget 90
+jq -r '.[] | select(.taskId == "a") | .budget' .orchestrator/r15/sessions.json > "$TMP_BASE/v"
+expect_grep '^90$' "$TMP_BASE/v" "task set reaches the live session"
+
 summary

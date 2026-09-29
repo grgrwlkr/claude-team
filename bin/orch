@@ -18,6 +18,15 @@ def closure($p; $start):
       | if (.seen | index($x)) != null then .
         else .seen += [$x] | .todo += [$p.tasks[] | select(.id == $x) | (.dependsOn // [])[]] end)
   | .seen - [$start];
+# paths_meet($a; $b): two pathsAllowed globs may name one file. A literal path meets a glob that starts
+# with its literal part; two globs meet when one literal part is a prefix of the other. Conservative on purpose.
+def lit: sub("[*?\\[{].*$"; "");
+def paths_meet($a; $b):
+  ($a | test("[*?\\[{]")) as $wa | ($b | test("[*?\\[{]")) as $wb
+  | if ($wa | not) and ($wb | not) then $a == $b
+    elif $wb | not then $b | startswith($a | lit)
+    elif $wa | not then $a | startswith($b | lit)
+    else ($a | lit) as $x | ($b | lit) as $y | ($x | startswith($y)) or ($y | startswith($x)) end;
 '
 # Globs as regexes. glob_re: Claude Code's paths — ** any depth, * and ? within one directory, {a,b}
 # alternatives; module paths use it because they become path-scoped rules. guard_re: the guard's
@@ -101,7 +110,7 @@ usage() {
 orch doctor [--no-daemon]                         check claude, jq, git repo, PATH, background service
 orch start [--model M] [--fallback M] -- <task>   launch the lead session (default: the latest opus, effort high, no fallback)
 orch init <run> --base <branch> [--orchestrator <name>]
-orch plan <run> <plan.json>                       validate and store the task graph
+orch plan <run> <plan.json> [--replan]            validate and store the task graph; once sessions are registered only with --replan, which carries changed budgets and pathsAllowed into them
 orch ready <run>                                  tasks whose dependencies are done and that are not spawned
 orch brief <run> <task-id>                        print the brief a spawn would send
 orch spawn <run> <task-id> [--round N] [--budget N] [--dry-run]   spawn one task as a background session and register it
@@ -200,8 +209,9 @@ cmd_init() {
 }
 
 cmd_plan() {
-  local run="${1:-}" file="${2:-}"
-  [ -n "$run" ] && [ -n "$file" ] || die "plan <run> <plan.json>"
+  local run="${1:-}" file="${2:-}" replan=0
+  [ -n "$run" ] && [ -n "$file" ] || die "plan <run> <plan.json> [--replan]"
+  case "${3:-}" in '') ;; --replan) replan=1 ;; *) die "plan <run> <plan.json> [--replan]" ;; esac
   [ -f "$file" ] || die "no such file $file"
   local d; d=$(run_dir "$run")
   jq -e . "$file" >/dev/null 2>&1 || die "$file is not valid JSON"
@@ -220,12 +230,29 @@ cmd_plan() {
             | select(([ $p.tasks[] | select(.role == "reviewer")
                         | select(((.reviewOf // "") == $t.id) or (((.dependsOn // []) | index($t.id)) != null)) ] | length) == 0)
             | bad("task \($t.id) writes code and no reviewer task reviews it; add a reviewer task with reviewOf: \"\($t.id)\"") ] )
-    + ( [ .tasks[] | {id, wave: ((.dependsOn // []) | sort), paths: (.pathsAllowed // [])} ] as $t
+    # Two tasks can be live together unless one is in the dependency closure of the other, they sit in
+    # different stages of a staged run, or one is the architect design task, which every other task waits for.
+    # The integrator owns ** to resolve conflicts in the branches it merges, not to write work of its own.
+    + ( . as $p
+        | [ .tasks[] | select((.role == "architect" and .phase == "design") or .role == "integrator" | not)
+            | {id, stage: (.stage // ""), c: closure($p; .id), paths: (.pathsAllowed // [])} ] as $t
         | [ range(0; $t|length) as $i | range($i+1; $t|length) as $j
-            | select($t[$i].wave == $t[$j].wave)
-            | ($t[$i].paths - ($t[$i].paths - $t[$j].paths)) as $shared
+            | select(($t[$i].c | index($t[$j].id)) == null and ($t[$j].c | index($t[$i].id)) == null)
+            | select(($p.mode // "single") != "staged" or $t[$i].stage == $t[$j].stage)
+            | [ $t[$i].paths[] as $x | $t[$j].paths[] as $y | select(paths_meet($x; $y)) | if $x == $y then $x else "\($x) ~ \($y)" end ] as $shared
             | select(($shared | length) > 0)
-            | bad("tasks \($t[$i].id) and \($t[$j].id) share paths \($shared | join(", ")) in the same wave; sequence them or split the paths") ] )
+            | bad("tasks \($t[$i].id) and \($t[$j].id) share paths \($shared | join(", ")) and can run at the same time; sequence them or split the paths") ] )
+    + ( . as $p
+        | [ $p.tasks[] | select(.role == "developer") as $t
+            | $p.tasks[] | select(.role == "qa" or (.role == "qa-lead" and .phase == "author")) as $q
+            | [ ($t.pathsAllowed // [])[] as $x | ($q.pathsAllowed // [])[] as $y | select(paths_meet($x; $y)) | if $x == $y then $x else "\($x) ~ \($y)" end ] as $shared
+            | select(($shared | length) > 0)
+            | bad("developer task \($t.id) may write the paths of \($q.role) task \($q.id) (\($shared | join(", "))): tests a developer must never edit; narrow its pathsAllowed") ] )
+    + ( . as $p
+        | [ {f: "reviewOf", r: "reviewer"}, {f: "qaOf", r: "qa"}, {f: "designOf", r: "design-reviewer"}, {f: "verifies", r: "tester"}
+            | . as $k | $p.tasks[] | select(has($k.f)) as $t
+            | (if $t.role != $k.r then bad("task \($t.id): \($k.f) belongs on a \($k.r) task, not on a \($t.role)") else empty end),
+              (if any($p.tasks[]; .id == $t[$k.f] and .role == "developer") then empty else bad("task \($t.id): \($k.f) \($t[$k.f]) names no developer task of this plan") end) ] )
     + ( . as $p
         | [ $p.tasks[] | select(.role == "developer") as $t
             | select(([ $p.tasks[] | select(.role == "qa" and (.qaOf // "") == $t.id) ] | length) == 0)
@@ -295,11 +322,38 @@ cmd_plan() {
       | .[]' "$file")
     if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
   fi
-  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" --argjson auth "$auth" --argjson review "$review" --argjson inter "$interactive" --argjson acc "$acceptance" \
-     '.run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t | .authorize = $auth | .review = $review | .interactive = $inter | .acceptance = $acc
-      | .tasks |= map(.budget = (.budget // 150) | .model = (.model // "opus") | .effort = (.effort // "high") | .dependsOn = (.dependsOn // []) | .pathsAllowed = (.pathsAllowed // []) | .acceptance = (.acceptance // [])
+  jq -r --arg f "$file" --argjson s "{\"authorize\":$auth,\"review\":$review,\"interactive\":$interactive,\"acceptance\":$acceptance}" \
+    '. as $p | $s | keys[] | select(. as $k | $p | has($k) and .[$k] != $s[$k])
+     | "orch: warning: \(.) in \($f) differs from the stored value; orch plan keeps the stored one — set it with orch \(.) <run> …"' "$file" >&2
+  # task add and task set come through here with --replan; their copy of the plan changes one task at a time.
+  if [ "$replan" = 0 ] && jq -e 'length > 0' "$d/sessions.json" >/dev/null 2>&1; then
+    die "run $run has registered sessions and orch plan would change tasks under them: use orch task set, orch paths or orch budget, or orch plan $run $file --replan, which also carries each changed budget and pathsAllowed into the sessions of that task"
+  fi
+  local archb=0 r sha
+  if jq -e 'any(.tasks[]; .role == "architect" and .budget == null)' "$file" >/dev/null; then
+    r=$(arch_root); sha=$(arch_sha)
+    # The heuristic orch architecture prints: updating a map when there is one, building it otherwise.
+    if [ -n "$sha" ]; then archb=$((15 + $(git -C "$r" diff --name-only "$sha" HEAD | wc -l) / 5)); else archb=$((40 + $(git -C "$r" ls-files | wc -l) / 20)); fi
+  fi
+  local old; old=$(cat "$d/plan.json")
+  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" --argjson auth "$auth" --argjson review "$review" --argjson inter "$interactive" --argjson acc "$acceptance" --argjson archb "$archb" \
+     '{developer: 120, reviewer: 30, "design-reviewer": 25, qa: 60, tester: 50, integrator: 50, analyst: 50, researcher: 70, designer: 70} as $budgets
+      | .run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t | .authorize = $auth | .review = $review | .interactive = $inter | .acceptance = $acc
+      | .tasks |= map(.budget = (.budget // (if .role == "qa-lead" then (if .phase == "accept" then 40 else 80 end) elif .role == "architect" then $archb else ($budgets[.role] // 150) end)) | .model = (.model // "opus") | .effort = (.effort // "high") | .dependsOn = (.dependsOn // []) | .pathsAllowed = (.pathsAllowed // []) | .acceptance = (.acceptance // [])
           | if .role == "architect" then .pathsAllowed += (["docs/architecture/**", ".claude/rules/architecture/**"] - .pathsAllowed) else . end)' \
      "$file" > "$d/plan.json.tmp" && mv "$d/plan.json.tmp" "$d/plan.json"
+  if [ "$replan" = 1 ]; then
+    lock_run "$d"
+    jq --argjson old "$old" --slurpfile new "$d/plan.json" '
+      ($old.tasks | map({key: .id, value: .}) | from_entries) as $o
+      | ($new[0].tasks | map({key: .id, value: .}) | from_entries) as $n
+      | map(. as $s | ($n[$s.taskId] // null) as $t | ($o[$s.taskId] // {}) as $was
+          | if $t == null then .
+            else (if $t.budget != $was.budget then .budget = $t.budget else . end)
+               | (if $t.pathsAllowed != $was.pathsAllowed then .pathsAllowed = $t.pathsAllowed else . end) end)' \
+      "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
+    unlock_run "$d"
+  fi
   echo "plan stored: $(jq '.tasks | length' "$d/plan.json") tasks → $d/plan.json"
 }
 
@@ -1264,7 +1318,7 @@ cmd_task() {
       ;;
     *) die "task add <run> <file|-> | task set <run> <task-id|name> <field> <json>" ;;
   esac
-  ( cmd_plan "$run" "$tmp" ) || { rm -f "$tmp"; exit 1; }
+  ( cmd_plan "$run" "$tmp" --replan ) || { rm -f "$tmp"; exit 1; }
   rm -f "$tmp"
   case "$field" in
     budget|pathsAllowed)
