@@ -309,6 +309,26 @@ handoff_word() {
   awk '/^## Status/ {f=1; next} f && NF {print tolower($1); exit}' "$1" | tr -cd 'a-z'
 }
 
+# latest_handoff <run_dir> <name>: the path of the latest round's handoff — <name>-r<N>.md with the
+# highest N present, else <name>.md, whether or not that exists. A later round supersedes the first.
+latest_handoff() {
+  local f n best=1 path="$1/handoffs/$2.md"
+  for f in "$1/handoffs/$2"-r*.md; do
+    n=${f#"$1/handoffs/$2"-r}; n=${n%.md}
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    [ "$n" -gt "$best" ] && { best=$n; path=$f; }
+  done
+  printf '%s' "$path"
+}
+
+# target_ref <run_dir> <task name>: where a task's work is — its worktree, branch and current head.
+target_ref() {
+  local wt sha
+  wt=$(task_worktree "$1" "$2")
+  sha=$(git -C "$(repo_root)" rev-parse -q --verify "refs/heads/$(basename "$wt")^{commit}" 2>/dev/null) || sha="none yet (made when $2 is spawned)"
+  printf 'worktree %s, branch %s, head %s' "$wt" "$(basename "$wt")" "$sha"
+}
+
 # resolve_task <run_dir> <task-id|task name|session name>: the task id. A review round's session
 # name (<task name>-r<N>) resolves to its task. Fails when nothing matches.
 resolve_task() {
@@ -377,7 +397,7 @@ task_done() {
   if [ "$role" = developer ]; then
     case "${3:-}" in reviewer|tester|qa|design-reviewer) ;; *) return 1 ;; esac
   fi
-  local h="$1/handoffs/$name.md"
+  local h; h=$(latest_handoff "$1" "$name")
   [ -f "$h" ] && [ "$(handoff_word "$h")" = "done" ]
 }
 
@@ -387,7 +407,7 @@ handoff_state() {
   if [ -f "$1/accepted.json" ] && jq -e --arg id "$3" 'map(select(.taskId == $id)) | length > 0' "$1/accepted.json" >/dev/null 2>&1; then
     printf 'accepted'; return
   fi
-  local h="$1/handoffs/$2.md" word
+  local h word; h=$(latest_handoff "$1" "$2")
   [ -f "$h" ] || { printf 'none'; return; }
   word=$(handoff_word "$h")
   case "$word" in
@@ -672,19 +692,21 @@ render_brief() {
   review_of=$(jq -r '.reviewOf // ""' <<<"$task")
   [ "$round" -gt 1 ] && name="$name-r$round"
   if [ "$role" = reviewer ]; then
-    local target_name="" target_branch=""
+    local target_name="" target_branch="" target_read
     if [ -n "$review_of" ]; then
       target_name=$(jq -r --arg id "$review_of" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
-      target_branch="the branch of $target_name"
+      target_branch="the branch of $target_name ($(target_ref "$d" "$target_name"))"
+      target_read="git -C $(task_worktree "$d" "$target_name") diff $base...HEAD"
     else
       target_branch="the branch named in your task"
+      target_read="git diff $base...<that branch>"
     fi
     if [ "$venue" = pr ]; then
       review_line="review venue: the pull or merge request opened by $target_name — round $round of $max_rounds.
   Read the full diff, then leave every finding as its own thread on the changed line (gh pr review --comment -b … / gh api repos/{owner}/{repo}/pulls/{n}/comments, or glab mr note), plus one summary comment stating blocker / should fix / nit counts.
   Re-review means re-reading the diff from scratch on the new head and answering each of your earlier threads: fixed, not fixed, or new finding. Resolve only threads you confirmed fixed."
     else
-      review_line="review venue: $target_branch, read with git -C <its worktree> diff $base...HEAD — round $round of $max_rounds.
+      review_line="review venue: $target_branch, read with $target_read — round $round of $max_rounds.
   Findings go into your handoff, most severe first, each with file, line, claim and evidence. On a re-review read the diff again from scratch and mark each earlier finding fixed, not fixed, or new."
     fi
   elif [ "$role" = tester ]; then
@@ -709,10 +731,12 @@ render_brief() {
   NOT authorized: creating or changing data in shared development databases or services. Use the fixtures, throwaway database or test setup the repository provides; a criterion that cannot be exercised without writing shared data is BLOCKED: to the orchestrator."
     fi
   elif [ "$role" = qa ]; then
-    local qa_dev; qa_dev=$(jq -r --arg id "$(jq -r '.qaOf // ""' <<<"$task")" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
+    local qa_dev qa_read="git diff $base...<its branch>"
+    qa_dev=$(jq -r --arg id "$(jq -r '.qaOf // ""' <<<"$task")" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
+    [ -n "$qa_dev" ] && qa_read="$(target_ref "$d" "$qa_dev"); git -C $(task_worktree "$d" "$qa_dev") diff $base...HEAD"
     review_line="qa of ${qa_dev:-the developer task named in your goal} — round $round of $max_rounds.
   Before the developer writes code: TDD test cases for its task in your allowed paths — every acceptance criterion, edge and failure case, each with its observable result. FYI: $qa_dev with the path, send a partial handoff, and wait for its DONE.
-  After DONE, audit its branch (git -C <its worktree> diff $base...HEAD): every case covered by a test that fails when the behaviour breaks; nothing skipped, disabled, focused or weakened; no mock standing in for the unit under test; its baseline, red and green runs real — re-run them. Findings go to $qa_dev as Q:, the verdict into your handoff. A later round audits the fixes the same way."
+  After DONE, audit its branch ($qa_read): every case covered by a test that fails when the behaviour breaks; nothing skipped, disabled, focused or weakened; no mock standing in for the unit under test; its baseline, red and green runs real — re-run them. Findings go to $qa_dev as Q:, the verdict into your handoff. A later round audits the fixes the same way."
   elif [ "$role" = qa-lead ]; then
     if [ "$(jq -r '.phase' <<<"$task")" = author ]; then
       review_line="qa-lead, phase author: acceptance tests for the whole change, from the spec's criteria (or the OpenSpec change's scenarios), in your allowed paths and the repository's test framework. They fail now and pass when the change is done: run them once against $base and paste the red run. Developers make them green and never edit them; an untestable criterion is a Q: to the analyst."
@@ -724,7 +748,7 @@ render_brief() {
     dr_dev=$(jq -r --arg id "$(jq -r '.designOf // ""' <<<"$task")" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
     dr_des=$(jq -r '[.tasks[] | select(.role == "designer") | .name] | join(", ")' "$d/plan.json")
     review_line="design review of ${dr_dev:-the task named in your goal} against the brief and tokens of ${dr_des:-the designer} — round $round of $max_rounds.
-  Read the design handoff, then the implementation: run it from its worktree or use the tester's evidence, capture every screen and state the brief names into .scratch/evidence/, and compare layout, spacing, type, colour, states and motion. Each finding: the design reference, the screenshot, severity. Questions about intent go to ${dr_des:-the designer} as Q:; you edit nothing."
+  Read the design handoff, then the implementation: run it from its worktree${dr_dev:+ ($(target_ref "$d" "$dr_dev"))} or use the tester's evidence, capture every screen and state the brief names into .scratch/evidence/, and compare layout, spacing, type, colour, states and motion. Each finding: the design reference, the screenshot, severity. Questions about intent go to ${dr_des:-the designer} as Q:; you edit nothing."
   elif [ "$role" = architect ]; then
     local map_rules="Keep docs/architecture/modules.json — every module with name, doc, paths (globs as in Claude Code: ** any depth, * within one directory) and summary, and ignore for what no module owns — then run 'orch architecture --sync', which writes .claude/rules/architecture/<module>.md: Claude Code loads each one when any session opens a file of that module. Commit the map and the rules on your branch. You are done only when 'orch architecture --check' passes in your worktree: the lead's orch accept runs it again there and refuses a map that fails or is not committed."
     if [ "$(jq -r '.phase' <<<"$task")" = design ]; then
@@ -761,6 +785,8 @@ architecture map: $map_dir — read README.md, then $(brief_modules "$d" "$task"
 the architect's branch: $(basename "$awt") — merge it too: it carries the map and the rules this run was designed against"
     fi
   fi
+  [ "$role" = integrator ] && notes="$notes
+$(merge_list "$d" "$id" "$base")"
   if [ "$(jq -r '.mode // "single"' "$d/plan.json")" = staged ]; then
     notes="$notes
 stage: $(jq -r '.stage' <<<"$task") of $(jq -r '.stages | join(" → ")' "$d/plan.json"); the user approves each stage before the next one starts"
@@ -820,11 +846,20 @@ EOF
   local depname
   for dep in $(jq -r '.dependsOn[]' <<<"$task"); do
     depname=$(jq -r --arg id "$dep" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
-    printf '\n### %s (%s)\n' "$depname" "$dep"
-    cat "$d/handoffs/$depname.md"
+    printf '\n### %s (%s)\n%s — read its files there until the integrator merges it; handoff %s\n' "$depname" "$dep" "$(target_ref "$d" "$depname")" "$(basename "$(latest_handoff "$d" "$depname")")"
+    cat "$(latest_handoff "$d" "$depname")"
   done
   [ "$(jq -r '.dependsOn | length' <<<"$task")" -eq 0 ] && echo "(none)"
-  if [ "$round" -gt 1 ]; then
+  if [ "$round" -gt 1 ] && [ "$role" = developer ]; then
+    # The developer's own previous handoff says what it did; what it must answer is what the tasks covering it found.
+    printf '\n## Findings on your previous round: answer each — fixed, not fixed, or superseded\n'
+    local cov covh
+    for cov in $(jq -r --arg id "$id" '.tasks[] | select(.reviewOf == $id or .designOf == $id or .qaOf == $id) | .name' "$d/plan.json"); do
+      covh=$(latest_handoff "$d" "$cov")
+      printf '\n### %s (%s)\n' "$cov" "$(basename "$covh")"
+      if [ -f "$covh" ]; then cat "$covh"; else echo "(no handoff from $cov yet)"; fi
+    done
+  elif [ "$round" -gt 1 ]; then
     local prev; prev=$(jq -r '.name' <<<"$task")
     [ "$round" -gt 2 ] && prev="$prev-r$((round - 1))"
     printf '\n## Previous round (%s): answer each finding — fixed, not fixed, or superseded\n' "$prev"
@@ -856,6 +891,31 @@ brief_modules() {
     | if ($docs | length) == 0 then "the module docs your paths lead to (modules.json maps none of your files)"
       elif ($docs | length) == ($mj.modules | length) and ($docs | length) > 1 then "the modules as the work needs them: your paths span every module"
       else "only the modules your task touches: " + ($docs | join(", ")) end'
+}
+
+# merge_list <run_dir> <integrator's task id> <base>: every task branch of the run with commits not in
+# base, in the order dependsOn implies (plan order among tasks that are ready together), with its head.
+merge_list() {
+  local d="$1" root tname trole branch out=""
+  root=$(repo_root)
+  while read -r tname trole; do
+    branch=$(basename "$(task_worktree "$d" "$tname")")
+    git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null || continue
+    ! git -C "$root" merge-base --is-ancestor "$branch" "$3" 2>/dev/null || continue
+    out="$out
+- $tname ($trole): branch $branch, head $(git -C "$root" rev-parse "$branch")"
+  done <<EOF
+$(jq -r --arg me "$2" '
+  .tasks as $t
+  | {done: [], left: [$t[] | select(.id != $me)]}
+  | until((.left | length) == 0;
+      . as $s
+      | [ $s.left[] | select(all((.dependsOn // [])[]; . as $x | ($s.done | index($x)) != null or $x == $me)) ] as $r
+      | if ($r | length) == 0 then .done += [.left[].id] | .left = [] else .done += [$r[].id] | .left -= $r end)
+  | .done[] as $id | $t[] | select(.id == $id) | "\(.name) \(.role)"' "$d/plan.json")
+EOF
+  printf 'branches to merge (every task branch of the run with commits not in %s, in dependency order; heads as of this brief):%s' "$3" "${out:-
+(none yet)}"
 }
 
 cmd_brief() { local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "brief <run> <task-id>"; render_brief "$d" "$2" "${3:-1}"; }
@@ -1275,9 +1335,9 @@ cmd_stage_report() {
   for id in $(jq -r --arg s "$stage" '.tasks[] | select(.stage == $s) | .id' "$d/plan.json"); do
     name=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
     role=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .role' "$d/plan.json")
-    hs=$(handoff_state "$d" "$name" "$id"); h="$d/handoffs/$name.md"; pics=""
+    hs=$(handoff_state "$d" "$name" "$id"); h=$(latest_handoff "$d" "$name"); pics=""
     if [ -f "$h" ]; then
-      sid=$(jq -r --arg n "$name" 'first(.[] | select(.name == $n) | .id) // empty' "$d/sessions.json")
+      sid=$(jq -r --arg n "$(basename "$h" .md)" 'first(.[] | select(.name == $n) | .id) // empty' "$d/sessions.json")
       cwd=$(jq -r --arg id "$sid" 'first(.[] | select(.id == $id) | .cwd) // empty' <<<"$agents")
       for p in $(grep -oE '[^][:space:]()`"<>'"'"'[]+\.(png|jpe?g|gif|webp)' "$h" | sort -u); do
         case "$p" in /*) f="$p" ;; *) [ -n "$cwd" ] || continue; f="$cwd/$p" ;; esac

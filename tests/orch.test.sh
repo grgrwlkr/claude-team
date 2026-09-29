@@ -855,4 +855,60 @@ expect_exit 0 "architecture in a js repository" "$ORCH" architecture
 expect_grep 'no install' "$TMP_BASE/out" "npx one-shot is offered as allowed"
 rm -f package.json
 
+echo "# rounds, targets, dependencies: run r12"
+expect_exit 0 "init r12" "$ORCH" init r12 --base main
+"$ORCH" acceptance r12 off > /dev/null
+cat > "$TMP_BASE/r12.json" <<'JSON'
+{"run":"r12","baseBranch":"main","tasks":[
+ {"id":"spec","role":"analyst","name":"an-12","goal":"spec","pathsAllowed":["docs/spec/**"],"acceptance":["x"],"dependsOn":[],"budget":10},
+ {"id":"impl","role":"developer","name":"dev-12","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":["spec"],"budget":10},
+ {"id":"qa","role":"qa","name":"qa-12","goal":"cases","pathsAllowed":["docs/qa/**"],"acceptance":["x"],"dependsOn":["spec"],"qaOf":"impl","budget":10},
+ {"id":"rev","role":"reviewer","name":"rev-12","goal":"review","pathsAllowed":[],"acceptance":["x"],"dependsOn":["impl"],"reviewOf":"impl","budget":10},
+ {"id":"dr","role":"design-reviewer","name":"dr-12","goal":"design review","pathsAllowed":[],"acceptance":["x"],"dependsOn":["impl"],"designOf":"impl","budget":10},
+ {"id":"int","role":"integrator","name":"int-12","goal":"merge","pathsAllowed":["**"],"acceptance":["x"],"dependsOn":["impl","rev"],"budget":10}
+]}
+JSON
+with_arch "$TMP_BASE/r12.json"
+"$ORCH" plan r12 "$TMP_BASE/r12.json" > /dev/null
+"$ORCH" accept r12 arch fixture --force > /dev/null
+# Task branches as orch names them; the reviewer's has no commit of its own.
+for b in arch-r12 an-12 dev-12 qa-12 rev-12; do git worktree add -q -b "r12-$b" ".claude/worktrees/r12-$b" main; done
+for b in arch-r12 an-12 dev-12 qa-12; do (cd ".claude/worktrees/r12-$b" && echo "$b" > "$b.txt" && git add -A && git commit -qm "$b"); done
+SHA_AN=$(git rev-parse r12-an-12); SHA_DEV=$(git rev-parse r12-dev-12)
+printf '# an-12\n## Status\ndone\n' | "$ORCH" handoff-put r12 an-12 > /dev/null
+printf '# dev-12\n## Status\npartial\n## What I did\nDEV-R1-TEXT\n' | "$ORCH" handoff-put r12 dev-12 > /dev/null
+printf '# dev-12-r2\n## Status\ndone\n## What I did\nDEV-R2-TEXT\n' | "$ORCH" handoff-put r12 dev-12-r2 > /dev/null
+expect_exit 0 "ready after a later round's done" "$ORCH" ready r12
+expect_grep '^rev$' "$TMP_BASE/out" "the latest round's handoff decides: round 2 says done"
+echo '[{"taskId":"impl","name":"dev-12","role":"developer","id":"dddd1212","sessionId":"sid-d12","pathsAllowed":["src/**"],"budget":10}]' > .orchestrator/r12/sessions.json
+expect_exit 0 "status with a later round" "$ORCH" status r12 --no-live
+expect_grep '^dev-12 .* done ' "$TMP_BASE/out" "status shows the latest round's handoff state"
+expect_exit 0 "reviewer brief" "$ORCH" brief r12 rev
+expect_grep 'DEV-R2-TEXT' "$TMP_BASE/out" "the dependency pasted is the latest round's handoff"
+expect_no_grep 'DEV-R1-TEXT' "$TMP_BASE/out" "not the first round's"
+expect_no_grep '<its worktree>' "$TMP_BASE/out" "no placeholder left in the reviewer brief"
+expect_grep "worktrees/r12-dev-12, branch r12-dev-12, head $SHA_DEV" "$TMP_BASE/out" "reviewer brief names the target's worktree, branch and head"
+expect_exit 0 "qa brief" "$ORCH" brief r12 qa
+expect_no_grep '<its worktree>' "$TMP_BASE/out" "no placeholder left in the qa brief"
+expect_grep "worktrees/r12-dev-12, branch r12-dev-12, head $SHA_DEV" "$TMP_BASE/out" "qa brief names the target's worktree, branch and head"
+expect_exit 0 "design-reviewer brief" "$ORCH" brief r12 dr
+expect_grep "worktrees/r12-dev-12, branch r12-dev-12, head $SHA_DEV" "$TMP_BASE/out" "design-reviewer brief names the target's worktree, branch and head"
+expect_exit 0 "developer brief" "$ORCH" brief r12 impl
+expect_grep "worktrees/r12-an-12, branch r12-an-12, head $SHA_AN" "$TMP_BASE/out" "a dependency's header names its worktree, branch and head"
+printf '# rev-12\n## Status\ndone\n## Findings\nREV-R1-FINDING\n' | "$ORCH" handoff-put r12 rev-12 > /dev/null
+printf '# rev-12-r2\n## Status\ndone\n## Findings\nREV-R2-FINDING\n' | "$ORCH" handoff-put r12 rev-12-r2 > /dev/null
+printf '# qa-12\n## Status\ndone\n## Findings\nQA-FINDING\n' | "$ORCH" handoff-put r12 qa-12 > /dev/null
+printf '# dr-12\n## Status\ndone\n## Findings\nDR-FINDING\n' | "$ORCH" handoff-put r12 dr-12 > /dev/null
+expect_exit 0 "developer round-3 brief" "$ORCH" brief r12 impl 3
+expect_grep 'REV-R2-FINDING' "$TMP_BASE/out" "a developer round pastes the reviewer's latest findings"
+expect_no_grep 'REV-R1-FINDING' "$TMP_BASE/out" "not its earlier round"
+expect_grep 'QA-FINDING' "$TMP_BASE/out" "and qa's"
+expect_grep 'DR-FINDING' "$TMP_BASE/out" "and the design-reviewer's"
+expect_no_grep 'DEV-R2-TEXT' "$TMP_BASE/out" "not the developer's own previous handoff"
+"$ORCH" accept r12 impl ok > /dev/null
+expect_exit 0 "integrator brief" "$ORCH" brief r12 int
+grep ': branch r12-' "$TMP_BASE/out" | sed 's/.*: branch \(r12-[a-z0-9-]*\),.*/\1/' | tr '\n' ' ' > "$TMP_BASE/v"
+expect_grep '^r12-arch-r12 r12-an-12 r12-dev-12 r12-qa-12 $' "$TMP_BASE/v" "integrator brief lists every branch with commits off base, architect's included, in dependency order"
+expect_grep ": branch r12-dev-12, head $SHA_DEV" "$TMP_BASE/out" "with its head"
+
 summary
