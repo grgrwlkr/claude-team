@@ -950,7 +950,7 @@ cat > "$TMP_BASE/bin-garbled/claude" <<EOF
 echo "\$*" >> "$TMP_BASE/claude.calls"
 case "\$*" in
   *--bg*) echo "something claude --bg never printed before" ;;
-  agents*) echo '[{"id":"feed1234","name":"qa-13","kind":"background","state":"working"},{"id":"other999","name":"qa-13x","kind":"background","state":"working"}]' ;;
+  agents*) echo '[{"id":"feed1234","name":"qa-13","kind":"background","state":"working","cwd":"$REPO/.claude/worktrees/r13-qa-13"},{"id":"other999","name":"qa-13x","kind":"background","state":"working"},{"id":"elsewh01","name":"qa-13","kind":"background","state":"working","cwd":"/elsewhere/repo"}]' ;;
 esac
 EOF
 chmod +x "$TMP_BASE/bin-garbled/claude"
@@ -958,6 +958,7 @@ chmod +x "$TMP_BASE/bin-garbled/claude"
 expect_exit 1 "spawn dies when the session id cannot be parsed" env PATH="$TMP_BASE/bin-garbled:$PATH" "$ORCH" spawn r13 qa
 expect_grep '^stop feed1234$' "$TMP_BASE/claude.calls" "the session it launched, found by name, is stopped before it dies"
 expect_no_grep '^stop other999$' "$TMP_BASE/claude.calls" "no other session is stopped"
+expect_no_grep '^stop elsewh01$' "$TMP_BASE/claude.calls" "nor a session of the same name working in another directory"
 expect_grep 'feed1234' "$TMP_BASE/err" "and it says which session it stopped"
 expect_exit 1 "accept refuses a task never spawned" "$ORCH" accept r13 qa "looks fine"
 expect_grep 'never spawned' "$TMP_BASE/err" "and says why"
@@ -971,6 +972,9 @@ expect_grep 'partial' "$TMP_BASE/err" "the refusal says partial"
 printf '# d13\n## Status\nblocked on the user\n' | "$ORCH" handoff-put r13 d13 > /dev/null
 expect_exit 1 "accept refuses a blocked handoff" "$ORCH" accept r13 impl ok
 expect_grep 'blocked' "$TMP_BASE/err" "the refusal says blocked"
+printf '# d13\n## Status\nfailed — the build cannot run here\n' | "$ORCH" handoff-put r13 d13 > /dev/null
+expect_exit 1 "accept refuses a failed handoff" "$ORCH" accept r13 impl ok
+expect_grep 'failed' "$TMP_BASE/err" "the refusal says failed"
 printf '# d13\n## Status\ndone\n## Branch\nr13-d13\n' | "$ORCH" handoff-put r13 d13 > /dev/null
 mkdir -p "$WT13/src" "$WT13/docs" "$WT13/lib" "$WT13/.scratch"
 echo 'export const b = 2' > "$WT13/src/b.ts"; echo 'notes' > "$WT13/docs/notes.md"
@@ -1177,6 +1181,9 @@ expect_exit 0 "spawn dry-run of r16" "$ORCH" spawn r16 impl --dry-run
 expect_grep "^cd $REPO/.claude/worktrees/r16-d16 && env -u CLAUDE_CODE_CHILD_SESSION claude --agent orchestrator:developer " "$TMP_BASE/out" "dry-run prints the command the real spawn runs, in the worktree it runs in"
 expect_exit 1 "start refuses an unknown option" "$ORCH" start --effort max -- "x"
 expect_grep 'unknown option --effort' "$TMP_BASE/err" "the unknown option is named"
+# A watchdog: before the fix, --model with no value looped for ever.
+expect_exit 1 "start refuses --model without a value" bash -c "'$ORCH' start --model & p=\$!; ( sleep 5; kill \$p 2>/dev/null ) & w=\$!; wait \$p; r=\$?; kill \$w 2>/dev/null; exit \$r"
+expect_grep 'needs a value' "$TMP_BASE/err" "and says so"
 
 jq '.pluginVersion = "0.0.1"' .orchestrator/r16/plan.json > "$TMP_BASE/v" && mv "$TMP_BASE/v" .orchestrator/r16/plan.json
 expect_exit 0 "spawn dry-run on another plugin version" "$ORCH" spawn r16 impl --dry-run

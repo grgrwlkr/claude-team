@@ -199,8 +199,9 @@ cmd_start() {
   local model=opus fallback=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --model) model="$2"; shift 2 ;;
-      --fallback) fallback="$2"; shift 2 ;;
+      --model|--fallback) [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"
+        if [ "$1" = --model ]; then model="$2"; else fallback="$2"; fi
+        shift 2 ;;
       --) shift; break ;;
       -*) die "unknown option $1" ;;
       *) break ;;
@@ -584,7 +585,7 @@ $dirty"
   elif ! cat "$d/sessions.json" "$d/forgotten.json" 2>/dev/null | jq -s -e --arg id "$id" 'add | map(select(.taskId == $id)) | length > 0' >/dev/null; then
     why="it was never spawned"
   else
-    case "$hs" in none|partial|blocked) why="its handoff is $hs" ;; esac
+    case "$hs" in none|partial|blocked|failed) why="its handoff is $hs" ;; esac
   fi
   if [ -n "$why" ]; then
     [ "$force" -eq 1 ] || die "not accepting $id: $why. Read its handoff and its branch; orch accept … --force records the acceptance anyway, with the reason in the note"
@@ -1284,7 +1285,9 @@ spawn_one() {
   if [ -z "$sid_short" ]; then
     # Unregistered, the session would run outside every guard rule; it is stopped before orch gives up.
     local stray s
-    stray=$(claude agents --json --all 2>/dev/null | jq -r --arg n "$name" '.[] | select(.name == $n) | .id // empty' 2>/dev/null)
+    # By name and by the worktree it was started in: a session of the same name elsewhere is not this one.
+    stray=$(claude agents --json --all 2>/dev/null | jq -r --arg n "$name" --arg w "$wt" --arg p "$(cd "$wt" 2>/dev/null && pwd -P)" \
+      '.[] | select(.name == $n and ((.cwd // $w) as $c | $c == $w or $c == $p)) | .id // empty' 2>/dev/null)
     for s in $stray; do claude stop "$s" >/dev/null 2>&1 || echo "note: claude stop $s failed" >&2; done
     die "could not parse the session id from claude --bg output:
 $out
