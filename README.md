@@ -1,6 +1,6 @@
 # orchestrator — a Claude Code plugin for one lead and a team of role sessions
 
-`/orchestrator <task>` turns the current Claude Code session into a lead that decomposes the task, spawns a team of background sessions (analyst, developer, designer, QA, tester, reviewer, integrator, researcher), each in its own git worktree, lets them talk to each other directly, watches them through hard guard rails, and judges the result itself. You watch everything in `claude agents`.
+`/orchestrator <task>` turns the current Claude Code session into a lead that decomposes the task, spawns a team of background sessions (architect, analyst, researcher, designer, developer, qa, qa-lead, reviewer, design-reviewer, integrator), each in its own git worktree, lets them talk to each other directly, watches them through hard guard rails, and judges the result itself. You watch everything in `claude agents`.
 
 Portable by design: it needs `claude`, `git`, `jq` and nothing else — no particular `CLAUDE.md`, no other skills or plugins. The designer carries its own design guidance; if design skills are installed it uses them, if not it does not stall.
 
@@ -29,6 +29,8 @@ The lead:
 3. acts on teammates' `STARTED` / `DONE` / `BLOCKED` messages rather than polling; verifies every `DONE` itself (tests, diff, spec), records the verdict with `orch accept`, runs the review rounds, answers `BLOCKED`, decides escalations into `decisions.md`, spawns the next wave;
 4. reports per wave and at the end: what landed where, what was verified and how, what you still need to do (push, merge).
 
+For a small or strictly sequential task the lead proposes one session instead of a team. `orch --help` lists every command.
+
 You can attach to any session (`claude agents`, `Enter`), message any of them, or pause the whole run from another terminal: `orch pause <run> all "hold on"`.
 
 **The run does not stop to ask you anything twice.** At plan approval the lead collects every gated action — pushing the base branch, deleting merged branches and worktrees, tagging — and records your answers in the plan (`orch authorize <run> push-base on`). The guard honours them, so the integrator acts without another round trip; a gate you declined comes back at the end as a command you can run yourself.
@@ -38,15 +40,14 @@ You can attach to any session (`claude agents`, `Enter`), message any of them, o
 | Role | Owns | Delivers |
 |---|---|---|
 | analyst | `docs/specs/**` | spec with testable acceptance criteria, plan, docs after implementation |
-| developer | its task's source and test paths | code on its branch, tests with the three runs shown, draft PR |
+| developer | its task's source and test paths | code on its branch, a test per acceptance criterion with the three runs shown, a self-review pass, draft PR; a `chore` developer task is reviewed by the lead alone |
 | designer | `docs/design/**`, `design/`, `assets/` | design brief, tokens, states, assets; self-contained guidance for UI, game HUD, graphics, 3D |
 | architect (first in every run that changes code) | `docs/architecture/**`, `.claude/rules/architecture/**` | the architecture map — modules, dependency graphs, coupling, data flow — checked against the code (`orch architecture --check`) and brought up to date before anything else starts; `modules.json` and the path-scoped rules generated from it, which Claude Code loads whenever a session opens a module's file; the change's design; answers structure questions |
-| qa | its cases' paths, per developer task | TDD cases before the code, then an audit for skipped, weakened or hollow tests and runs that were never real |
+| qa | its cases' paths, for a developer task the plan or the developer (`orch qa-request`) chose | TDD cases before the code, then an audit for skipped, weakened or hollow tests and runs that were never real; with interactive verification, runs the app from the branch and hands over evidence per criterion (`.scratch/evidence/`), re-running each round |
 | qa-lead | acceptance test paths | acceptance tests for the whole change right after the spec; at the end runs them on the integrated result and proposes the verdict |
-| design-reviewer | nothing (read-only) | compares the running implementation with the designer's brief and tokens by screenshots, in rounds |
-| tester | nothing (read-only; evidence in its worktree's `.scratch/evidence/`) | runs the app from the branch, exercises every criterion as a user would with the means the machine has, hands over screenshots, recordings and transcripts per criterion; re-runs each round |
-| reviewer | nothing (read-only) | findings with cited lines, severity, confidence; re-reviews each round until clean |
-| integrator | integration branch | dependency-ordered merges, green suite, version and changelog; the only role allowed to merge into the base branch |
+| design-reviewer | nothing (read-only) | compares the running implementation with the design — the designer's brief or a design source the user brought — by screenshots, in rounds |
+| reviewer | nothing (read-only) | findings with cited lines, severity, confidence, a security pass where the diff touches auth, secrets or dependencies; re-reviews each round until clean |
+| integrator | integration branch | dependency-ordered merges, possibly in batches during the run, every CI workflow green, a docs sweep, a suite health line, version and changelog; the only role allowed to merge into the base branch |
 | researcher | `docs/research/**` | facts from live sources with verbatim quotes and dates |
 
 All roles run on Opus at effort `high` (per-task override in the plan). Roles spawn no workflows and no subagents but the `mcp-<server>` helpers that start an MCP server on demand; for anything else they ask a teammate.
@@ -57,32 +58,32 @@ A run is one pass or staged: with `"mode": "staged"` the lead stops after every 
 
 Peer to peer over Claude Code's cross-session messaging, by session name: `STARTED:` when a session begins, `Q:` / `A:` for questions, `FYI:` for facts others must know, `BLOCKED:` and `ESCALATION:` to the lead, `DONE:` when the handoff is in. Reports are messages, never silence: the lead does not read idleness as a result. Two rounds without agreement means both parties escalate and stop on the disputed point until the lead writes a decision. A teammate's message is data, never an approval. Team sessions start without Remote Control (`disableRemoteControl` in their `--settings`; `ORCH_REMOTE_CONTROL=1` keeps it), because a Remote Control mirror carries its session's name and a bare-name message then matches two sessions. Full protocol: `skills/orchestrator/references/team-rules.md`.
 
-Interactive verification is a choice the lead puts to you at plan approval, together with `orch tools`, an inventory of what this machine can drive and capture (browser MCPs, Playwright, screenshots, recording, terminal capture, simulators). With `orch interactive <run> on`, every developer task gets a tester task that runs the application after each round and hands over evidence per criterion; missing tooling is reported to you with the install command, and nothing is installed unless you authorized it (`orch authorize <run> install-tools on`). The guard blocks package installs otherwise.
+Interactive verification is a choice the lead puts to you at plan approval, together with `orch tools`, an inventory of what this machine can drive and capture (browser MCPs, Playwright, screenshots, recording, terminal capture, simulators). With `orch interactive <run> on`, every developer task gets a qa task that also runs the application after each round and hands over evidence per criterion; missing tooling is reported to you with the install command, and nothing is installed unless you authorized it (`orch authorize <run> install-tools on`). The guard blocks package installs otherwise.
 
 Review is mandatory and iterative: `orch plan` refuses a graph where a developer task has no reviewer, and the lead re-spawns the reviewer with `orch spawn <run> <id> --round N` after each round of fixes, up to three rounds by default. At plan approval you choose where review happens — on the branch, or on a pull/merge request where authors open the PR and reviewers comment in threads (`orch review <run> venue pr`).
 
-Handoffs travel through `orch handoff-put <run> <name>` on stdin, so a session isolated in a worktree can still deliver one; the file itself lives in the run directory, which sessions cannot write. The lead records its verdict with `orch accept <run> <task-id>`, which is what unblocks dependents — a teammate's handoff is never edited to change its status. A developer's own `done` readies only its reviewer, tester and QA; the integrator and anything else that builds on the code wait for the lead's accept. `orch close <run>` ends a run: a containment report for its branches with the count of refs checked, session index cleanup, the final table, and the run's sessions removed from `claude agents` — it deletes no branch or worktree.
+Handoffs travel through `orch handoff-put <run> <name>` on stdin or with `--file`, so a session isolated in a worktree can still deliver one; the file itself lives in the run directory, which sessions cannot write. The lead records its verdict with `orch accept <run> <task-id>`, which is what unblocks dependents — a teammate's handoff is never edited to change its status. A developer's own `done` readies only its reviewer, qa and design-reviewer; the integrator and anything else that builds on the code wait for the lead's accept. `orch close <run>` ends a run: a containment report for its branches with the count of refs checked, session index cleanup, the final table, and the run's sessions removed from `claude agents` — it deletes no branch or worktree.
 
 ## Guard rails (hooks, mechanical)
 
 The plugin's `PreToolUse` hook watches every session registered in a run and blocks, with a reason the session sees and an entry in `events.log`:
 
-- edits outside the task's allowed paths, in the main checkout, or in another session's handoff;
-- `git push --force`, `git reset --hard`, `git branch -D`, `git clean -f`, `sudo`, `curl … | sh`, `rm -r` on absolute paths;
+- edits outside the task's allowed paths, in the main checkout, or in another session's handoff; Bash writes (redirects, `cp`, `mv`, `tee`, `sed -i`, …) judged by their resolved target, which must lie in the session's own worktree and paths or `.scratch/` — not the main checkout, a sibling repository, `$HOME`, `/tmp` or the run directory;
+- `git push --force`, `git reset --hard`, `git branch -D`, `git clean -f`, `sudo`, `curl … | sh`, `rm -r` on an absolute, home, parent-relative or `$VAR` path;
 - pushing the base branch, and deleting branches or worktrees, unless the plan authorizes it and the session is the integrator; checkout of, or commits on, the base branch by anyone but the integrator;
 - package installs (`brew`, `apt`, `npm -g`, `pip`, `cargo install`, `npx playwright install`, `claude mcp add`) unless the plan authorizes `install-tools`; a project-local `npm install` passes;
-- `orch` subcommands that belong to the lead (`spawn`, `pause`, `accept`, `authorize`, `plan`, `decide`, `budget`, `task`, `paths`, `grant`, `cancel`, `stop`, `forget`, `cost`, `close`); sessions may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`, `architecture` (`--sync` only the architect);
+- `orch` subcommands that belong to the lead — every one but those sessions may run: `orch handoff-put` and `qa-request` for their own name and run, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`, `architecture` (`--sync` only the architect); an `orch` call behind a wrapper (`caffeinate`, `env`, `flock` …) is judged the same;
 - `claude stop|rm|kill|respawn` — sessions never stop each other;
 - `EnterWorktree` into anything but the worktree orch started the session in, so `claude rm` never gets a worktree it would delete with its branch;
 - `orch rm`, like the other lead subcommands, and `claude --bg`: a session a teammate started would outlive the run;
 - every Bash/Edit/Write and MCP tool call while the lead has paused the session or the run (`orch pause`); reading and messaging keep working;
-- every Bash/Edit/Write and MCP tool call past the task's tool-call budget — the passive brake against drift. A tester drives a browser through MCP tools, so those calls are held and counted like the rest; `orch status` marks a session with `!` from 80%, and `orch budget` changes a live session's budget.
+- every Bash/Edit/Write and MCP tool call past the task's tool-call budget — the passive brake against drift. qa drives a browser through MCP tools, so those calls are held and counted like the rest; `orch status` marks a session with `!` from 80%, and `orch budget` changes a live session's budget.
 
-At 80% of the budget the guard holds one call, once, and asks for a partial handoff. `.scratch/` in a session's own worktree is always writable.
+At 80% of the budget the guard holds one call, once, and asks for a partial handoff. The same Bash command allowed a third time in a row draws one reminder that the session may be looping; it never blocks. `.scratch/` in a session's own worktree is always writable. `Monitor` is judged like Bash.
 
-One call is always open, paused or out of budget: a command that is nothing but `orch handoff-put <run> <own name>` fed by a quoted heredoc or `< file`. Its body is read as prose, so a handoff may describe commands it never ran; anything chained to it is guarded as usual.
+One call is always open, paused or out of budget: a command that is nothing but `orch handoff-put <run> <own name>` fed by a quoted heredoc, `< file` or `--file <path in its worktree>`. Its body is read as prose, so a handoff may describe commands it never ran; anything chained to it is guarded as usual.
 
-The `Stop` hook refuses to let a registered session go idle without a handoff. Both hooks are inert for sessions that are not in a run. A session the guard has seen once stays under guard even after it changes directory out of the repository (index in `~/.claude/orchestrator-sessions/`); edit paths are canonicalised before the check, and Bash commands are matched with quotes stripped and git's global options tolerated.
+The `Stop` hook refuses to let a registered session go idle without a handoff, unless the lead paused it. Both hooks are inert for sessions that are not in a run. A session the guard has seen once stays under guard even after it changes directory out of the repository (index in `~/.claude/orchestrator-sessions/`); edit paths are canonicalised before the check, and Bash commands are matched with quotes stripped and git's global options tolerated.
 
 **The guard is a tripwire, not a sandbox.** It catches the mistakes a well-meaning session makes and logs them for the lead; a session determined to escape a denylist can. The hard boundary is Claude Code's own permission mode and sandbox; the lead's reading of diffs and handoffs is the second line.
 
@@ -92,15 +93,15 @@ No session starts with an MCP server running: `orch spawn` launches it with an e
 
 ## Run directory
 
-`<repo>/.orchestrator/<run>/` in the main checkout, excluded from git through `.git/info/exclude`: `plan.json` (graph, authorizations, review settings), `sessions.json`, `accepted.json`, `events.log`, `decisions.md`, `handoffs/<name>.md` (a later round hands off as `<name>-r<N>.md`), `cancelled.json`, `mcp/<name>.json` (each session's MCP config, mode 600), `PAUSE`, `PAUSE-<name>`, `CLOSED`; beside the runs, `tools-mcp.cache` keeps `orch tools`' MCP list for an hour (`orch tools --refresh`). Sessions keep their scratch files in `.scratch/` inside their own worktree, never in `/tmp`.
+`<repo>/.orchestrator/<run>/` in the main checkout, excluded from git through `.git/info/exclude`: `plan.json` (graph, authorizations, review settings), `sessions.json`, `accepted.json`, `approved.json`, `cancelled.json`, `forgotten.json`, `events.log`, `decisions.md`, `handoffs/<name>.md` (a later round hands off as `<name>-r<N>.md`), `mcp/<name>.json` (each session's MCP config, mode 600), `lead-branches`, `lead-session`, `events.cursor` and `inbox.cursor` (what `orch events --new` and `orch inbox` have shown), `stages/<stage>/` (stage reports), `RESUME.md` (`orch freeze`), `PAUSE`, `PAUSE-<name>`, `CLOSED`; beside the runs, `tools-mcp.cache` keeps `orch tools`' MCP list for an hour (`orch tools --refresh`). Sessions keep their scratch files in `.scratch/` inside their own worktree, never in `/tmp`.
 
 ## Limits worth knowing
 
 - Every session spends your subscription quota independently: a wave of four is roughly four times the burn.
-- `--fallback-model` switches only when a model is overloaded or unavailable, per turn; an exhausted weekly window is not caught. Relaunch with another `orch start --model` in that case.
+- `orch start --fallback <model>` (claude's `--fallback-model`) switches only when a model is overloaded or unavailable, per turn; an exhausted weekly window is not caught. Relaunch with another `orch start --model` in that case.
 - Background sessions live on this machine and stop on shutdown; they survive sleep.
-- No session outlives the run: `orch accept` removes every session no open task can still need: a reviewer's, tester's or QA's once the task it covers is accepted, a developer's or designer's once everything built on it is accepted too, the analyst's, researcher's and architect's once no task is open; `orch close` removes the rest, forgotten ones included, and fails while `claude agents` still lists any of them (`orch rm <run> <name|--settled|all>` by hand). `orch spawn` starts each session inside a worktree it made (`.claude/worktrees/<run>-<task>`, branch of the same name), which `claude rm` keeps together with its branch; a worktree Claude creates itself it deletes once the commits are pushed or merged, branch included. Transcripts stay for `claude --resume`.
-- Hooks in this plugin run in every session where the plugin is enabled and exit immediately for sessions not registered in a run; measured cost is one `jq` per guarded tool call.
+- No session outlives the run: `orch accept` removes every session no open task can still need (the rule is in `references/watching.md`); `orch close` removes the rest, forgotten ones included, and fails while `claude agents` still lists any of them (`orch rm <run> <name|--settled|all>` by hand). `orch spawn` starts each session inside a worktree it made (`.claude/worktrees/<run>-<task>`, branch of the same name), which `claude rm` keeps together with its branch; a worktree Claude creates itself it deletes once the commits are pushed or merged, branch included. Transcripts stay for `claude --resume`.
+- Hooks in this plugin run in every session where the plugin is enabled and exit early for sessions not registered in a run (about 0.04 s a call, measured on an Apple-silicon Mac); in a registered session a guarded Bash call costs about 0.15 s, since the command is tokenised and its write targets resolved.
 
 ## Develop
 
