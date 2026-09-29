@@ -1532,4 +1532,69 @@ expect_grep '^NOT contained in main: lead/r21-loose (lead)$' "$TMP_BASE/out" "cl
 expect_grep '^contained in main: lead/r21-in (lead)$' "$TMP_BASE/out" "and reports a contained one"
 [ "$(grep -c 'lead/r21-in' "$TMP_BASE/out")" -eq 1 ] && { PASS=$((PASS+1)); echo "ok   once"; } || { FAIL=$((FAIL+1)); echo "FAIL close printed:"; cat "$TMP_BASE/out"; }
 
+echo "# orch resume-brief, continue, freeze, thaw: run r22"
+"$ORCH" init r22 --base main > /dev/null 2>&1
+"$ORCH" acceptance r22 off > /dev/null
+cat > "$TMP_BASE/r22.json" <<'JSON'
+{"run":"r22","tasks":[
+ {"id":"code","role":"developer","name":"dev-22","goal":"build it","pathsAllowed":["src/**"],"acceptance":["green"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"rev","role":"reviewer","name":"rev-22","goal":"review it","pathsAllowed":[],"acceptance":["cited"],"dependsOn":["code"],"reviewOf":"code","budget":10,"mcp":[]}
+]}
+JSON
+with_arch "$TMP_BASE/r22.json"
+"$ORCH" plan r22 "$TMP_BASE/r22.json" > /dev/null
+"$ORCH" accept r22 arch fixture --force > /dev/null
+expect_exit 0 "resume-brief of a fresh run" "$ORCH" resume-brief r22
+expect_grep "^base: main at $(git rev-parse main)\$" "$TMP_BASE/out" "the brief names the base and its head"
+expect_grep '^code  *dev-22  *developer  *ready ' "$TMP_BASE/out" "every task with its state"
+expect_grep '^arch  *arch-r22  *architect  *accepted ' "$TMP_BASE/out" "accepted ones too"
+expect_grep '^orch spawn r22 --wave' "$TMP_BASE/out" "the next command spawns what is ready"
+expect_no_grep 'orch thaw' "$TMP_BASE/out" "an unpaused run needs no thaw"
+expect_exit 1 "continue refuses a task never spawned" "$ORCH" continue r22 code
+expect_grep 'never spawned' "$TMP_BASE/err" "and says why"
+"$ORCH" spawn r22 code > /dev/null 2>&1
+WT22="$REPO/.claude/worktrees/r22-dev-22"
+echo 'export const b = 2' > "$WT22/src/b.ts"; git -C "$WT22" add src/b.ts; git -C "$WT22" commit -qm 'b'
+echo 'export const c = 3' > "$WT22/src/c.ts"
+expect_exit 1 "continue refuses a task that is not a developer's" "$ORCH" continue r22 rev
+"$ORCH" review r22 rounds 1 > /dev/null
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "continue the developer that ran out of budget" "$ORCH" continue r22 dev-22 --budget 7
+expect_grep '--name dev-22-r2 ' "$TMP_BASE/claude.calls" "as the next round of the task, past the review rounds"
+expect_grep 'stopped at its budget' "$TMP_BASE/claude.calls" "the brief says why it continues"
+expect_grep 'git status' "$TMP_BASE/claude.calls" "and to finish from git status"
+expect_no_grep 'Findings on your previous round' "$TMP_BASE/claude.calls" "not a review round's brief"
+[ "$(tail -n 1 "$TMP_BASE/claude.cwd" | cut -d' ' -f2)" = "$WT22" ] && { PASS=$((PASS+1)); echo "ok   in the same worktree"; } || { FAIL=$((FAIL+1)); echo "FAIL continue ran in $(tail -n 1 "$TMP_BASE/claude.cwd")"; }
+expect_grep '"budget": 7' .orchestrator/r22/sessions.json "with the budget given"
+expect_grep '|orchestrator|code|continue|allow|dev-22-r2' .orchestrator/r22/events.log "continue is logged"
+"$ORCH" review r22 rounds 3 > /dev/null
+printf '# dev-22-r2\n## Status\ndone — finished from the stopped round\n' | "$ORCH" handoff-put r22 dev-22-r2 > /dev/null
+"$ORCH" decide r22 "Keep b.ts separate." > /dev/null
+"$ORCH" authorize r22 push-base on > /dev/null
+jq '. + [{"taskId":"rev","name":"rev-22","role":"reviewer","id":"dead2222","sessionId":"","pathsAllowed":[],"budget":10}]' .orchestrator/r22/sessions.json > "$TMP_BASE/s22" && mv "$TMP_BASE/s22" .orchestrator/r22/sessions.json
+"$ORCH" pause r22 dev-22 "hold" > /dev/null
+DEV22=$(jq -r '.[] | select(.name == "dev-22") | .id' .orchestrator/r22/sessions.json)
+expect_exit 1 "freeze needs a reason" "$ORCH" freeze r22
+: > "$TMP_BASE/claude.calls"
+expect_exit 0 "freeze r22" "$ORCH" freeze r22 "moving the run to the Pro"
+expect_grep 'moving the run to the Pro' .orchestrator/r22/PAUSE "freeze pauses every session"
+expect_grep "^stop $DEV22\$" "$TMP_BASE/claude.calls" "and stops them"
+expect_grep '|orchestrator|r22|freeze|allow|moving the run to the Pro' .orchestrator/r22/events.log "freeze is logged"
+R22=.orchestrator/r22/RESUME.md
+expect_grep '^paused: .*moving the run to the Pro' "$R22" "RESUME.md says why the run stopped"
+expect_grep "^base: main at $(git rev-parse main)\$" "$R22" "RESUME.md has the base head"
+expect_grep "^dev-22: r22-dev-22 at $(git -C "$WT22" rev-parse HEAD)\$" "$R22" "the task branches and their heads"
+expect_grep '^dev-22-r2: done — finished from the stopped round' "$R22" "each latest handoff's status"
+expect_grep '^rev-22 (dead2222)' "$R22" "the sessions"
+expect_grep 'Keep b.ts separate.' "$R22" "the decisions"
+expect_grep '^push-base$' "$R22" "the authorizations"
+expect_grep '^orch thaw r22' "$R22" "and thaw first among the next commands"
+expect_exit 0 "thaw r22" "$ORCH" thaw r22
+[ ! -f .orchestrator/r22/PAUSE ] && [ ! -f .orchestrator/r22/PAUSE-dev-22 ] && { PASS=$((PASS+1)); echo "ok   thaw drops every PAUSE file"; } || { FAIL=$((FAIL+1)); echo "FAIL PAUSE files left: $(ls .orchestrator/r22)"; }
+expect_grep '"dead2222"' .orchestrator/r22/forgotten.json "thaw forgets the sessions this machine does not run"
+expect_grep '^ready: rev$' "$TMP_BASE/out" "and prints what is ready"
+expect_grep '|orchestrator|r22|thaw|allow|' .orchestrator/r22/events.log "thaw is logged"
+expect_exit 0 "resume-brief after thaw" "$ORCH" resume-brief r22
+expect_no_grep 'orch thaw' "$TMP_BASE/out" "no thaw once thawed"
+
 summary

@@ -128,6 +128,7 @@ orch ready <run>                                  tasks whose dependencies are d
 orch brief <run> <task-id>                        print the brief a spawn would send
 orch spawn <run> <task-id> [--round N] [--budget N] [--dry-run]   spawn one task as a background session and register it
 orch spawn <run> --wave [--dry-run]               spawn every ready task
+orch continue <run> <task-id|name> [--budget N] [--dry-run]   the next round of a developer task whose session stopped at its budget, in the same worktree; its brief says to finish from git status
 orch status <run> [--no-live]                     roster joined with claude agents --json; TASK: calls of every round of the task, CTX: context size at the session's last turn
 orch events <run> [--since <line>|--new] [--blocks]   guard log (blocks, budgets, pauses); --new: the lines since the last --new, --blocks: block lines only
 orch runs                                         one line per run in this repo: state, open tasks, sessions claude agents lists, last event
@@ -163,6 +164,9 @@ orch tools [--refresh]                            inventory of the machine's mea
 orch budget <run> <task-id|name> <n|+n>           change a task's budget mid-run (+n adds), in the plan and in the live session's record the guard reads; the first budget stays as budgetInitial
 orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
 orch resume <run> <name|all>
+orch resume-brief <run>                           the run's state from its files: base head, tasks, branches and heads, latest handoffs, sessions, authorizations, last decisions, next commands — run it first after a restart
+orch freeze <run> "<why>"                         pause all, write RESUME.md (the resume brief), stop all: the run can go on later or on another machine
+orch thaw <run>                                   forget --dead, drop every PAUSE file, print what is ready
 orch decide <run> "<decision>" [--for <task>]...  append to decisions.md and log a decide event, one per --for task (else one for the run)
 orch lead-branch <run> <branch>                   register a branch the lead made itself, so close checks it is contained in the base
 orch close <run> [--force]                        containment report for the run's branches (session worktrees and handoffs), session index cleanup; removes every session of the run and fails while claude agents still lists one; only then writes CLOSED, --force recording the open tasks as cancelled
@@ -852,7 +856,7 @@ cmd_qa_request() {
 }
 
 render_brief() {
-  local d="$1" id="$2" round="${3:-1}" budget_override="${4:-}"
+  local d="$1" id="$2" round="${3:-1}" budget_override="${4:-}" cont="${5:-}"
   local task; task=$(jq -c --arg id "$id" "$JQ_DEFS"'.tasks[] | select(.id == $id) | as_qa' "$d/plan.json")
   [ -n "$task" ] || die "no task '$id' in plan"
   local dep
@@ -1032,7 +1036,13 @@ EOF
     cat "$(latest_handoff "$d" "$depname")"
   done
   [ "$(jq -r '.dependsOn | length' <<<"$task")" -eq 0 ] && echo "(none)"
-  if [ "$round" -gt 1 ] && [ "$role" = developer ]; then
+  if [ -n "$cont" ]; then
+    local prev; prev=$(jq -r '.name' <<<"$task")
+    [ "$round" -gt 2 ] && prev="$prev-r$((round - 1))"
+    printf '\n## Continue: %s stopped at its budget before it was done\n' "$prev"
+    printf 'Its work is in your worktree, committed or not: start from git status, git diff and git log %s..HEAD, and finish the task from there; do not start over. Its handoff, if it sent one:\n' "$base"
+    if [ -f "$d/handoffs/$prev.md" ]; then cat "$d/handoffs/$prev.md"; else echo "(no handoff from $prev)"; fi
+  elif [ "$round" -gt 1 ] && [ "$role" = developer ]; then
     # The developer's own previous handoff says what it did; what it must answer is what the tasks covering it found.
     printf '\n## Findings on your previous round: answer each — fixed, not fixed, or superseded\n'
     local cov covh
@@ -1211,19 +1221,20 @@ listed_sessions() {
 }
 
 spawn_one() {
-  local d="$1" id="$2" dry="$3" round="${4:-1}" budget="${5:-}"
+  local d="$1" id="$2" dry="$3" round="${4:-1}" budget="${5:-}" cont="${6:-}"
   local task name role model effort max_rounds
   task=$(jq -c --arg id "$id" "$JQ_DEFS"'.tasks[] | select(.id == $id) | as_qa' "$d/plan.json")
   [ -n "$task" ] || die "no task '$id' in plan"
   # A later round usually needs less than the first; --budget sets this session's own brake.
   [ -n "$budget" ] && task=$(jq -c --argjson b "$budget" '.budget = $b' <<<"$task")
   max_rounds=$(jq -r '.review.maxRounds // 3' "$d/plan.json")
-  [ "$round" -le "$max_rounds" ] || die "round $round exceeds the run's maxRounds ($max_rounds); the orchestrator decides what happens after the last round — accept with the findings recorded, or re-scope the task"
+  # A continuation finishes the same round's work, so it answers no review and takes none of its rounds.
+  [ -n "$cont" ] || [ "$round" -le "$max_rounds" ] || die "round $round exceeds the run's maxRounds ($max_rounds); the orchestrator decides what happens after the last round — accept with the findings recorded, or re-scope the task"
   name=$(jq -r '.name' <<<"$task"); role=$(jq -r '.role' <<<"$task"); model=$(jq -r '.model' <<<"$task"); effort=$(jq -r '.effort' <<<"$task")
   local task_name="$name"
   [ "$round" -gt 1 ] && name="$name-r$round"
   if jq -e --arg n "$name" 'map(select(.name == $n)) | length > 0' "$d/sessions.json" >/dev/null; then die "session '$name' is already registered; for another review round use --round $((round+1))"; fi
-  local brief; brief=$(render_brief "$d" "$id" "$round" "$budget") || exit 1
+  local brief; brief=$(render_brief "$d" "$id" "$round" "$budget" "$cont") || exit 1
   local extra=""
   [ -n "${ORCH_PERMISSION_MODE:-}" ] && extra="--permission-mode $ORCH_PERMISSION_MODE"
   local mcp agents_file=""
@@ -1307,6 +1318,33 @@ cmd_spawn() {
     [ -n "$id" ] || die "spawn <run> <task-id> [--round N] [--budget N] | --wave"
     spawn_one "$d" "$id" "$dry" "${round:-1}" "$budget"
   fi
+}
+
+# cmd_continue: a developer stopped by its budget leaves its work uncommitted in its worktree; the next
+# round's session starts there and finishes it, so the lead does not finish it by hand.
+cmd_continue() {
+  local run="${1:-}" d; d=$(run_dir "$run"); shift || true
+  local id="" budget="" dry=0 name round
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1 ;;
+      --budget)
+        case "${2:-}" in ''|*[!0-9]*) die "--budget needs a number of tool calls" ;; esac
+        budget="$2"; shift ;;
+      -*) die "unknown option $1" ;;
+      *) id="$1" ;;
+    esac; shift
+  done
+  [ -n "$id" ] || die "continue <run> <task-id|name> [--budget N] [--dry-run]"
+  id=$(resolve_task "$d" "$id") || die "no task or session '$id' in plan"
+  [ "$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .role' "$d/plan.json")" = developer ] || die "continue is for a developer task, and $id is not one; another round of it is orch spawn $run $id --round N"
+  name=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
+  round=$(cat "$d/sessions.json" "$d/forgotten.json" 2>/dev/null | jq -s -r --arg t "$id" --arg n "$name" \
+    '[add | .[] | select(.taskId == $t) | .name | if . == $n then 1 else (ltrimstr($n + "-r") | tonumber? // 1) end] | max // 0')
+  [ "$round" -gt 0 ] || die "task $id was never spawned, so there is nothing to continue; orch spawn $run $id"
+  round=$((round + 1))
+  spawn_one "$d" "$id" "$dry" "$round" "$budget" continue
+  [ "$dry" -eq 1 ] || ev "$d" orchestrator "$id" continue allow "$name-r$round"
 }
 
 # task_calls <run_dir> <task-id>: guarded calls of every session the task has had, forgotten ones included;
@@ -1549,6 +1587,74 @@ cmd_resume() {
   if [ "$who" = all ]; then rm -f "$d/PAUSE"; else rm -f "$d/PAUSE-$who"; fi
   ev "$d" orchestrator "$who" resume "$who" ""
   echo "resumed $who"
+}
+
+# resume_brief <run>: the run's state for a lead that starts again — after a freeze, a restart or a
+# compaction — read from the run's files and git, never from the lead's memory.
+resume_brief() {
+  local d; d=$(run_dir "$1")
+  local root base name b h f id r
+  root=$(repo_root); base=$(jq -r '.baseBranch' "$d/plan.json")
+  printf '# Resume brief: run %s, %s\n\n' "$1" "$(now)"
+  [ ! -f "$d/PAUSE" ] || printf 'paused: %s\n' "$(cat "$d/PAUSE")"
+  printf 'base: %s at %s\norchestrator: %s\n' "$base" "$(git -C "$root" rev-parse -q --verify "refs/heads/$base^{commit}" 2>/dev/null || echo 'no such branch here')" "$(jq -r '.orchestrator // "-"' "$d/plan.json")"
+  printf '\n## Tasks\n'; cmd_graph "$1"
+  printf '\n## Branches\n'
+  for name in $(jq -r '.tasks[].name' "$d/plan.json"); do
+    b=$(basename "$(task_worktree "$d" "$name")")
+    h=$(git -C "$root" rev-parse -q --verify "refs/heads/$b^{commit}" 2>/dev/null) && echo "$name: $b at $h"
+  done
+  [ ! -f "$d/lead-branches" ] || while read -r b; do
+    echo "lead: $b at $(git -C "$root" rev-parse -q --verify "refs/heads/$b^{commit}" 2>/dev/null || echo 'no such branch here')"
+  done < "$d/lead-branches"
+  printf '\n## Latest handoffs\n'
+  for name in $(jq -r '.tasks[].name' "$d/plan.json"); do
+    f=$(latest_handoff "$d" "$name")
+    [ -f "$f" ] && echo "$(basename "$f" .md): $(awk '/^## Status/ {s=1; next} s && NF {print; exit}' "$f")"
+  done
+  printf '\n## Sessions\n'
+  jq -r '.[] | "\(.name) (\(.id))" + (if (.removedAt // "") == "" then "" else ", removed" end)' "$d/sessions.json"
+  printf '\n## Authorizations\n'
+  jq -r '.authorize // {} | to_entries[] | select(.value == true) | .key | gsub("(?<c>[A-Z])"; "-" + (.c | ascii_downcase))' "$d/plan.json"
+  printf '\n## Decisions, the last 10\n'
+  if [ -f "$d/decisions.md" ]; then tail -n 10 "$d/decisions.md"; else echo "(none)"; fi
+  printf '\n## Next commands\n'
+  [ ! -f "$d/PAUSE" ] || echo "orch thaw $1 — forgets the sessions this machine does not run, drops the PAUSE files, prints what is ready"
+  echo "orch inbox $1 — what needs you now"
+  for id in $(open_tasks "$d"); do
+    [ "$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .role' "$d/plan.json")" = developer ] || continue
+    name=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
+    cat "$d/sessions.json" "$d/forgotten.json" 2>/dev/null | jq -s -e --arg id "$id" 'add | map(select(.taskId == $id)) | length > 0' >/dev/null || continue
+    case "$(handoff_state "$d" "$name" "$id")" in
+      none|partial) echo "orch continue $1 $name — its last session stopped before done; the next one finishes from git status" ;;
+    esac
+  done
+  r=$(cmd_ready "$1" | tr '\n' ' '); r=${r% }
+  [ -z "$r" ] || echo "orch spawn $1 --wave — ready: $r"
+}
+
+cmd_resume_brief() { [ -n "${1:-}" ] || die "resume-brief <run>"; resume_brief "$1"; }
+
+# cmd_freeze: stop the whole run so it can go on later or on another machine; RESUME.md keeps its state.
+cmd_freeze() {
+  local d; d=$(run_dir "${1:-}"); local why="${2:-}"
+  [ -n "$why" ] || die "freeze <run> \"<why>\""
+  need claude
+  cmd_pause "$1" all "frozen: $why" > /dev/null
+  resume_brief "$1" > "$d/RESUME.md"
+  cmd_stop "$1" all
+  ev "$d" orchestrator "$1" freeze allow "$why"
+  echo "frozen: $d/RESUME.md holds the run's state; to go on, here or on another machine: orch thaw $1"
+}
+
+cmd_thaw() {
+  local d; d=$(run_dir "${1:-}"); local r
+  # On another machine claude agents may list no session at all, which forget --dead refuses to read as all dead.
+  ( cmd_forget "$1" --dead ) || echo "orch: no session forgotten; orch forget $1 <name> for each one this machine does not run" >&2
+  rm -f "$d/PAUSE" "$d"/PAUSE-*
+  ev "$d" orchestrator "$1" thaw allow ""
+  r=$(cmd_ready "$1" | tr '\n' ' '); r=${r% }
+  echo "ready: ${r:-(none)}"
 }
 
 cmd_decide() {
@@ -2082,6 +2188,7 @@ case "$cmd" in
   ready) cmd_ready "$@" ;;
   brief) cmd_brief "$@" ;;
   spawn) cmd_spawn "$@" ;;
+  continue) cmd_continue "$@" ;;
   status) cmd_status "$@" ;;
   events) cmd_events "$@" ;;
   runs) cmd_runs "$@" ;;
@@ -2107,6 +2214,9 @@ case "$cmd" in
   cost) cmd_cost "$@" ;;
   pause) cmd_pause "$@" ;;
   resume) cmd_resume "$@" ;;
+  resume-brief) cmd_resume_brief "$@" ;;
+  freeze) cmd_freeze "$@" ;;
+  thaw) cmd_thaw "$@" ;;
   decide) cmd_decide "$@" ;;
   lead-branch) cmd_lead_branch "$@" ;;
   close) cmd_close "$@" ;;
