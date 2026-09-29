@@ -998,4 +998,49 @@ expect_grep '^merge,res$' "$TMP_BASE/v" "close --force records the open tasks as
 grep '|close|' .orchestrator/r13/events.log > "$TMP_BASE/v"
 expect_grep 'forced: res merge' "$TMP_BASE/v" "the close event names them"
 
+echo "# remote branches, session ids, last events, settled reviews, stage report: run r14"
+expect_exit 0 "init r14" "$ORCH" init r14 --base main
+"$ORCH" acceptance r14 off > /dev/null
+cat > "$TMP_BASE/r14.json" <<'JSON'
+{"run":"r14","baseBranch":"main","tasks":[
+ {"id":"impl","role":"developer","name":"d14","stage":"s1","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"qa","role":"qa","name":"qa-14","stage":"s1","qaOf":"impl","goal":"cases","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"rev","role":"reviewer","name":"rev-14","stage":"s1","reviewOf":"impl","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"budget":10,"mcp":[]}
+]}
+JSON
+with_arch "$TMP_BASE/r14.json"
+expect_exit 0 "plan r14" "$ORCH" plan r14 "$TMP_BASE/r14.json"
+"$ORCH" accept r14 arch fixture --force > /dev/null
+git clone -q --bare "$REPO" "$TMP_BASE/origin.git"
+git remote add origin "$TMP_BASE/origin.git"
+SHA_REMOTE=$(git commit-tree -p main -m 'pushed from another machine' 'main^{tree}')
+git push -q origin "$SHA_REMOTE:refs/heads/r14-d14" && git fetch -q origin
+expect_exit 0 "spawn a task whose branch exists only on origin" "$ORCH" spawn r14 impl
+WT14="$REPO/.claude/worktrees/r14-d14"
+git -C "$WT14" rev-parse HEAD > "$TMP_BASE/v"
+expect_grep "^$SHA_REMOTE\$" "$TMP_BASE/v" "the worktree starts from origin's branch, not from base"
+git -C "$WT14" rev-parse --abbrev-ref '@{upstream}' > "$TMP_BASE/v" 2>&1
+expect_grep '^origin/r14-d14$' "$TMP_BASE/v" "the local branch tracks it"
+expect_grep 'origin/r14-d14' "$TMP_BASE/err" "spawn says which branch it started from"
+D14_ID=$(jq -r '.[] | select(.name == "d14") | .id' .orchestrator/r14/sessions.json)
+echo "2026-09-29T00:00:00Z|${D14_ID}-0000-4000-8000-000000000014|d14|Bash|allow|ls" >> .orchestrator/r14/events.log
+echo "2026-09-29T00:00:01Z|${D14_ID}-0000-4000-8000-000000000014|d14|Stop|block|no handoff" >> .orchestrator/r14/events.log
+mkdir -p "$WT14/.scratch/evidence"; printf 'PNG' > "$WT14/.scratch/evidence/rel.png"
+printf '# d14\n## Status\ndone\n## What I did\nScreens: .scratch/evidence/rel.png and .scratch/evidence/missing.png\n' | "$ORCH" handoff-put r14 d14 > /dev/null
+expect_exit 0 "status after a Stop block and a handoff-put" "$ORCH" status r14 --no-live
+expect_grep '^d14 .*handoff|allow' "$TMP_BASE/out" "the last event is the handoff-put, found by the name column"
+expect_exit 0 "accept d14" "$ORCH" accept r14 impl ok
+jq -r '.[] | select(.name == "d14") | .sessionId' .orchestrator/r14/sessions.json > "$TMP_BASE/v"
+expect_grep "^${D14_ID}-0000-4000-8000-000000000014\$" "$TMP_BASE/v" "accept fills in the full session id from the event log"
+expect_exit 0 "spawn qa-14" "$ORCH" spawn r14 qa
+QA14_ID=$(jq -r '.[] | select(.name == "qa-14") | .id' .orchestrator/r14/sessions.json)
+echo "2026-09-29T00:00:02Z|${QA14_ID}-0000-4000-8000-000000000015|qa-14|Read|allow|x" >> .orchestrator/r14/events.log
+expect_exit 0 "rm qa-14" "$ORCH" rm r14 qa-14
+jq -r '.[] | select(.name == "qa-14") | .sessionId' .orchestrator/r14/sessions.json > "$TMP_BASE/v"
+expect_grep "^${QA14_ID}-0000-4000-8000-000000000015\$" "$TMP_BASE/v" "rm fills it in too"
+expect_exit 0 "stage report of s1" "$ORCH" stage-report r14 s1
+expect_grep '1 image reference(s) not found' "$TMP_BASE/out" "the report counts the references it could not find"
+expect_grep 'rev-14 <span class="role">reviewer</span></h2><p class="state">settled<' .orchestrator/r14/stages/s1/index.html "a review whose task is accepted reads settled"
+expect_exit 0 "a relative evidence path of a removed session resolves in its worktree" test -f .orchestrator/r14/stages/s1/img/d14-rel.png
+
 summary

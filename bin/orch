@@ -401,12 +401,15 @@ task_done() {
   [ -f "$h" ] && [ "$(handoff_word "$h")" = "done" ]
 }
 
-# handoff_state <run_dir> <name> <task-id>: accepted | done | partial | blocked | failed | none
+# handoff_state <run_dir> <name> <task-id>: accepted | settled | done | partial | blocked | failed | none.
+# settled: the task a review, test, qa or design review covers is accepted, as open_tasks counts it.
 handoff_state() {
   if is_cancelled "$1" "$3"; then printf 'cancelled'; return; fi
   if [ -f "$1/accepted.json" ] && jq -e --arg id "$3" 'map(select(.taskId == $id)) | length > 0' "$1/accepted.json" >/dev/null 2>&1; then
     printf 'accepted'; return
   fi
+  local cov; cov=$(jq -r --arg id "$3" 'first(.tasks[] | select(.id == $id) | .reviewOf // .verifies // .qaOf // .designOf) // empty' "$1/plan.json")
+  if [ -n "$cov" ] && is_accepted "$1" "$cov"; then printf 'settled'; return; fi
   local h word; h=$(latest_handoff "$1" "$2")
   [ -f "$h" ] || { printf 'none'; return; }
   word=$(handoff_word "$h")
@@ -496,6 +499,7 @@ Have them reverted or moved to a task that owns them, or grant the paths (orch p
   after=$(cmd_ready "$1")
   for t in $after; do printf '%s\n' "$before" | grep -qxF "$t" || fresh="$fresh $t"; done
   echo "accepted $id${head:+ at $head}${fresh:+ — now ready:$fresh}"
+  backfill_session_ids "$d"
   # An acceptance can finish sessions of other tasks too: a developer's, once the integrator building on it is accepted.
   local done_names; done_names=$(finished_sessions "$d") || true
   # shellcheck disable=SC2086  # one session name per word
@@ -968,6 +972,10 @@ make_worktree() {
     root=$(repo_root)
     if git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
       git -C "$root" worktree add -q "$wt" "$branch" >&2 || die "could not add the worktree $wt on $branch"
+    # Pushed from another machine: starting from base would drop that work at the next push.
+    elif git -C "$root" rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null; then
+      git -C "$root" worktree add -q --track -b "$branch" "$wt" "origin/$branch" >&2 || die "could not make the worktree $wt from origin/$branch"
+      echo "worktree $wt: branch $branch made from origin/$branch, which it tracks" >&2
     else
       git -C "$root" worktree add -q -b "$branch" "$wt" "$(jq -r '.baseBranch' "$1/plan.json")" >&2 || die "could not make the worktree $wt"
     fi
@@ -1021,6 +1029,17 @@ remove_sessions() {
   [ "$kept" -eq 0 ]
 }
 
+# backfill_session_ids <run_dir>: an empty sessionId gets the full id the guard logged under the short
+# one. Only a live status poll filled it before, and a session removed first kept it empty for good.
+backfill_session_ids() {
+  jq -e 'map(select((.sessionId // "") == "")) | length > 0' "$1/sessions.json" >/dev/null 2>&1 || return 0
+  local ids; ids=$(cut -d'|' -f2 "$1/events.log" 2>/dev/null | awk '!s[$0]++' | jq -R . | jq -sc .)
+  lock_run "$1"
+  jq --argjson e "${ids:-[]}" 'map(. as $r | if ($r.sessionId // "") == "" then .sessionId = (first($e[] | select(startswith($r.id + "-"))) // "") else . end)' \
+    "$1/sessions.json" > "$1/sessions.json.tmp" && mv "$1/sessions.json.tmp" "$1/sessions.json"
+  unlock_run "$1"
+}
+
 cmd_rm() {
   local d; d=$(run_dir "${1:-}"); local who="${2:-}" names
   case "$who" in
@@ -1032,6 +1051,7 @@ cmd_rm() {
       names="$who" ;;
   esac
   need claude
+  backfill_session_ids "$d"
   # shellcheck disable=SC2086  # one session name per word
   remove_sessions "$d" "$d/sessions.json" $names
 }
@@ -1153,7 +1173,8 @@ cmd_status() {
     [ -z "$removed" ] || state=removed
     calls=$(grep -c "^[^|]*|$key|[^|]*|[^|]*|allow|" "$d/events.log" 2>/dev/null || true); calls=${calls:-0}
     # The last event of any kind, not the last block: a stale "Stop|no handoff" hid a handoff written afterwards.
-    last=$(grep "^[^|]*|$key|" "$d/events.log" 2>/dev/null | sed -n '$p' | cut -d'|' -f4,5,6 | cut -c1-58)
+    # By the name column: orch handoff-put logs no session id.
+    last=$(awk -F'|' -v n="$name" '$3 == n' "$d/events.log" 2>/dev/null | sed -n '$p' | cut -d'|' -f4,5,6 | cut -c1-58)
     hs=$(handoff_state "$d" "$name" "$taskid")
     # "!" from 80% of the budget: time to look before the guard stops the session mid-thought.
     mark=""; [ "$budget" -gt 0 ] 2>/dev/null && [ $((calls * 5)) -ge $((budget * 4)) ] && mark="!"
@@ -1372,21 +1393,21 @@ cmd_stage_report() {
   [ -n "$stage" ] || die "stage-report <run> <stage>"
   plain_name "$stage" || die "stage name '$stage' is not a plain name"
   jq -e --arg s "$stage" '[.tasks[] | select(.stage == $s)] | length > 0' "$d/plan.json" >/dev/null || die "no task in stage '$stage'"
-  local root out img agents='[]'
+  local root out img
   root=$(cd "$(repo_root)" && pwd -P); out="$d/stages/$stage"; img="$out/img"
   rm -rf "$out"; mkdir -p "$img"
-  command -v claude >/dev/null 2>&1 && agents=$(claude agents --json --all 2>/dev/null || echo '[]')
-  local cards="" id name role hs h p f rf cwd sid pics n=0
+  local cards="" id name role hs h p f rf wt pics n=0 miss=0
   for id in $(jq -r --arg s "$stage" '.tasks[] | select(.stage == $s) | .id' "$d/plan.json"); do
     name=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")
     role=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .role' "$d/plan.json")
     hs=$(handoff_state "$d" "$name" "$id"); h=$(latest_handoff "$d" "$name"); pics=""
     if [ -f "$h" ]; then
-      sid=$(jq -r --arg n "$(basename "$h" .md)" 'first(.[] | select(.name == $n) | .id) // empty' "$d/sessions.json")
-      cwd=$(jq -r --arg id "$sid" 'first(.[] | select(.id == $id) | .cwd) // empty' <<<"$agents")
+      # The session record's worktree, not claude agents: accept has usually removed the session by now.
+      wt=$(cat "$d/sessions.json" "$d/forgotten.json" 2>/dev/null | jq -rs --arg n "$(basename "$h" .md)" 'first(add[] | select(.name == $n) | .worktree) // empty')
       for p in $(grep -oE '[^][:space:]()`"<>'"'"'[]+\.(png|jpe?g|gif|webp)' "$h" | sort -u); do
-        case "$p" in /*) f="$p" ;; *) [ -n "$cwd" ] || continue; f="$cwd/$p" ;; esac
-        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        case "$p" in /*) f="$p" ;; *) [ -n "$wt" ] || { miss=$((miss + 1)); continue; }; f="$wt/$p" ;; esac
+        [ -f "$f" ] || { miss=$((miss + 1)); continue; }
+        [ ! -L "$f" ] || continue
         # A hard link inside the repository can name a file outside it; one link means it is the file itself.
         [ "$(ls -ln "$f" | awk '{print $2}')" = 1 ] || continue
         rf="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)/$(basename "$f")"
@@ -1430,6 +1451,7 @@ $cards
 EOF
   echo "$out/index.html"
   echo "$n image(s) copied into $img — publish the page with its img/ files, or open it locally"
+  echo "$miss image reference(s) not found"
 }
 
 # arch_root: the working tree the map is read from — the worktree orch runs in, never the main
