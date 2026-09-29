@@ -8,6 +8,8 @@ with_arch() {
   jq '.tasks = [{id:"arch", role:"architect", name:("arch-" + .run), phase:"design", goal:"map", pathsAllowed:["docs/architecture/**"], acceptance:["map checked"], dependsOn:[], budget:20}] + .tasks' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 
+# A suite run from inside a Claude Code session inherits its id, which init would record as the lead's.
+unset CLAUDE_CODE_SESSION_ID
 fresh_tmp
 stub_claude
 REPO="$TMP_BASE/repo"; make_repo "$REPO"
@@ -1279,5 +1281,65 @@ expect_exit 1 "a reviewer cannot ask for qa" "$ORCH" qa-request r17 rev-17 "x"
 expect_grep 'rev is a reviewer task' "$TMP_BASE/err" "only a developer task gets qa"
 expect_exit 1 "qa-request needs what to check" "$ORCH" qa-request r17 d17
 expect_exit 1 "qa-request refuses an unknown name" "$ORCH" qa-request r17 nobody "x"
+expect_exit 0 "cost of a run whose lead id is unknown" "$ORCH" cost r17
+expect_no_grep '^lead ' "$TMP_BASE/out" "has no lead row"
+
+echo "# the lead's tools: events --blocks/--new, status TASK and CTX, cost across transcript files: run r18"
+LEAD18="1ead0000-0000-4000-8000-000000000018"
+expect_exit 0 "init r18 from the lead's session" env CLAUDE_CODE_SESSION_ID="$LEAD18" "$ORCH" init r18 --base main
+expect_grep "^$LEAD18\$" .orchestrator/r18/lead-session "init records the lead's session id"
+{
+  echo "2026-09-29T00:00:00Z|sid-d18a|d18|Bash|allow|ls"
+  echo "2026-09-29T00:00:01Z|sid-d18a|d18|Bash|block|tool-call budget spent|ls"
+  echo "2026-09-29T00:00:02Z|sid-d18a|d18|Bash|allow|ls"
+  echo "2026-09-29T00:00:03Z|sid-d18a|d18|Stop|stop|no handoff"
+  echo "2026-09-29T00:00:04Z|sid-d18a|d18|Edit|block|outside pathsAllowed|/x"
+} > .orchestrator/r18/events.log
+expect_exit 0 "events --blocks" "$ORCH" events r18 --blocks
+[ "$(grep -c . "$TMP_BASE/out")" -eq 2 ] && [ "$(grep -c '|block|' "$TMP_BASE/out")" -eq 2 ] && { PASS=$((PASS+1)); echo "ok   events --blocks prints the two block lines and nothing else"; } || { FAIL=$((FAIL+1)); echo "FAIL events --blocks printed:"; cat "$TMP_BASE/out"; }
+expect_exit 0 "events --new, first call" "$ORCH" events r18 --new
+[ "$(grep -c . "$TMP_BASE/out")" -eq 5 ] && { PASS=$((PASS+1)); echo "ok   the first --new prints every line"; } || { FAIL=$((FAIL+1)); echo "FAIL the first --new printed $(grep -c . "$TMP_BASE/out") lines, want 5"; }
+expect_exit 0 "events --new, nothing since" "$ORCH" events r18 --new
+[ ! -s "$TMP_BASE/out" ] && { PASS=$((PASS+1)); echo "ok   a second --new prints nothing"; } || { FAIL=$((FAIL+1)); echo "FAIL a second --new printed:"; cat "$TMP_BASE/out"; }
+echo "2026-09-29T00:00:05Z|sid-d18b|d18-r2|Bash|allow|ls" >> .orchestrator/r18/events.log
+echo "2026-09-29T00:00:06Z|sid-d18b|d18-r2|Bash|block|cd outside|cd /" >> .orchestrator/r18/events.log
+expect_exit 0 "events --new --blocks" "$ORCH" events r18 --new --blocks
+expect_grep '|d18-r2|Bash|block|cd outside' "$TMP_BASE/out" "--new --blocks prints the new block"
+expect_no_grep '|allow|' "$TMP_BASE/out" "and not the new allow line"
+expect_exit 0 "events --new after --new --blocks" "$ORCH" events r18 --new
+[ ! -s "$TMP_BASE/out" ] && { PASS=$((PASS+1)); echo "ok   the cursor moved past the lines --blocks left out"; } || { FAIL=$((FAIL+1)); echo "FAIL --new printed again:"; cat "$TMP_BASE/out"; }
+expect_exit 0 "events --since still works" "$ORCH" events r18 --since 6
+[ "$(grep -c . "$TMP_BASE/out")" -eq 1 ] && { PASS=$((PASS+1)); echo "ok   --since 6 prints the seventh line"; } || { FAIL=$((FAIL+1)); echo "FAIL --since 6 printed $(grep -c . "$TMP_BASE/out") lines"; }
+expect_exit 1 "events refuses an unknown option" "$ORCH" events r18 --bogus
+expect_exit 1 "events refuses --since with --new" "$ORCH" events r18 --since 2 --new
+echo "2026-09-29T00:00:07Z|sid-d18b|d18-r2|Bash|allow|ls" >> .orchestrator/r18/events.log
+echo "2026-09-29T00:00:08Z|sid-d18c|d18-r3|Bash|allow|ls" >> .orchestrator/r18/events.log
+echo "2026-09-29T00:00:09Z|sid-rev18|rev-18|Bash|allow|ls" >> .orchestrator/r18/events.log
+cat > .orchestrator/r18/sessions.json <<'JSON'
+[{"taskId":"impl","name":"d18","role":"developer","id":"d18aaaaa","sessionId":"sid-d18a","pathsAllowed":["src/**"],"budget":10,"removedAt":"2026-09-29T00:00:04+0000"},
+ {"taskId":"impl","name":"d18-r2","role":"developer","id":"d18bbbbb","sessionId":"sid-d18b","pathsAllowed":["src/**"],"budget":10},
+ {"taskId":"rev","name":"rev-18","role":"reviewer","id":"rev18aaa","sessionId":"sid-rev18","pathsAllowed":[],"budget":30}]
+JSON
+echo '[{"taskId":"impl","name":"d18-r3","role":"developer","id":"d18ccccc","sessionId":"sid-d18c","pathsAllowed":["src/**"],"budget":10}]' > .orchestrator/r18/forgotten.json
+mkdir -p "$ORCH_PROJECTS_DIR/-repo-a" "$ORCH_PROJECTS_DIR/-repo-b/sid-d18b/subagents" "$ORCH_PROJECTS_DIR/-lead"
+echo '{"type":"assistant","timestamp":"2026-09-29T10:00:00Z","message":{"id":"m1","usage":{"input_tokens":1,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":10}}}' > "$ORCH_PROJECTS_DIR/-repo-a/sid-d18b.jsonl"
+{
+  echo '{"type":"assistant","timestamp":"2026-09-29T11:00:00Z","message":{"id":"m2","usage":{"input_tokens":2,"output_tokens":20,"cache_read_input_tokens":150000,"cache_creation_input_tokens":20}}}'
+  echo '{"type":"assistant","timestamp":"2026-09-29T10:00:00Z","message":{"id":"m1","usage":{"input_tokens":1,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":10}}}'
+  echo '{"type":"user","timestamp":"2026-09-29T11:00:01Z","message":{"content":"the usage of x"}}'
+} > "$ORCH_PROJECTS_DIR/-repo-b/sid-d18b.jsonl"
+echo '{"type":"assistant","timestamp":"2026-09-29T12:00:00Z","message":{"id":"m3","usage":{"input_tokens":4,"output_tokens":7,"cache_read_input_tokens":4000,"cache_creation_input_tokens":40}}}' > "$ORCH_PROJECTS_DIR/-repo-b/sid-d18b/subagents/agent-a1.jsonl"
+echo '{"type":"assistant","timestamp":"2026-09-29T09:00:00Z","message":{"id":"m9","usage":{"input_tokens":9,"output_tokens":500,"cache_read_input_tokens":9000,"cache_creation_input_tokens":90}}}' > "$ORCH_PROJECTS_DIR/-lead/$LEAD18.jsonl"
+expect_exit 0 "status r18" "$ORCH" status r18 --no-live
+expect_grep 'CALLS  *TASK  *CTX  *LAST_EVENT' "$TMP_BASE/out" "status has TASK and CTX columns"
+expect_grep '^d18-r2 .* 2/10  *5  *150k ' "$TMP_BASE/out" "TASK sums every round of the task, the forgotten one included; CTX is the last main-transcript usage by time"
+expect_grep '^d18 .* 2/10  *5  *- ' "$TMP_BASE/out" "an earlier round shows the same task total, and - without a transcript"
+expect_grep '^rev-18 .* 1/30  *1  *- ' "$TMP_BASE/out" "another task counts only its own calls"
+expect_exit 0 "cost r18" "$ORCH" cost r18
+expect_grep '^d18-r2  *127  *7  *155000  *70$' "$TMP_BASE/out" "cost sums the split transcripts and the subagents, each message once"
+expect_grep '^TOTAL  *127 ' "$TMP_BASE/out" "the team total"
+expect_grep '^lead  *500  *9  *9000  *90$' "$TMP_BASE/out" "and a lead row from the recorded id"
+expect_exit 0 "address from a restarted lead" env CLAUDE_CODE_SESSION_ID=1ead0000-0000-4000-8000-00000000018b "$ORCH" address r18 lead-18
+expect_grep '^1ead0000-0000-4000-8000-00000000018b$' .orchestrator/r18/lead-session "address records the new lead id"
 
 summary
