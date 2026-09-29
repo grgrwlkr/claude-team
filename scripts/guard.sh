@@ -184,9 +184,10 @@ case "$tool" in
           handoff-put)
             [ "$arg2" = "$name" ] || block "orch handoff-put may write only your own handoff ($name), not ${arg2:-<missing>}; run is $_run" ;;
           handoff|status|events|ready|doctor|tools) ;;
-          # --sync rewrites the generated rules every session loads; only the map's owner runs it.
+          # --sync rewrites the generated rules every session loads; only the map's owner runs it. An
+          # allowlist, not a match on --sync: a variable or substitution would hide the flag.
           architecture)
-            [ "$_run" != --sync ] || [ "$role" = architect ] || block "orch architecture --sync regenerates the map's rules; only the architect runs it. Tell the architect what the map gets wrong." ;;
+            [ "$role" = architect ] || [ -z "$_run" ] || [ "$_run" = --check ] || block "orch architecture takes only --check outside the architect's session; --sync regenerates the map's rules and is the architect's. Tell the architect what the map gets wrong." ;;
           *) block "orch $sub is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools, architecture" ;;
         esac
       done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +[a-z-]+( +[^ ;&|<>]+)?( +[^ ;&|<>]+)?' | sed -E 's/^.*orch +//')
