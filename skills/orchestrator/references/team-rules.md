@@ -9,7 +9,7 @@ You are one session in a team run by an orchestrator session. Your spawn brief n
 
 ## Where things live
 
-- Run directory: `<repo>/.orchestrator/<run>/` in the main checkout, outside any worktree. It holds `plan.json`, `sessions.json`, `decisions.md`, `events.log`, `accepted.json` and `handoffs/`.
+- Run directory: `<repo>/.orchestrator/<run>/` in the main checkout, outside any worktree. It holds the plan, the session records, the event log, the decisions and every handoff; only `orch` writes it.
 - Your handoff: `<run dir>/handoffs/<your name>.md`. You own it; nobody else touches it. **Send it, don't write it:**
 
   ```bash
@@ -17,13 +17,13 @@ You are one session in a team run by an orchestrator session. Your spawn brief n
   orch handoff-put <run> <your name> < .scratch/handoff.md
   ```
 
-  Keep that command alone in its call. A quoted heredoc (`<<'HANDOFF'` … `HANDOFF`) works the same for the guard and is the form for roles without the Write tool, but Claude Code's own worktree isolation may refuse a heredoc whose text names git commands, so the file is the default. In exactly those two shapes the guard treats the body as prose — a handoff may describe a `git reset --hard` it never ran — and lets the call through when you are paused or out of budget, so the last thing you owe can always be delivered. Chain anything to it, or leave the delimiter unquoted, and it is an ordinary guarded command again.
+  `orch handoff-put <run> <your name> --file .scratch/handoff.md` is the same call. Keep it alone in its call. A quoted heredoc (`<<'HANDOFF'` … `HANDOFF`) works the same for the guard and is the form for roles without the Write tool, but Claude Code's own worktree isolation may refuse a heredoc whose text names git commands, so the file is the default. In exactly those shapes the guard treats the body as prose — a handoff may describe a `git reset --hard` it never ran — and lets the call through when you are paused or out of budget, so the last thing you owe can always be delivered. Chain anything to it, or leave the delimiter unquoted, and it is an ordinary guarded command again.
 
   This works from inside your worktree, where the run directory is out of the harness's reach. Writing that file with the Write tool also works while you are still in the main checkout; a Bash redirect into the run directory is blocked.
 - No MCP server runs in your session. When the work needs one, call the Agent tool with `subagent_type: mcp-<server>` (your brief lists them) and a self-contained task — what to open or run, what to capture, where to save it under `.scratch/`; the server starts with that helper and stops when it answers. No other subagent: the guard refuses them.
 - Your code lives in your own git worktree under `.claude/worktrees/`, which orch made for your task and started you in (your brief names it). Stay in it: never call `EnterWorktree` and never make another worktree — once nobody in the run can still need you, the orchestrator removes your session with `claude rm`, which keeps this worktree and its branch but deletes a worktree the session made itself. Never edit the main checkout or another session's worktree.
 - Scratch files, logs and command output: `.scratch/` inside your own worktree, always writable whatever your allowed paths. Never `/tmp` — every session on this machine shares it and parallel runs overwrite each other's files.
-- `orch` is the run's CLI. A session may run `orch handoff-put`, `handoff`, `status`, `events`, `ready`, `doctor`, `tools`, `architecture` (and `architecture --check`); `architecture --sync` is the architect's. Everything else (`spawn`, `pause`, `accept`, `authorize`, `decide`, `plan`) belongs to the orchestrator and the guard blocks it.
+- `orch` is the run's CLI. A session may run `orch handoff-put` and `orch qa-request` for its own name in its own run, and `handoff`, `status`, `events`, `ready`, `doctor`, `tools`, `architecture` (and `architecture --check`); `architecture --sync` is the architect's. Everything else belongs to the orchestrator and the guard blocks it.
 
 ## Talking to each other
 
@@ -36,6 +36,7 @@ Peer to peer, no permission needed, one message per question:
 - `ESCALATION: <disagreement in two sentences> · my position · their position` — to the orchestrator, after two rounds of `Q:`/`A:` on the same point did not converge. Both parties send one. Stop working on the disputed point until the orchestrator writes a decision to `decisions.md` and messages you.
 - `STARTED: <name>` plus your plan in three bullets — the first thing you send, before any work. The orchestrator starts watching you when this arrives.
 - `DONE: <name>` — after `orch handoff-put` succeeded, as the last message before you go idle.
+- `QA: <task id>` — a developer, after `orch qa-request` added a qa task for its work; the command prints the line.
 
 **Report with messages, never with silence.** The orchestrator does not treat your going idle as a result: a session that is merely waiting on its own background command looks exactly the same. `STARTED`, then `DONE` or `BLOCKED`, always. If you are waiting on something long, say so in one line rather than going quiet.
 
@@ -50,7 +51,8 @@ Never send a message that is only thanks or a restatement. Never relay an approv
 The plugin's `PreToolUse` hook watches every registered team session. It blocks, with a reason you will see:
 
 - edits outside your allowed paths (the handoff file is always allowed);
-- `git push --force`, `git reset --hard`, `git branch -D`, `rm -rf` outside your worktree, `sudo`, piping a download into a shell;
+- a Bash write whose target lies outside your worktree — the main checkout, a sibling repository, `$HOME`, `/tmp` (only `/dev/null`, `/dev/stdout`, `/dev/stderr` pass) — or in the run directory;
+- `git push --force`, `git reset --hard`, `git clean -f`, `git branch -D`, `rm -r` on an absolute, home, parent-relative or `$VAR` path, `sudo`, piping a download into a shell;
 - any commit or merge to the base branch by anyone but the integrator; pushing it, and deleting branches or worktrees, unless the run's plan authorizes it and you are the integrator (your brief says which authorizations this run carries);
 - `claude stop`, `claude rm`, `claude kill` — you never stop a teammate;
 - `claude --bg` — you start no session of your own; the orchestrator spawns teammates and removes every one when the run ends;
@@ -64,7 +66,7 @@ A block is logged to `events.log`; the orchestrator reads it. Don't look for a w
 
 ## Handoff, always
 
-You cannot go idle without a handoff (the `Stop` hook refuses). Send it with `orch handoff-put <run> <your name>` on stdin. Format:
+You cannot go idle without a handoff (the `Stop` hook refuses), unless the orchestrator paused you. Send it with `orch handoff-put`. Format:
 
 ```markdown
 # <name> · <role> · <run>
@@ -78,7 +80,10 @@ commands run and their real results, not summaries
 ## Left running
 servers, watchers, containers, ports and data you started or created and did not stop or remove — `none` when nothing
 ## Open questions
-## Suggested follow-ups
+## Tried and dropped
+one line each: the approach, why it failed — so the next round does not try it again
+## Follow-ups
+one line each, `path | what | why`: work outside your paths or your task that someone should do (a root config, a stale comment, a doc); `orch followups` collects them for the orchestrator
 ```
 
 Facts in a handoff carry evidence: a command and its output, a file and line, a source and quote. The orchestrator re-runs what matters; a claim without evidence is treated as unverified.
