@@ -77,7 +77,10 @@ norm_path() {
   fi
 }
 
-# log_event <run_dir> <sid> <name> <tool> <decision> <detail>
+# log_event <run_dir> <sid> <name> <tool> <decision> <detail> [<subject>]: a block line appends the
+# command or file path it judged as a 7th field; readers take the reason from field 6.
 log_event() {
-  printf '%s|%s|%s|%s|%s|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$3" "$4" "$5" "$(printf '%s' "$6" | tr '\n|' '  ')" >> "$1/events.log"
+  local tail=""
+  [ $# -ge 7 ] && tail="|$(printf '%s' "$7" | tr '\n|' '  ')"
+  printf '%s|%s|%s|%s|%s|%s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$3" "$4" "$5" "$(printf '%s' "$6" | tr '\n|' '  ')" "$tail" >> "$1/events.log"
 }

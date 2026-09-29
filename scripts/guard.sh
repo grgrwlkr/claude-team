@@ -11,6 +11,8 @@ sid=$(jq -r '.session_id // empty' <<<"$input")
 cwd=$(jq -r '.cwd // empty' <<<"$input")
 tool=$(jq -r '.tool_name // empty' <<<"$input")
 [ -n "$sid" ] && [ -n "$cwd" ] && [ -n "$tool" ] || exit 0
+subject=$(jq -r '.tool_input.command // .tool_input.file_path // .tool_input.notebook_path // empty' <<<"$input")
+subject=${subject:0:120}
 
 resolved=$(resolve_run "$cwd" "$sid"); rc=$?
 if [ "$rc" -eq 1 ]; then
@@ -33,7 +35,7 @@ fi
 run_dir=${resolved%|*}
 in_repo=${resolved##*|}
 if [ "$rc" -eq 2 ]; then
-  log_event "$run_dir" "$sid" unknown "$tool" block "in the session index, no longer listed in its run"
+  log_event "$run_dir" "$sid" unknown "$tool" block "in the session index, no longer listed in its run" "$subject"
   printf 'orchestrator guard: this session was registered in run %s and is no longer listed there, or its sessions.json is unreadable; stop and tell the orchestrator.\n' "$(basename "$run_dir")" >&2
   exit 2
 fi
@@ -41,7 +43,7 @@ rec=$(session_json "$run_dir" "$sid")
 if [ -z "$rec" ] || [ "$rec" = null ]; then
   # Removed from the run with orch forget and still running: held, never set free.
   gone=$(jq -r --arg s "$sid" "$MINE"' first(.[] | select(mine($s)) | .name) // "unknown"' "$run_dir/forgotten.json" 2>/dev/null)
-  log_event "$run_dir" "$sid" "${gone:-unknown}" "$tool" block "forgotten session"
+  log_event "$run_dir" "$sid" "${gone:-unknown}" "$tool" block "forgotten session" "$subject"
   printf 'orchestrator guard: this session (%s) was removed from run %s with orch forget and may not act in it any more; stop here.\n' "${gone:-unknown}" "$(basename "$run_dir")" >&2
   exit 2
 fi
@@ -57,7 +59,7 @@ auth_delete=$(jq -r '.authorize.deleteMerged // false' "$run_dir/plan.json" 2>/d
 auth_install=$(jq -r '.authorize.installTools // false' "$run_dir/plan.json" 2>/dev/null)
 
 block() {
-  log_event "$run_dir" "$sid" "$name" "$tool" block "$1"
+  log_event "$run_dir" "$sid" "$name" "$tool" block "$1" "$subject"
   printf 'orchestrator guard blocked this call for %s (%s): %s\nReport BLOCKED: to the orchestrator instead of working around it.\n' "$name" "$role" "$1" >&2
   exit 2
 }
