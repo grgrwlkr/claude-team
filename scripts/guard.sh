@@ -361,6 +361,23 @@ case "$tool" in
     ;;
 esac
 
+# A command that starts with `cd <dir in the own worktree>` then ends, or goes on after && ; or a newline,
+# runs from that dir: it is how a session that lost its cwd gets back, so the old cwd is not held against it.
+if [ "$tool" = Bash ] || [ "$tool" = Monitor ]; then
+  own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+  q="'" b='\' nl=$'\n'
+  re_cd="^[[:space:]]*cd[[:space:]]+(${q}[^${q}]*${q}|\"[^\"\$\`${b}]*\"|[^][:space:]${q}\"\$\`${b};&|<>(){}*?~[]+)[[:space:]]*(&&|;|${nl}|\$)"
+  if [ -n "$own_wt" ] && [[ "$(jq -r '.tool_input.command // empty' <<<"$input")" =~ $re_cd ]]; then
+    d=${BASH_REMATCH[1]}
+    case "$d" in "$q"*|\"*) d=${d:1:${#d}-2} ;; esac
+    case "$d" in /*) ;; *) if [ -d "$cwd" ]; then d=$cwd/$d; else d=""; fi ;; esac
+    own_wt=$(canon "$own_wt")
+    if [ -n "$d" ] && d=$(canon "$d") && [ -d "$d" ]; then
+      case "$d/" in "$own_wt"/*) cwd=$d in_repo=1 ;; esac
+    fi
+  fi
+fi
+
 # A registered session whose working directory left the repository is held, not released.
 if [ "$in_repo" != 1 ]; then
   [ -d "$cwd" ] || block "your working directory ($cwd) no longer exists; cd back into your worktree before running or editing anything"

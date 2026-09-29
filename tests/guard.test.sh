@@ -380,6 +380,18 @@ expect_grep "int-1's worktree" "$TMP_BASE/err" "naming whose it is"
 expect_exit 2 "and so is the main checkout, from inside the own worktree" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Edit '{"file_path":"'"$REPO"'/src/a.ts"}')"
 expect_grep 'main checkout' "$TMP_BASE/err" "as the main checkout"
 set_rec dev-1 '.worktree = $wt'
+
+echo "# audit guard F10: a command that starts by cd-ing into the own worktree is judged from there"
+dev_at() { expect_exit "$1" "$2" bash "$GUARD" <<< "$(hook_bash sid-dev "$3" "$4")"; }
+dev_at 0 "cd back into the own worktree from outside the repository passes" /tmp "cd $WT && pwd"
+dev_at 0 "so does a lone cd from a working directory that was removed" "$WT/.scratch/gone" "cd '$WT'"
+dev_at 0 "and a cd into a subdirectory from inside the run dir" "$RUN" "cd $WT/src; ls"
+dev_at 2 "the rest of the command is judged from the new directory" /tmp "cd $WT/src && echo x > ../docs/x.md"
+expect_grep 'path docs/x.md is outside your allowed paths' "$TMP_BASE/err" "by its paths, not by the old cwd"
+dev_at 2 "a cd into another session's worktree gets no pass" /tmp "cd $W3 && ls"
+dev_at 2 "nor a cd that runs in the background" /tmp "cd $WT & ls"
+dev_at 2 "nor a cd into the run dir" "$WT" "cd $RUN && touch x"
+dev_at 2 "a relative cd from a removed working directory gets no pass" "$WT/.scratch/gone" "cd src"
 set_rec dev-1 '.budget = 2'
 
 echo "# stop gate"
