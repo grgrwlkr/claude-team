@@ -127,7 +127,7 @@ orch plan <run> <plan.json> [--replan]            validate and store the task gr
 orch ready <run>                                  tasks whose dependencies are done and that are not spawned
 orch brief <run> <task-id>                        print the brief a spawn would send
 orch spawn <run> <task-id> [--round N] [--budget N] [--dry-run]   spawn one task as a background session and register it
-orch spawn <run> --wave [--dry-run]               spawn every ready task
+orch spawn <run> --wave [--dry-run]               spawn every ready task, up to the plan's maxParallel sessions at work; spawn warns when a task shares paths or resources with a live session of another open run, and when the load average is above the plan's maxLoad per CPU
 orch continue <run> <task-id|name> [--budget N] [--dry-run]   the next round of a developer task whose session stopped at its budget, in the same worktree; its brief says to finish from git status
 orch status <run> [--no-live]                     roster joined with claude agents --json; TASK: calls of every round of the task, CTX: context size at the session's last turn
 orch events <run> [--since <line>|--new] [--blocks]   guard log (blocks, budgets, pauses); --new: the lines since the last --new, --blocks: block lines only
@@ -135,6 +135,7 @@ orch runs                                         one line per run in this repo:
 orch graph <run>                                  every task with its state, sessions, calls of all rounds, and why it is not ready
 orch inbox <run>                                  what needs the lead: unaccepted done/partial/blocked/failed handoffs, sessions at 80 % of budget, blocks since the last inbox, idle sessions without a handoff, ready tasks
 orch handoff <run> <name>                         print a session's latest round's handoff, naming the earlier rounds
+orch followups <run>                              every line of the handoffs' "## Follow-ups" sections, with the session that wrote it
 orch handoff-put <run> <name> [--file <path>] [--by-lead "<source>"]   write a session's handoff from the file or stdin (works from inside a worktree); --by-lead stamps it as written by the orchestrator from that source
 orch qa-request <run> <name> "<what to check>"      a developer asks for qa of its task: adds a qa task after it (paths qa/<task name>/**) and prints the line to send the orchestrator
 orch accept <run> <task-id|name> ["<note>"] [--force]   the lead accepts a task, records its branch head, prints what became ready and removes sessions no open task needs. Refused for a task never spawned, cancelled, or whose handoff is none, partial or blocked, and for a branch that changed files outside its pathsAllowed. An architect task is accepted only when orch architecture --check passes in its worktree on a committed map; --force accepts anyway and says why in the note
@@ -274,18 +275,25 @@ cmd_plan() {
                         | select(((.reviewOf // "") == $t.id) or (((.dependsOn // []) | index($t.id)) != null)) ] | length) == 0)
             | bad("task \($t.id) writes code and no reviewer task reviews it; add a reviewer task with reviewOf: \"\($t.id)\"") ] )
     + [ .tasks[] | select(has("chore") and .role != "developer") | bad("task \(.id): chore belongs on a developer task, which the lead reviews itself; a \(.role) task is not one") ]
+    + [ .tasks[] | select(has("resources") and ((.resources | type) != "array" or any(.resources[]; type != "string" or (test("^[a-z]+:.") | not))))
+        | bad("task \(.id): resources must be a list like [\"port:8000\", \"compose:<project>\"]: what the task holds that no task running beside it may use") ]
+    + (if has("setup") and ((.setup | type) != "array" or any(.setup[]; type != "string")) then [bad("setup must be a list of shell commands, run in each new worktree before its session starts")] else [] end)
+    + (if has("maxParallel") and ((.maxParallel | type) != "number" or .maxParallel < 1 or .maxParallel != (.maxParallel | floor)) then [bad("maxParallel must be a whole number, 1 or more: how many sessions of the run orch spawn --wave lets work at once")] else [] end)
+    + (if has("maxLoad") and ((.maxLoad | type) != "number" or .maxLoad <= 0) then [bad("maxLoad must be a number above 0: the load average per CPU above which orch spawn warns")] else [] end)
     # Two tasks can be live together unless one is in the dependency closure of the other, they sit in
     # different stages of a staged run, or one is the architect design task, which every other task waits for.
     # The integrator owns ** to resolve conflicts in the branches it merges, not to write work of its own.
+    # Resources (a port, a compose project) are held the way paths are.
     + ( . as $p
         | [ .tasks[] | select((.role == "architect" and .phase == "design") or .role == "integrator" | not)
-            | {id, stage: (.stage // ""), c: closure($p; .id), paths: (.pathsAllowed // [])} ] as $t
+            | {id, stage: (.stage // ""), c: closure($p; .id), paths: (.pathsAllowed // []), res: [.resources[]?]} ] as $t
         | [ range(0; $t|length) as $i | range($i+1; $t|length) as $j
             | select(($t[$i].c | index($t[$j].id)) == null and ($t[$j].c | index($t[$i].id)) == null)
             | select(($p.mode // "single") != "staged" or $t[$i].stage == $t[$j].stage)
             | [ $t[$i].paths[] as $x | $t[$j].paths[] as $y | select(paths_meet($x; $y)) | if $x == $y then $x else "\($x) ~ \($y)" end ] as $shared
-            | select(($shared | length) > 0)
-            | bad("tasks \($t[$i].id) and \($t[$j].id) share paths \($shared | join(", ")) and can run at the same time; sequence them or split the paths") ] )
+            | [ $t[$i].res[] as $x | select(any($t[$j].res[]; . == $x)) | $x ] as $held
+            | select(($shared + $held | length) > 0)
+            | bad("tasks \($t[$i].id) and \($t[$j].id) share \([ (if ($shared | length) > 0 then "paths \($shared | join(", "))" else empty end), (if ($held | length) > 0 then "resources \($held | join(", "))" else empty end) ] | join(" and ")) and can run at the same time; sequence them or split the paths") ] )
     + ( . as $p
         | [ $p.tasks[] | select(.role == "developer") as $t
             | $p.tasks[] | select(.role == "qa" or (.role == "qa-lead" and .phase == "author")) as $q
@@ -401,6 +409,7 @@ cmd_plan() {
       "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
     unlock_run "$d"
   fi
+  cross_run_overlap "$d" "$(jq -c --slurpfile s "$d/sessions.json" '[.tasks[] | select(.id as $id | $s[0] | map(.taskId) | index($id) | not)]' "$d/plan.json")"
   echo "plan stored: $(jq '.tasks | length' "$d/plan.json") tasks → $d/plan.json"
 }
 
@@ -947,6 +956,9 @@ render_brief() {
     review_line="review venue: branch. A reviewer will read your branch diff against $base and file findings through the orchestrator; answer its questions with file and line."
   fi
   local notes="" note_names
+  note_names=$(jq -r '[.resources[]?] | join(", ")' <<<"$task")
+  [ -z "$note_names" ] || notes="$notes
+resources you hold: $note_names — no other session, of this run or another, may use or restart them while you work; ask the orchestrator before you touch any other shared one"
   if [ "$role" = developer ]; then
     note_names=$(jq -r --arg id "$id" '[.tasks[] | select(.role == "qa" and .qaOf == $id) | .name] | join(", ")' "$d/plan.json")
     if [ -n "$note_names" ]; then notes="$notes
@@ -1258,12 +1270,15 @@ spawn_one() {
     return 0
   fi
   need claude
-  local out sid_short wt agents_args=()
+  local out sid_short wt agents_args=() fresh=0
   [ -n "$agents_file" ] && agents_args=(--agents "$(cat "$agents_file")")
+  [ -d "$(task_worktree "$d" "$task_name")" ] || fresh=1
   # The spawns of a wave run in parallel; git worktree add is serialized with the run's lock.
   lock_run "$d"
   wt=$(make_worktree "$d" "$task_name") || { unlock_run "$d"; exit 1; }
   unlock_run "$d"
+  # Outside the lock: an install can take longer than a waiting spawn gives the lock.
+  [ "$fresh" -eq 0 ] || run_setup "$d" "$task_name" "$wt"
   out=$(cd "$wt" && "${argv[@]}" ${agents_args[@]+"${agents_args[@]}"} "$brief" 2>&1 | strip_ansi)
   sid_short=$(printf '%s\n' "$out" | sed -n 's/.*backgrounded · \([0-9a-f]\{8\}\).*/\1/p' | head -1)
   if [ -z "$sid_short" ]; then
@@ -1306,18 +1321,74 @@ cmd_spawn() {
     esac; shift
   done
   local v; v=$(version_drift "$d"); [ -z "$v" ] || echo "orch: warning: $v" >&2
+  load_warning "$d"
   if [ "$wave" -eq 1 ]; then
     [ -z "$round" ] && [ -z "$budget" ] || die "--wave spawns every ready task at round 1 on its plan budget; --round and --budget are for one task"
+    local t pids="" p fail=0 run ready max at n left
+    run=$(jq -r '.run' "$d/plan.json"); ready=$(cmd_ready "$run")
+    max=$(jq -r '.maxParallel // empty' "$d/plan.json")
+    if [ -n "$max" ] && [ -n "$ready" ]; then
+      at=$(at_work "$d"); n=$((max - at)); [ "$n" -gt 0 ] || n=0
+      left=$(printf '%s\n' $ready | awk -v n="$n" 'NR > n' | tr '\n' ' ')
+      ready=$(printf '%s\n' $ready | awk -v n="$n" 'NR <= n')
+      [ -z "$left" ] || echo "orch: maxParallel $max: $at at work; left for the next orch spawn $run --wave: ${left% }" >&2
+    fi
+    cross_run_overlap "$d" "$(jq -c --arg r "$ready" '[.tasks[] | select(.id as $id | $r | split("\n") | index($id))]' "$d/plan.json")"
     # The tasks of a wave launch in parallel: each claude --bg takes seconds, and far more under load.
-    local t pids="" p fail=0
-    for t in $(cmd_ready "$(jq -r '.run' "$d/plan.json")"); do spawn_one "$d" "$t" "$dry" 1 & pids="$pids $!"; done
+    for t in $ready; do spawn_one "$d" "$t" "$dry" 1 & pids="$pids $!"; done
     [ -n "$pids" ] || echo "no ready task to spawn"
     for p in $pids; do wait "$p" || fail=$((fail + 1)); done
     [ "$fail" -eq 0 ] || die "$fail of the wave's spawns failed; the messages above say why"
   else
     [ -n "$id" ] || die "spawn <run> <task-id> [--round N] [--budget N] | --wave"
+    cross_run_overlap "$d" "$(jq -c --arg id "$id" '[.tasks[] | select(.id == $id)]' "$d/plan.json")"
     spawn_one "$d" "$id" "$dry" "${round:-1}" "$budget"
   fi
+}
+
+# at_work <run_dir>: the run's sessions still working — not removed, and without a handoff that says
+# done, blocked or failed.
+at_work() {
+  local name h n=0
+  for name in $(jq -r '.[] | select((.removedAt // "") == "") | .name' "$1/sessions.json"); do
+    h="$1/handoffs/$name.md"
+    if [ -f "$h" ]; then case "$(handoff_word "$h")" in done|blocked|failed) continue ;; esac; fi
+    n=$((n + 1))
+  done
+  echo "$n"
+}
+
+# load_warning <run_dir>: sessions spawned on a machine already past the plan's maxLoad per CPU starve
+# each other's builds and tests into timeouts.
+load_warning() {
+  local max cpus load
+  max=$(jq -r '.maxLoad // empty' "$1/plan.json"); [ -n "$max" ] || return 0
+  cpus=$(getconf _NPROCESSORS_ONLN)
+  # "load averages: 2.49 2.41 2.35" on macOS, "load average: 0.52, 0.58, 0.59" on Linux.
+  load=$(uptime | sed 's/.*load average[s]*: *//' | awk -F'[ ,]+' '{print $1}')
+  awk -v l="$load" -v m="$max" -v c="$cpus" 'BEGIN { exit !(l > m * c) }' || return 0
+  echo "orch: warning: load average $load is above maxLoad $max × $cpus CPUs; sessions spawned now slow each other down — wait, or spawn fewer (maxParallel)" >&2
+}
+
+# run_setup <run_dir> <task name> <worktree>: the plan's setup commands, in order, in a worktree orch just
+# made — the installs every session would otherwise spend its budget on. Each is logged with its exit
+# code; the first that fails ends the setup, and the session starts anyway.
+run_setup() {
+  local i n c rc log="$1/setup/$2.log"
+  n=$(jq '.setup // [] | length' "$1/plan.json"); [ "$n" -gt 0 ] || return 0
+  mkdir -p "$1/setup"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    c=$(jq -r --argjson i "$i" '.setup[$i]' "$1/plan.json")
+    (cd "$3" && sh -c "$c") < /dev/null >> "$log" 2>&1; rc=$?
+    if [ "$rc" -ne 0 ]; then
+      ev "$1" orchestrator "$2" setup fail "exit $rc: $c"
+      echo "orch: warning: setup command failed in $3 (exit $rc): $c — output in $log; the commands after it did not run, and the session starts anyway" >&2
+      return 0
+    fi
+    ev "$1" orchestrator "$2" setup ok "exit 0: $c"
+    i=$((i + 1))
+  done
 }
 
 # cmd_continue: a developer stopped by its budget leaves its work uncommitted in its worktree; the next
@@ -1447,6 +1518,26 @@ run_rows() {
   done
 }
 
+# cross_run_overlap <run_dir> <tasks json>: a warning per task that shares paths or resources with a live
+# session of another unclosed run; the plan's own overlap check sees one run only. Live is read from the run
+# files — not removed, and its task still open — since polling claude agents at spawn cost minutes under load.
+cross_run_overlap() {
+  local p o
+  for p in "$(repo_root)"/.orchestrator/*/sessions.json; do
+    o=${p%/sessions.json}
+    [ "$o" != "$1" ] && [ ! -f "$o/CLOSED" ] && [ -f "$o/plan.json" ] || continue
+    jq -r --argjson t "$2" --arg open "$(open_tasks "$o")" --slurpfile op "$o/plan.json" --arg r "${o##*/}" "$JQ_DEFS"'
+      .[] | select((.removedAt // "") == "" and .role != "integrator") | . as $s
+      | select($open | split("\n") | index($s.taskId))
+      | [ $op[0].tasks[] | select(.id == $s.taskId) | .resources[]? ] as $sr
+      | $t[] | select(.role != "integrator")
+      | [ ((.pathsAllowed // [])[] as $x | ($s.pathsAllowed // [])[] as $y | select(paths_meet($x; $y)) | if $x == $y then $x else "\($x) ~ \($y)" end),
+          (.resources[]? as $x | select(any($sr[]; . == $x)) | $x) ] as $sh
+      | select(($sh | length) > 0)
+      | "orch: warning: task \(.id) shares \($sh | join(", ")) with \($s.name), a live session of run \($r): both may write those files or use that resource at once — sequence them, split the paths, or orch decide in both runs who holds what"' "$p" >&2
+  done
+}
+
 cmd_runs() {
   local run state open live last
   printf '%-20s %-7s %-5s %-5s %s\n' RUN STATE OPEN LIVE LAST_EVENT
@@ -1529,6 +1620,19 @@ cmd_inbox() {
     [ -z "$n" ] || echo "ready: $n"
   )
   if [ -n "$out" ]; then printf '%s\n' "$out"; else echo "nothing needs you in run ${1}"; fi
+}
+
+# cmd_followups: every line under "## Follow-ups" in the run's handoffs, named by the session that wrote it —
+# work outside a session's paths, which nobody owns until the lead routes it.
+cmd_followups() {
+  local d; d=$(run_dir "${1:-}"); local h line n=0
+  for h in "$d"/handoffs/*.md; do
+    [ -f "$h" ] || continue
+    while IFS= read -r line; do
+      printf '%s: %s\n' "$(basename "$h" .md)" "$line"; n=$((n + 1))
+    done < <(section "$h" Follow-ups | sed -n 's/^[-*] *//; /[^[:space:]]/p')
+  done
+  [ "$n" -gt 0 ] || echo "no follow-ups in the handoffs of run $1"
 }
 
 cmd_handoff() {
@@ -2195,6 +2299,7 @@ case "$cmd" in
   graph) cmd_graph "$@" ;;
   inbox) cmd_inbox "$@" ;;
   handoff) cmd_handoff "$@" ;;
+  followups) cmd_followups "$@" ;;
   handoff-put) cmd_handoff_put "$@" ;;
   qa-request) cmd_qa_request "$@" ;;
   accept) cmd_accept "$@" ;;

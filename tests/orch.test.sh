@@ -1598,4 +1598,118 @@ expect_grep '|orchestrator|r22|thaw|allow|' .orchestrator/r22/events.log "thaw i
 expect_exit 0 "resume-brief after thaw" "$ORCH" resume-brief r22
 expect_no_grep 'orch thaw' "$TMP_BASE/out" "no thaw once thawed"
 
+echo "# resources, cross-run overlap, setup, followups: runs r23 and r24"
+printf '{"run":"r1","tasks":[{"id":"a","role":"researcher","name":"ra","goal":"g","pathsAllowed":["ra/**"],"resources":["port:8000"],"acceptance":[],"dependsOn":[]},{"id":"b","role":"researcher","name":"rb","goal":"g","pathsAllowed":["rb/**"],"resources":["compose:dev","port:8000"],"acceptance":[],"dependsOn":[]}]}' > "$TMP_BASE/res.json"
+expect_exit 1 "plan rejects two same-wave tasks holding one resource" "$ORCH" plan r1 "$TMP_BASE/res.json"
+expect_grep 'tasks a and b share resources port:8000 and can run' "$TMP_BASE/err" "a shared resource is checked like a path"
+jq '.tasks[1].dependsOn = ["a"]' "$TMP_BASE/res.json" > "$TMP_BASE/res2.json"
+jq '.tasks[0].resources = "port:8000"' "$TMP_BASE/res2.json" > "$TMP_BASE/res3.json"
+expect_exit 1 "plan rejects resources that are not a list" "$ORCH" plan r1 "$TMP_BASE/res3.json"
+expect_grep 'task a: resources must be a list' "$TMP_BASE/err" "and says what it wants"
+for bad in '"setup":"npm ci"' '"maxParallel":0' '"maxParallel":"2"' '"maxLoad":-1'; do
+  jq ". + {$bad}" "$TMP_BASE/res2.json" > "$TMP_BASE/res4.json"
+  expect_exit 1 "plan rejects $bad" "$ORCH" plan r1 "$TMP_BASE/res4.json"
+  field=${bad#\"}; field=${field%%\"*}
+  expect_grep "ERROR: $field must be" "$TMP_BASE/err" "and names the field"
+done
+"$ORCH" init r23 --base main > /dev/null 2>&1
+"$ORCH" acceptance r23 off > /dev/null
+cat > "$TMP_BASE/r23.json" <<'JSON'
+{"run":"r23","tasks":[
+ {"id":"web23","role":"developer","name":"web-23","goal":"build it","pathsAllowed":["pkg23/**"],"resources":["port:8023","compose:stack23"],"acceptance":["green"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"rev23","role":"reviewer","name":"rev-23","goal":"review it","pathsAllowed":[],"acceptance":["cited"],"dependsOn":["web23"],"reviewOf":"web23","budget":10,"mcp":[]}
+]}
+JSON
+with_arch "$TMP_BASE/r23.json"
+"$ORCH" plan r23 "$TMP_BASE/r23.json" > /dev/null 2>&1
+"$ORCH" accept r23 arch fixture --force > /dev/null
+"$ORCH" spawn r23 web23 > /dev/null 2>&1
+jq '. + [{"taskId":"merge","name":"int-23","role":"integrator","id":"int23000","sessionId":"","pathsAllowed":["**"],"budget":10}]' .orchestrator/r23/sessions.json > "$TMP_BASE/s23" && mv "$TMP_BASE/s23" .orchestrator/r23/sessions.json
+echo int23000 >> "$TMP_BASE/claude.bg"
+"$ORCH" init r24 --base main > /dev/null 2>&1
+"$ORCH" acceptance r24 off > /dev/null
+cat > "$TMP_BASE/r24.json" <<'JSON'
+{"run":"r24","setup":["echo ran > setup-ran.txt","exit 3","echo never > never.txt"],"tasks":[
+ {"id":"x24","role":"developer","name":"dev-24","goal":"build it","pathsAllowed":["pkg23/api/**"],"resources":["port:8023"],"acceptance":["green"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"y24","role":"developer","name":"dev-24b","goal":"build that","pathsAllowed":["other24/**"],"acceptance":["green"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"rx24","role":"reviewer","name":"rev-24","goal":"review it","pathsAllowed":[],"acceptance":["cited"],"dependsOn":["x24"],"reviewOf":"x24","budget":10,"mcp":[]},
+ {"id":"ry24","role":"reviewer","name":"rev-24b","goal":"review that","pathsAllowed":[],"acceptance":["cited"],"dependsOn":["y24"],"reviewOf":"y24","budget":10,"mcp":[]}
+]}
+JSON
+with_arch "$TMP_BASE/r24.json"
+expect_exit 0 "plan r24 overlapping a live session of r23" "$ORCH" plan r24 "$TMP_BASE/r24.json"
+expect_grep 'warning: task x24 shares pkg23/api/\*\* ~ pkg23/\*\*, port:8023 with web-23, a live session of run r23' "$TMP_BASE/err" "plan warns about the paths and resources another run's live session holds"
+expect_no_grep 'task y24' "$TMP_BASE/err" "not about a task that shares nothing"
+expect_no_grep 'int-23' "$TMP_BASE/err" "nor about another run's integrator, whose ** is for merging"
+"$ORCH" accept r24 arch fixture --force > /dev/null
+expect_exit 0 "spawn a task overlapping another run" "$ORCH" spawn r24 x24 --dry-run
+expect_grep 'warning: task x24 shares .* with web-23, a live session of run r23' "$TMP_BASE/err" "spawn warns too"
+expect_exit 0 "brief of a task holding resources" "$ORCH" brief r24 x24
+expect_grep '^resources you hold: port:8023' "$TMP_BASE/out" "the brief names the resources it holds"
+expect_exit 0 "brief of a task holding none" "$ORCH" brief r24 y24
+expect_no_grep 'resources you hold' "$TMP_BASE/out" "names none"
+touch .orchestrator/r23/CLOSED
+expect_exit 0 "spawn beside a closed run" "$ORCH" spawn r24 x24 --dry-run
+expect_no_grep 'r23' "$TMP_BASE/err" "a closed run's sessions are not checked"
+rm .orchestrator/r23/CLOSED
+"$ORCH" rm r23 web-23 > /dev/null 2>&1
+expect_exit 0 "spawn once the other session is gone" "$ORCH" spawn r24 x24 --dry-run
+expect_no_grep 'web-23' "$TMP_BASE/err" "only live sessions are checked"
+WT24="$REPO/.claude/worktrees/r24-dev-24"
+expect_exit 0 "spawn r24 x24 with setup commands" "$ORCH" spawn r24 x24
+expect_grep '^ran$' "$WT24/setup-ran.txt" "setup ran in the new worktree"
+[ ! -e "$WT24/never.txt" ] && { PASS=$((PASS+1)); echo "ok   setup stops at the first failing command"; } || { FAIL=$((FAIL+1)); echo "FAIL setup went on past a failure"; }
+expect_grep '|orchestrator|dev-24|setup|ok|exit 0: echo ran > setup-ran.txt' .orchestrator/r24/events.log "each setup command is logged with its exit code"
+expect_grep '|orchestrator|dev-24|setup|fail|exit 3: exit 3' .orchestrator/r24/events.log "a failing one too"
+expect_grep 'setup command failed' "$TMP_BASE/err" "spawn warns about the failure"
+[ "$(awk -F'|' '$3 == "dev-24" && $5 == "allow"' .orchestrator/r24/events.log | grep -c .)" -eq 0 ] && { PASS=$((PASS+1)); echo "ok   setup is outside the budget"; } || { FAIL=$((FAIL+1)); echo "FAIL setup counted as calls"; }
+rm "$WT24/setup-ran.txt"
+"$ORCH" spawn r24 x24 --round 2 > /dev/null 2>&1
+[ ! -e "$WT24/setup-ran.txt" ] && { PASS=$((PASS+1)); echo "ok   setup does not run again in a worktree that exists"; } || { FAIL=$((FAIL+1)); echo "FAIL setup ran again"; }
+expect_exit 0 "followups of a run with none" "$ORCH" followups r24
+expect_grep 'no follow-ups' "$TMP_BASE/out" "says there are none"
+printf '# dev-24\n## Status\ndone\n\n## Follow-ups\n- package.json | add test:parity | outside my paths\n- tsconfig.json | include scripts/ | not in my paths\n\n## Branch\nr24-dev-24\n' | "$ORCH" handoff-put r24 dev-24 > /dev/null
+printf '# rev-24\n## Status\ndone\n\n## Follow-ups\n\n## Findings\nnone\n' | "$ORCH" handoff-put r24 rev-24 > /dev/null
+expect_exit 0 "followups r24" "$ORCH" followups r24
+expect_grep '^dev-24: package.json | add test:parity | outside my paths$' "$TMP_BASE/out" "every follow-up with the session that wrote it"
+expect_grep '^dev-24: tsconfig.json | include scripts/ | not in my paths$' "$TMP_BASE/out" "each on its own line"
+expect_no_grep 'r24-dev-24' "$TMP_BASE/out" "nothing from other sections"
+expect_no_grep 'rev-24' "$TMP_BASE/out" "nor from an empty one"
+
+echo "# maxParallel and maxLoad: run r25"
+"$ORCH" init r25 --base main > /dev/null 2>&1
+"$ORCH" acceptance r25 off > /dev/null
+cat > "$TMP_BASE/r25.json" <<'JSON'
+{"run":"r25","maxParallel":2,"maxLoad":0.5,"tasks":[
+ {"id":"a25","role":"researcher","name":"res-a25","goal":"g","pathsAllowed":["r25a/**"],"acceptance":[],"dependsOn":[],"mcp":[]},
+ {"id":"b25","role":"researcher","name":"res-b25","goal":"g","pathsAllowed":["r25b/**"],"acceptance":[],"dependsOn":[],"mcp":[]},
+ {"id":"c25","role":"researcher","name":"res-c25","goal":"g","pathsAllowed":["r25c/**"],"acceptance":[],"dependsOn":[],"mcp":[]}
+]}
+JSON
+"$ORCH" plan r25 "$TMP_BASE/r25.json" > /dev/null
+expect_exit 0 "spawn --wave under maxParallel 2" "$ORCH" spawn r25 --wave
+[ "$(jq 'length' .orchestrator/r25/sessions.json)" -eq 2 ] && { PASS=$((PASS+1)); echo "ok   a wave spawns at most maxParallel"; } || { FAIL=$((FAIL+1)); echo "FAIL wave spawned $(jq 'length' .orchestrator/r25/sessions.json)"; }
+expect_grep 'maxParallel 2: 0 at work; left for the next orch spawn r25 --wave: c25' "$TMP_BASE/err" "and names what it left"
+expect_exit 0 "spawn --wave with every slot taken" "$ORCH" spawn r25 --wave
+[ "$(jq 'length' .orchestrator/r25/sessions.json)" -eq 2 ] && { PASS=$((PASS+1)); echo "ok   none while two are at work"; } || { FAIL=$((FAIL+1)); echo "FAIL wave spawned past maxParallel"; }
+expect_grep 'maxParallel 2: 2 at work; left for the next orch spawn r25 --wave: c25' "$TMP_BASE/err" "and says so"
+printf '# res-a25\n## Status\ndone\n' | "$ORCH" handoff-put r25 res-a25 > /dev/null
+expect_exit 0 "spawn --wave once a session is done" "$ORCH" spawn r25 --wave
+expect_grep '"res-c25"' .orchestrator/r25/sessions.json "the task left over is spawned"
+"$ORCH" task add r25 - > /dev/null 2>&1 <<'JSON'
+{"id":"d25","role":"researcher","name":"res-d25","goal":"g","pathsAllowed":["r25d/**"],"acceptance":[],"dependsOn":[],"mcp":[]}
+JSON
+mkdir -p "$TMP_BASE/loadbin"
+printf '#!/bin/sh\necho "15:32  up 4 days, 13:54, 1 user, load averages: 9.50 3.08 2.87"\n' > "$TMP_BASE/loadbin/uptime"
+printf '#!/bin/sh\necho 4\n' > "$TMP_BASE/loadbin/getconf"
+chmod +x "$TMP_BASE/loadbin/uptime" "$TMP_BASE/loadbin/getconf"
+expect_exit 0 "spawn under a load above maxLoad" env PATH="$TMP_BASE/loadbin:$PATH" "$ORCH" spawn r25 d25 --dry-run
+expect_grep 'warning: load average 9.50 is above maxLoad 0.5 × 4 CPUs' "$TMP_BASE/err" "spawn warns about the load"
+printf '#!/bin/sh\necho " 10:01:02 up 3 days,  2:03,  2 users,  load average: 1.00, 0.01, 0.05"\n' > "$TMP_BASE/loadbin/uptime"
+expect_exit 0 "spawn under a load below maxLoad" env PATH="$TMP_BASE/loadbin:$PATH" "$ORCH" spawn r25 d25 --dry-run
+expect_no_grep 'load average' "$TMP_BASE/err" "no warning below it"
+printf '#!/bin/sh\necho "15:32  up 4 days, 13:54, 1 user, load averages: 9.50 3.08 2.87"\n' > "$TMP_BASE/loadbin/uptime"
+expect_exit 0 "spawn in a run without maxLoad" env PATH="$TMP_BASE/loadbin:$PATH" "$ORCH" spawn r24 y24 --dry-run
+expect_no_grep 'load average' "$TMP_BASE/err" "no warning without maxLoad"
+
 summary
