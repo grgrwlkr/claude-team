@@ -1719,4 +1719,9 @@ printf '#!/bin/sh\necho "15:32  up 4 days, 13:54, 1 user, load averages: 9.50 3.
 expect_exit 0 "spawn in a run without maxLoad" env PATH="$TMP_BASE/loadbin:$PATH" "$ORCH" spawn r24 y24 --dry-run
 expect_no_grep 'load average' "$TMP_BASE/err" "no warning without maxLoad"
 
+echo "# the example graph in references/plan.md is one orch plan accepts"
+awk '/^```json$/ {n++; if (n == 1) {p = 1; next}} /^```$/ {p = 0} p' "$PLUGIN_ROOT/skills/orchestrator/references/plan.md" > "$TMP_BASE/example.json"
+expect_exit 0 "init the example's run" "$ORCH" init doc-example --base main
+expect_exit 0 "orch plan accepts the documented example" "$ORCH" plan doc-example "$TMP_BASE/example.json"
+
 summary

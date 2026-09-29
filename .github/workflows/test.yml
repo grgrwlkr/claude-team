@@ -1,0 +1,32 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  suites:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: jq
+        run: command -v jq || { if [ "$RUNNER_OS" = macOS ]; then brew install jq; else sudo apt-get install -y jq; fi; }
+      - name: git identity for the fixtures
+        run: git config --global user.email ci@example.com && git config --global user.name ci
+      - name: guard suite
+        run: bash tests/guard.test.sh
+      - name: orch suite
+        run: bash tests/orch.test.sh
+      - name: guard suite under bash 3.2
+        if: runner.os == 'macOS'
+        run: mkdir -p "$RUNNER_TEMP/b32" && ln -sf /bin/bash "$RUNNER_TEMP/b32/bash" && PATH="$RUNNER_TEMP/b32:$PATH" bash tests/guard.test.sh
+      - name: orch suite under bash 3.2
+        if: runner.os == 'macOS'
+        run: PATH="$RUNNER_TEMP/b32:$PATH" bash tests/orch.test.sh
