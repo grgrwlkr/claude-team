@@ -84,7 +84,7 @@ sole_handoff_put() {
   own=$(cd "$(dirname "$0")/../bin" 2>/dev/null && pwd -P)/orch
   own=$(printf '%s' "$own" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
   local head="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+([A-Za-z0-9._-]+)[[:space:]]+([A-Za-z0-9-]+)[[:space:]]*"
-  local re_file="${head}<[[:space:]]*[A-Za-z0-9._/~-]+[[:space:]]*\$"
+  local re_file="${head}<[[:space:]]*([A-Za-z0-9._/~-]+)[[:space:]]*\$"
   local re_opt="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+([A-Za-z0-9._-]+)[[:space:]]+([A-Za-z0-9-]+)[[:space:]]+--file[[:space:]]+([A-Za-z0-9._/-]+)[[:space:]]*\$"
   local re_doc="${head}<<[[:space:]]*(['\"])([A-Za-z_][A-Za-z0-9_]*)['\"][[:space:]]*\$"
   first=${cmd%%$'\n'*}
@@ -92,13 +92,11 @@ sole_handoff_put() {
     # --file (contract C1): orch reads the file itself, so it must lie in the session's own worktree.
     if [[ "$cmd" =~ $re_opt ]]; then
       [ "${BASH_REMATCH[2]}" = "$run" ] && [ "${BASH_REMATCH[3]}" = "$me" ] || return 1
-      f=${BASH_REMATCH[4]}; case "$f" in /*) ;; *) f=$cwd/$f ;; esac
-      wt=$(jq -r '.worktree // ""' <<<"$rec")
-      [ -n "$wt" ] || wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
-      [ -n "$wt" ] && wt=$(canon "$wt") && [ -d "$wt" ] && f=$(canon "$f") && [ "$f" != "$wt" ] && under "$f" "$wt"
+      own_file "${BASH_REMATCH[4]}"
       return
     fi
-    [[ "$cmd" =~ $re_file ]] && [ "${BASH_REMATCH[2]}" = "$run" ] && [ "${BASH_REMATCH[3]}" = "$me" ]
+    # < file: the same rule as --file, since orch reads what the shell hands it.
+    [[ "$cmd" =~ $re_file ]] && [ "${BASH_REMATCH[2]}" = "$run" ] && [ "${BASH_REMATCH[3]}" = "$me" ] && own_file "${BASH_REMATCH[4]}"
     return
   fi
   [[ "$first" =~ $re_doc ]] || return 1
@@ -134,6 +132,15 @@ under() {
 # own_root: resolves own_wt, the session's worktree, in place; one that cannot be resolved confines nothing, so it blocks.
 own_root() {
   own_wt=$(canon "$own_wt") && [ -n "$own_wt" ] && [ -d "$own_wt" ] || block "your worktree cannot be resolved; ask the orchestrator"
+}
+# own_file <path>: a file inside the session's own worktree, not the worktree itself. orch reads a handoff
+# from it, so a path outside would carry any readable file into the run dir; a ~ path is taken as $HOME's.
+own_file() {
+  local f="$1" wt
+  case "$f" in '~'|'~/'*) f=$HOME${f#\~} ;; /*) ;; *) f=$cwd/$f ;; esac
+  wt=$(jq -r '.worktree // ""' <<<"$rec")
+  [ -n "$wt" ] || wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+  [ -n "$wt" ] && wt=$(canon "$wt") && [ -d "$wt" ] && f=$(canon "$f") && [ "$f" != "$wt" ] && under "$f" "$wt"
 }
 
 # Write targets of a Bash command, collected by write_scan into tg (absolute paths); unres=1 when one cannot
@@ -406,6 +413,19 @@ orch_cmd() {
   k=0
   if [ "${#v[@]}" -le 1 ] || { [ "${#v[@]}" -eq 2 ] && [ "${v[1]}" = --check ]; }; then k=1; fi
   judge_orch "${v[0]-}" "${v[1]-}" "${v[2]-}" "$k"
+  # What orch reads a handoff from, < file or --file, lies in the own worktree (scan_cmds collects ir/it).
+  if [ "${v[0]-}" = handoff-put ]; then
+    local src_msg="orch handoff-put reads the handoff from a file in your own worktree, such as .scratch/handoff.md"
+    for ((k = 0; k < ${#ir[@]}; k++)); do
+      [ "${it[$k]}" = W ] && own_file "${ir[$k]}" || block "$src_msg, not ${ir[$k]}"
+    done
+    for ((k = $1 + 1; k < ${#av[@]}; k++)); do
+      case "${av[$k]}" in
+        --file) [ "${at[$((k + 1))]-}" = W ] && own_file "${av[$((k + 1))]-}" || block "$src_msg, not ${av[$((k + 1))]-<missing>}" ;;
+        --file=*) [ "${at[$k]}" = W ] && own_file "${av[$k]#--file=}" || block "$src_msg, not ${av[$k]#--file=}" ;;
+      esac
+    done
+  fi
 }
 # scan_one: for the simple command in av/at, judges orch, and sets code when it runs code (a shell, an interpreter,
 # eval, xargs, find) or its command word is an expansion; that code may hold anything, so the text rules apply.
@@ -430,13 +450,17 @@ scan_one() {
 }
 # scan_cmds <command>: scan_one over every simple command of it, those in substitutions included.
 scan_cmds() {
-  local t v redir="" av at ci
-  av=() at=()
+  local t v redir="" av at ci ir it
+  av=() at=() ir=() it=()
   while IFS=$'\t' read -r t v; do
     case "$t" in
-      W|U|G) [ -n "$redir" ] || { av[${#av[@]}]=$v; at[${#at[@]}]=$t; }; redir="" ;;
+      W|U|G)
+        if [ -z "$redir" ]; then av[${#av[@]}]=$v; at[${#at[@]}]=$t
+        elif [ "$redir" = I ]; then ir[${#ir[@]}]=$v; it[${#it[@]}]=$t
+        fi
+        redir="" ;;
       O|D|I) redir=$t ;;
-      *) scan_one; av=() at=(); redir="" ;;
+      *) scan_one; av=() at=() ir=() it=(); redir="" ;;
     esac
   done < <(printf '%s' "$1" | shell_tokens)
   scan_one
@@ -611,8 +635,10 @@ if [ "$in_repo" != 1 ]; then
   block "your working directory ($cwd) is outside the repository of run $(basename "$run_dir"); cd back into your worktree before running or editing anything"
 fi
 # Nor may it sit inside the orchestrator's own directories, where relative paths would dodge the checks below.
-cwd_real=$(cd "$cwd" && pwd -P)
-if under "$cwd_real" "$run_dir" || under "$cwd_real" "$INDEX_DIR"; then
+# Both sides physical: an index reached through a symlinked path must still read as the orchestrator's.
+cwd_real=$(cd "$cwd" && pwd -P) && [ -n "$cwd_real" ] || block "your working directory ($cwd) cannot be resolved; cd back into your worktree"
+idx_real=$(canon "$INDEX_DIR") && [ -n "$idx_real" ] || block "the session index $INDEX_DIR cannot be resolved; ask the orchestrator"
+if under "$cwd_real" "$run_dir" || under "$cwd_real" "$idx_real"; then
   block "your working directory is inside the orchestrator's directory ($cwd_real); cd back into your worktree"
 fi
 
@@ -722,6 +748,10 @@ case "$tool" in
       while IFS= read -r arch_tail; do
         case "$arch_tail" in ''|' --check') ;; *) judge_orch architecture "" "" 0 ;; esac
       done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +architecture[^;&|<>]*' | sed -E 's/^[;&| /]?orch +architecture//; s/ +$//')
+      # Inside code the file a handoff is read from cannot be checked; the command form can.
+      if has '(^|[;&| /])orch +handoff-put[^;&|]*(<[^<]|--file)'; then
+        block "run orch handoff-put … < .scratch/handoff.md as a command of its own, not inside a shell or an interpreter"
+      fi
     fi
     # Each git call is judged in the directory it runs in: its -C, else the last cd before it, else the cwd.
     cwd0=$(cd "$(jq -r '.cwd' <<<"$input")" 2>/dev/null && pwd -P)
@@ -754,6 +784,34 @@ case "$tool" in
         own_root
         pw=$(canon "$pw") && under "$pw" "$own_wt" || block "$inst_msg"
       done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| ])(uv +)?([^ ;&|]*/)?pip[0-9.]* +install( |$)')
+      # Where the package lands decides it, not only which pip or npm runs: a project tool pointed at a
+      # prefix, target, interpreter or directory outside the worktree installs onto the machine.
+      while IFS= read -r seg; do
+        seg=${seg#[;&| ]}
+        case "$seg" in
+          uv\ *) opts=" --python -p --target --prefix " ;;
+          *pip*) opts=" --prefix --root --target -t "; case " $seg " in *" --user "*) block "$inst_msg" ;; esac ;;
+          npm\ *) opts=" --prefix " ;;
+          pnpm\ *) opts=" --dir -C --global-dir --modules-dir " ;;
+          yarn\ *) opts=" --modules-folder --cwd --global-folder " ;;
+          bun\ *) opts=" --cwd " ;;
+        esac
+        set -f; set -- $seg; set +f
+        while [ $# -gt 0 ]; do
+          dest=""
+          case "$1" in
+            --*=*) case "$opts" in *" ${1%%=*} "*) dest=${1#*=} ;; esac ;;
+            *) case "$opts" in *" $1 "*) dest=${2-}; shift ;; esac ;;
+          esac
+          shift
+          [ -n "$dest" ] || continue
+          case "$dest" in *'$'*|*'`'*|'~'*) block "$inst_msg" ;; /*) ;; *) dest=$cwd/$dest ;; esac
+          own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+          [ -n "$own_wt" ] || own_wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+          own_root
+          dest=$(canon "$dest") && under "$dest" "$own_wt" || block "$inst_msg"
+        done
+      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| ])((uv +)?([^ ;&|]*/)?pip[0-9.]*|npm|pnpm|yarn|bun) +(install|add|i)( [^;&|]*)?')
     fi
     if has '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
     if has '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
@@ -762,7 +820,6 @@ case "$tool" in
     write_scan "$cmd"
     if [ "${#tg[@]}" -gt 0 ]; then
       orch_dir=$(canon "${run_dir%/*}") && [ -n "$orch_dir" ] || block "the orchestrator's directory ${run_dir%/*} cannot be resolved; ask the orchestrator"
-      idx_real=$(canon "$INDEX_DIR")
       own_wt=$(jq -r '.worktree // ""' <<<"$rec")
       [ -n "$own_wt" ] || own_wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
       own_root

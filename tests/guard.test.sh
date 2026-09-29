@@ -74,7 +74,7 @@ expect_exit 2 "truncating the session index is blocked" bash "$GUARD" <<< "$(hoo
 
 : > "$RUN/events.log"
 echo "# first-run fixes: authorized actions and orch commands"
-expect_exit 0 "orch handoff-put is allowed for a session" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 dev-1 < /tmp/h.md"}')"
+expect_exit 0 "orch handoff-put is allowed for a session" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch handoff-put r1 dev-1 < .scratch/h.md"}')"
 expect_exit 0 "orch status is allowed for a session" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch status r1"}')"
 : > "$RUN/events.log"
 expect_exit 2 "orch pause is the lead's command, blocked for a session" bash "$GUARD" <<< "$(hook_input sid-dev "$WT" Bash '{"command":"orch pause r1 int-1 stop"}')"
@@ -497,6 +497,16 @@ for form in "npm -g install typescript" "pnpm add typescript --global" "yarn glo
 done
 dev_cmd 0 "the worktree's venv pip passes" ".venv/bin/pip install -r requirements.txt"
 dev_cmd 0 "so does uv pip install" "uv pip install -r requirements.txt"
+echo "# security review of 2dae217: the install gate judges where a package lands, not only where pip lives"
+n=0
+for form in ".venv/bin/pip install --user x" ".venv/bin/pip install --prefix /usr/local x" ".venv/bin/pip install --target=/opt/x x" \
+  ".venv/bin/pip install --root / x" "uv pip install --python /usr/bin/python3 x" "uv pip install -p /usr/bin/python3 x" \
+  "uv pip install --target /opt/x x" "npm install --prefix /usr/local typescript" "pnpm add --dir /opt/app x" "yarn add --modules-folder /opt/nm x"; do
+  n=$((n + 1)); dev_cmd 2 "an install that lands outside the worktree is gated, form $n: $form" "$form"
+done
+dev_cmd 0 "a venv pip installing into a target inside the worktree passes" ".venv/bin/pip install --target .scratch/site x"
+dev_cmd 0 "uv pip with the worktree's own interpreter passes" "uv pip install --python .venv/bin/python x"
+dev_cmd 0 "npm with a prefix inside the worktree passes" "npm install --prefix src x"
 dev_cmd 0 "and listing global packages" "npm ls -g"
 jq '.authorize.installTools = true' "$RUN/plan.json" > "$RUN/plan.tmp" && mv "$RUN/plan.tmp" "$RUN/plan.json"
 
@@ -536,7 +546,21 @@ dev_cmd 2 "a file outside the own worktree gets no free pass" "orch handoff-put 
 dev_cmd 2 "nor one that climbs out of it" "orch handoff-put r1 dev-1 --file ../../../../h.md"
 dev_cmd 2 "nor a chained command" "orch handoff-put r1 dev-1 --file .scratch/h.md; ls"
 dev_cmd 2 "nor another session's name" "orch handoff-put r1 int-1 --file .scratch/h.md"
+echo "# security review of 2dae217: the < file form is held to the own worktree like --file"
+dev_cmd 0 "handoff-put from a file in the own worktree goes through while paused" "orch handoff-put r1 dev-1 < .scratch/handoff.md"
+dev_cmd 2 "one from outside the worktree gets no free pass" "orch handoff-put r1 dev-1 < /etc/hosts"
+dev_cmd 2 "nor one that climbs out of it" "orch handoff-put r1 dev-1 < ../../../../h.md"
+dev_cmd 2 "nor one from the home directory" "orch handoff-put r1 dev-1 < ~/.ssh/id_rsa"
 rm "$RUN/PAUSE-dev-1"
+dev_cmd 2 "unpaused, a handoff read from outside the worktree is still refused" "orch handoff-put r1 dev-1 < /etc/hosts"
+dev_cmd 2 "and so is --file from outside it" "orch handoff-put r1 dev-1 --file /etc/hosts"
+dev_cmd 0 "a handoff from a file in the worktree passes" "orch handoff-put r1 dev-1 < .scratch/handoff.md"
+dev_cmd 2 "inside a shell the source cannot be checked, so the file form is refused there" "bash -c 'orch handoff-put r1 dev-1 < /etc/hosts'"
+echo "# security review of 2dae217: the index reached through a symlinked path is still the orchestrator's"
+mkdir -p "$REPO/.idx" && ln -s "$REPO/.idx" "$REPO/idxlink"
+expect_exit 2 "a working directory inside the index behind a symlink is held" env CLAUDE_ORCH_STATE="$REPO/idxlink" bash "$GUARD" <<< "$(hook_bash sid-dev "$REPO/.idx" "ls")"
+expect_grep "orchestrator's directory" "$TMP_BASE/err" "as the orchestrator's directory"
+rm -rf "$REPO/.idx" "$REPO/idxlink"
 
 echo "# lead item G3.10: a Bash write outside the own worktree is blocked wherever it lands"
 dev_cmd 2 "a write into the main checkout is blocked" "echo x > $REPO/src/a.ts"
