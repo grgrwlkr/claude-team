@@ -239,7 +239,7 @@ jq 'map(if .name == "dev-1" then .budget = 5 else . end)' "$RUN/sessions.json" >
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")" >/dev/null 2>&1 & done
 wait
 expect_exit 0 "twelve parallel calls on a budget of 5 allow exactly 5" test "$(grep -c '|sid-dev|dev-1|Bash|allow|' "$RUN/events.log")" -eq 5
-expect_exit 0 "and nudge exactly once" test "$(grep -c '|sid-dev|dev-1|Bash|nudge|' "$RUN/events.log")" -eq 1
+expect_exit 0 "and nudge exactly once" test "$(grep -c '|sid-dev|dev-1|Bash|nudge|[0-9]' "$RUN/events.log")" -eq 1
 expect_exit 0 "and leave no lock behind" test ! -e "$RUN/.budget-dev-1.lock"
 jq 'map(if .name == "dev-1" then .budget = 2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 : > "$RUN/events.log"
@@ -470,6 +470,114 @@ int_cmd 2 "so does branch -d -f" "git branch -d -f w9"
 int_cmd 2 "and branch -df" "git branch -df w9"
 int_cmd 0 "branch --delete of a merged branch is the authorized integrator's" "git branch --delete w9"
 git -C "$WT" branch -q --unset-upstream w1
+
+echo "# audit guard F6, tests-guard F7: a base checkout is judged per git call"
+dev_cmd 0 "a new branch, then a word equal to the base in the next command, passes" "git checkout -b feat && ls main"
+dev_cmd 0 "restoring a file from base with checkout <base> -- <paths> passes" "git checkout main -- src/a.ts"
+dev_cmd 0 "a detached checkout passes" "git checkout --detach main 2>&1 | tail -1; git log --oneline -1"
+dev_cmd 2 "a checkout of the base piped on stays blocked" "git checkout -q main 2>&1 | tail -1"
+dev_cmd 2 "and so does a switch to it with a command after" "git switch main && ls"
+
+echo "# audit guard F7, tests-guard F2: rm -r is judged within its own command"
+dev_cmd 0 "an absolute path in the command after rm -rf is not an rm target" "rm -rf .scratch/build && git -C $WT status"
+dev_cmd 0 "nor one after a ;" "rm -rf .scratch/build; ls /tmp"
+dev_cmd 2 "split flags and a variable target are blocked" 'rm -f -r $X'
+expect_grep 'rm -r may target' "$TMP_BASE/err" "as a recursive delete"
+dev_cmd 2 "so is --recursive with a \${…} target" 'rm --recursive ${HOME}/x'
+dev_cmd 2 "and -fR" 'rm -fR "$D"'
+dev_cmd 0 "rm -f of a variable is no recursive delete" 'rm -f $X'
+
+echo "# audit guard F14, tests-guard F20: the install gate reads the whole argv"
+jq '.authorize.installTools = false' "$RUN/plan.json" > "$RUN/plan.tmp" && mv "$RUN/plan.tmp" "$RUN/plan.json"
+n=0
+for form in "npm -g install typescript" "pnpm add typescript --global" "yarn global add typescript" "npx -y playwright@1.50 install chromium" \
+  "bunx playwright install" "go install golang.org/x/tools/gopls@latest" "deno install -g x.ts" "/usr/local/bin/pip3 install x" \
+  "uv pip install --system x" "python3 -m pip install x"; do
+  n=$((n + 1)); dev_cmd 2 "an install of tooling is gated, form $n: $form" "$form"
+done
+dev_cmd 0 "the worktree's venv pip passes" ".venv/bin/pip install -r requirements.txt"
+dev_cmd 0 "so does uv pip install" "uv pip install -r requirements.txt"
+dev_cmd 0 "and listing global packages" "npm ls -g"
+jq '.authorize.installTools = true' "$RUN/plan.json" > "$RUN/plan.tmp" && mv "$RUN/plan.tmp" "$RUN/plan.json"
+
+echo "# audit landscape L11: the third identical command in a row is a loop suspect, never a block"
+: > "$RUN/events.log"
+dev_cmd 0 "a command passes" "bun test src/a.test.ts"
+dev_cmd 0 "and again" "bun   test src/a.test.ts"
+dev_cmd 0 "the third time in a row passes too" "bun test  src/a.test.ts"
+expect_grep 'same command' "$TMP_BASE/err" "with one reminder on stderr"
+cp "$TMP_BASE/out" "$TMP_BASE/loop.json"
+expect_exit 0 "and the same reminder as additionalContext, which is what reaches the model on exit 0" jq -e '.hookSpecificOutput | .hookEventName == "PreToolUse" and (.additionalContext | test("same command")) and (has("permissionDecision") | not)' "$TMP_BASE/loop.json"
+expect_grep '|sid-dev|dev-1|Bash|nudge|loop-suspect' "$RUN/events.log" "and a loop-suspect line"
+dev_cmd 0 "the fourth passes with no second reminder" "bun test src/a.test.ts"
+expect_no_grep 'same command' "$TMP_BASE/err" "silently"
+expect_exit 0 "one loop-suspect line per streak" test "$(grep -c '|nudge|loop-suspect' "$RUN/events.log")" -eq 1
+: > "$RUN/events.log"
+dev_cmd 0 "a different command between breaks the streak" "ls"
+dev_cmd 0 "one" "bun test"
+dev_cmd 0 "two" "ls"
+dev_cmd 0 "three" "bun test"
+expect_no_grep 'loop-suspect' "$RUN/events.log" "no loop suspect for alternating commands"
+set_rec dev-1 '.budget = 10'
+: > "$RUN/events.log"
+echo "2026-09-29T00:00:00Z|sid-dev|dev-1|Bash|nudge|loop-suspect" >> "$RUN/events.log"
+for _ in 1 2 3 4 5 6 7 8; do echo "2026-09-29T00:00:00Z|sid-dev|dev-1|Bash|allow|ls" >> "$RUN/events.log"; done
+dev_cmd 2 "a loop-suspect line does not use up the 80% reminder" "ls"
+expect_grep 'partial handoff' "$TMP_BASE/err" "which still comes"
+set_rec dev-1 '.budget = 500'
+
+echo "# contract C1: orch handoff-put --file <path in the own worktree> is the handoff channel"
+: > "$RUN/events.log"
+touch "$RUN/PAUSE-dev-1"
+dev_cmd 0 "a sole handoff-put --file goes through while paused" "orch handoff-put r1 dev-1 --file .scratch/handoff.md"
+expect_grep '|sid-dev|dev-1|Bash|allow-free|handoff-put' "$RUN/events.log" "outside the budget"
+dev_cmd 0 "so does an absolute path in the own worktree" "orch handoff-put r1 dev-1 --file $WT/.scratch/handoff.md"
+dev_cmd 2 "a file outside the own worktree gets no free pass" "orch handoff-put r1 dev-1 --file /tmp/h.md"
+dev_cmd 2 "nor one that climbs out of it" "orch handoff-put r1 dev-1 --file ../../../../h.md"
+dev_cmd 2 "nor a chained command" "orch handoff-put r1 dev-1 --file .scratch/h.md; ls"
+dev_cmd 2 "nor another session's name" "orch handoff-put r1 int-1 --file .scratch/h.md"
+rm "$RUN/PAUSE-dev-1"
+
+echo "# lead item G3.10: a Bash write outside the own worktree is blocked wherever it lands"
+dev_cmd 2 "a write into the main checkout is blocked" "echo x > $REPO/src/a.ts"
+expect_grep 'outside your worktree' "$TMP_BASE/err" "as outside the worktree"
+dev_cmd 2 "so is one into /tmp" "echo x > /tmp/g3b-x"
+dev_cmd 2 "and one into \$HOME" "cp src/a.ts ~/g3b-x"
+dev_cmd 0 "/dev/null, /dev/stdout, /dev/stderr and /dev/fd pass" "echo x > /dev/null; echo y >/dev/stdout 2>/dev/stderr; echo z > /dev/fd/2"
+
+echo "# lead item G3.11: a worktree the guard cannot resolve confines nothing"
+set_wt() { jq --arg p "$1" 'map(if .name == "int-1" then .worktree = $p else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"; }
+set_wt "$TMP_BASE/nowt/wt"
+expect_exit 2 "a record whose worktree does not exist blocks a ** Edit inside that path" bash "$GUARD" <<< "$(hook_input sid-int "$W3" Edit '{"file_path":"'"$TMP_BASE"'/nowt/wt/src/a.ts"}')"
+expect_grep 'worktree cannot be resolved' "$TMP_BASE/err" "and says the worktree cannot be resolved"
+int_cmd 2 "and a Bash write" "echo x > src/a.ts"
+expect_grep 'worktree cannot be resolved' "$TMP_BASE/err" "for the same reason"
+int_cmd 2 "and a cd into an arbitrary directory" "cd /tmp && ls"
+expect_grep 'worktree cannot be resolved' "$TMP_BASE/err" "for the same reason, not for leaving the repository"
+mkdir -p "$TMP_BASE/locked/wt"; chmod 000 "$TMP_BASE/locked"
+set_wt "$TMP_BASE/locked/wt"
+expect_exit 2 "a worktree whose resolution fails does not turn ** into every path" bash "$GUARD" <<< "$(hook_input sid-int "$W3" Edit '{"file_path":"'"$REPO"'/src/a.ts"}')"
+chmod 755 "$TMP_BASE/locked"
+set_wt "$W3"
+ln -s "$REPO" "$TMP_BASE/repolink"
+printf '%s' "$TMP_BASE/repolink/.orchestrator/r1" > "$CLAUDE_ORCH_STATE/sid-dev"
+dev_at 2 "a run dir reached through a symlinked parent still blocks a write into it" /tmp "cd $WT && echo x > $RUN/PAUSE"
+expect_grep 'written only by the orchestrator' "$TMP_BASE/err" "as the orchestrator's"
+rm -f "$CLAUDE_ORCH_STATE/sid-dev"
+
+echo "# lead item G3.12: orch behind a wrapper the guard does not know is still orch"
+n=0
+for form in "caffeinate orch accept r1 impl" "stdbuf -o0 orch accept r1 impl" "arch -arm64 orch accept r1 impl" "ionice -c3 orch accept r1 impl" \
+  "setsid orch accept r1 impl" "flock /tmp/l orch accept r1 impl" "script -q /dev/null orch accept r1 impl" "unbuffer orch accept r1 impl" \
+  "watch orch accept r1 impl" "doas orch accept r1 impl"; do
+  n=$((n + 1)); dev_cmd 2 "a lead command behind a wrapper is blocked, form $n: ${form%% orch*}" "$form"
+done
+dev_cmd 0 "orch in a grep pattern is still prose" "grep -rn 'orch spawn' docs"
+dev_cmd 0 "and in a commit message" "git commit -m 'orch accept'"
+dev_cmd 0 "and after echo" "echo orch accept r1 impl"
+dev_cmd 0 "a session command behind a wrapper passes" "caffeinate orch status r1"
+dev_cmd 2 "sed's e command runs a shell, so its script is scanned" "sed -n '1e orch accept r1 impl' src/a.ts"
+dev_cmd 0 "a sed script that only substitutes is text" "sed -e 's/orch accept/x/' src/a.ts"
 set_rec dev-1 '.budget = 2'
 
 echo "# stop gate"

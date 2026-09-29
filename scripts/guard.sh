@@ -80,14 +80,24 @@ allow_free() {
 # The command word is bare `orch` or this plugin's own bin/orch, nothing else: a session can write
 # a file named orch inside its allowed paths, and a pattern-matched name would run it unscanned.
 sole_handoff_put() {
-  local cmd="$1" me="$2" run="$3" first rest delim last own
+  local cmd="$1" me="$2" run="$3" first rest delim last own f wt
   own=$(cd "$(dirname "$0")/../bin" 2>/dev/null && pwd -P)/orch
   own=$(printf '%s' "$own" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
   local head="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+([A-Za-z0-9._-]+)[[:space:]]+([A-Za-z0-9-]+)[[:space:]]*"
   local re_file="${head}<[[:space:]]*[A-Za-z0-9._/~-]+[[:space:]]*\$"
+  local re_opt="^[[:space:]]*(orch|${own})[[:space:]]+handoff-put[[:space:]]+([A-Za-z0-9._-]+)[[:space:]]+([A-Za-z0-9-]+)[[:space:]]+--file[[:space:]]+([A-Za-z0-9._/-]+)[[:space:]]*\$"
   local re_doc="${head}<<[[:space:]]*(['\"])([A-Za-z_][A-Za-z0-9_]*)['\"][[:space:]]*\$"
   first=${cmd%%$'\n'*}
   if [ "$first" = "$cmd" ]; then
+    # --file (contract C1): orch reads the file itself, so it must lie in the session's own worktree.
+    if [[ "$cmd" =~ $re_opt ]]; then
+      [ "${BASH_REMATCH[2]}" = "$run" ] && [ "${BASH_REMATCH[3]}" = "$me" ] || return 1
+      f=${BASH_REMATCH[4]}; case "$f" in /*) ;; *) f=$cwd/$f ;; esac
+      wt=$(jq -r '.worktree // ""' <<<"$rec")
+      [ -n "$wt" ] || wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+      [ -n "$wt" ] && wt=$(canon "$wt") && [ -d "$wt" ] && f=$(canon "$f") && [ "$f" != "$wt" ] && under "$f" "$wt"
+      return
+    fi
     [[ "$cmd" =~ $re_file ]] && [ "${BASH_REMATCH[2]}" = "$run" ] && [ "${BASH_REMATCH[3]}" = "$me" ]
     return
   fi
@@ -114,6 +124,16 @@ canon() {
   for c in $d$rest; do case "$c" in ''|.) ;; ..) out=${out%/*} ;; *) out=$out/$c ;; esac; done
   set +f
   printf '%s' "${out:-/}"
+}
+# under <path> <root>: the path is the root or inside it. An empty root holds nothing: as a prefix it would be /*.
+under() {
+  [ -n "$2" ] || return 1
+  case "$1/" in "$2"/*) return 0 ;; esac
+  return 1
+}
+# own_root: resolves own_wt, the session's worktree, in place; one that cannot be resolved confines nothing, so it blocks.
+own_root() {
+  own_wt=$(canon "$own_wt") && [ -n "$own_wt" ] && [ -d "$own_wt" ] || block "your worktree cannot be resolved; ask the orchestrator"
 }
 
 # Write targets of a Bash command, collected by write_scan into tg (absolute paths); unres=1 when one cannot
@@ -372,12 +392,12 @@ judge_orch() {
     *) block "orch $1 is the orchestrator's command; a session may use only orch handoff-put, handoff, status, events, ready, doctor, tools, architecture" ;;
   esac
 }
-# orch_cmd: judges the simple command in av/at, whose command word at ci is orch. An argument built from an
+# orch_cmd <index>: judges the orch call in av/at whose orch word is at <index>. An argument built from an
 # expansion or a glob is not taken at its face value.
 orch_cmd() {
   local k v
   v=()
-  for ((k = ci + 1; k < ${#av[@]}; k++)); do
+  for ((k = $1 + 1; k < ${#av[@]}; k++)); do
     if [ "${at[$k]}" = W ]; then v[${#v[@]}]=${av[$k]}; else v[${#v[@]}]="<an expansion>"; fi
   done
   k=0
@@ -386,13 +406,24 @@ orch_cmd() {
 }
 # scan_one: for the simple command in av/at, judges orch, and sets code when it runs code (a shell, an interpreter,
 # eval, xargs, find) or its command word is an expansion; that code may hold anything, so the text rules apply.
+# Any word orch starts an orch call, unless the command is one that never runs its arguments: a wrapper the
+# guard does not know (caffeinate, flock, watch…) runs them all the same.
 scan_one() {
+  local k re='(^|[^A-Za-z-])[ew]([^A-Za-z]|$)'
   cmd_word || return 0
   if [ "${at[$ci]}" != W ]; then code=1; return 0; fi
   case "${av[$ci]##*/}" in
-    orch) orch_cmd ;;
     bash|sh|zsh|dash|ksh|fish|csh|tcsh|python|python[0-9]*|node|nodejs|bun|deno|ruby|perl|php|lua|osascript|eval|source|.|xargs|find|awk|gawk|nawk|mawk|ssh) code=1 ;;
+    grep|egrep|fgrep|rg|ag|ack|git|echo|printf|cat|less|more|head|tail|wc|jq|ls|test|'['|diff|cmp|sort|uniq|cut|tr|basename|dirname|realpath|readlink|file|stat|du|df) return 0 ;;
+    # sed runs a shell through its e command and flag, like bash -c, and writes through w
+    sed|gsed)
+      for ((k = ci + 1; k < ${#av[@]}; k++)); do [[ "${av[$k]}" =~ $re ]] && break; done
+      [ "$k" -lt "${#av[@]}" ] || return 0
+      code=1 ;;
   esac
+  for ((k = ci; k < ${#av[@]}; k++)); do
+    case "${av[$k]}" in orch|*/orch) orch_cmd "$k" ;; esac
+  done
 }
 # scan_cmds <command>: scan_one over every simple command of it, those in substitutions included.
 scan_cmds() {
@@ -518,6 +549,17 @@ judge_git() {
           [ "$dl" = 1 ] && del_merged ;;
       esac ;;
     worktree) [ "${ga[1]-}" = remove ] && del_merged ;;
+    # Restoring paths from the base or looking at it detached leaves the session's branch where it is.
+    checkout|switch)
+      [ "$role" = integrator ] && return 0
+      for ((k = 1; k < ${#ga[@]}; k++)); do
+        case "${ga[$k]}" in
+          --detach) return 0 ;;
+          --) [ $((k + 1)) -lt "${#ga[@]}" ] && return 0; break ;;
+          "$base") dl=1 ;;
+        esac
+      done
+      [ "$dl" = 0 ] || block "only the integrator works on the base branch ($base)" ;;
     commit|merge|rebase|cherry-pick|am)
       if [ "$role" != integrator ] && [ -n "$d" ] && [ "$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$base" ]; then
         block "this git call runs on the base branch ($base) in $d; commits there are the integrator's. Move to your worktree."
@@ -553,9 +595,9 @@ if [ "$tool" = Bash ] || [ "$tool" = Monitor ]; then
     d=${BASH_REMATCH[1]}
     case "$d" in "$q"*|\"*) d=${d:1:${#d}-2} ;; esac
     case "$d" in /*) ;; *) if [ -d "$cwd" ]; then d=$cwd/$d; else d=""; fi ;; esac
-    own_wt=$(canon "$own_wt")
-    if [ -n "$d" ] && d=$(canon "$d") && [ -d "$d" ]; then
-      case "$d/" in "$own_wt"/*) cwd=$d in_repo=1 ;; esac
+    own_root
+    if [ -n "$d" ] && d=$(canon "$d") && [ -d "$d" ] && under "$d" "$own_wt"; then
+      cwd=$d in_repo=1
     fi
   fi
 fi
@@ -567,9 +609,9 @@ if [ "$in_repo" != 1 ]; then
 fi
 # Nor may it sit inside the orchestrator's own directories, where relative paths would dodge the checks below.
 cwd_real=$(cd "$cwd" && pwd -P)
-case "$cwd_real/" in
-  "$run_dir"/*|"$INDEX_DIR"/*) block "your working directory is inside the orchestrator's directory ($cwd_real); cd back into your worktree" ;;
-esac
+if under "$cwd_real" "$run_dir" || under "$cwd_real" "$INDEX_DIR"; then
+  block "your working directory is inside the orchestrator's directory ($cwd_real); cd back into your worktree"
+fi
 
 # A session orch started inside its worktree stays there: claude rm keeps that worktree, but deletes
 # one the session made itself with its branch once the commits are pushed or merged. A session
@@ -611,7 +653,8 @@ if [ "$budget" -gt 0 ]; then
     block "tool-call budget spent ($used of $budget). Send your handoff with Status partial — a command that is only 'orch handoff-put $(basename "$run_dir") $name' with a quoted heredoc or '< file' is outside the budget — and stop; the orchestrator decides what happens next."
   fi
   # From 80%, hold one call so the work lands in a partial handoff while the session can still write one.
-  if [ $((used * 5)) -ge $((budget * 4)) ] && ! grep -q "^[^|]*|$sid|[^|]*|[^|]*|nudge|" "$run_dir/events.log" 2>/dev/null; then
+  # Its nudge line carries the count; a loop-suspect nudge is another reminder and does not stand for it.
+  if [ $((used * 5)) -ge $((budget * 4)) ] && ! grep -q "^[^|]*|$sid|[^|]*|[^|]*|nudge|[0-9]" "$run_dir/events.log" 2>/dev/null; then
     log_event "$run_dir" "$sid" "$name" "$tool" nudge "$used of $budget"
     printf 'orchestrator guard for %s: %s of %s guarded calls used (80%%). Send a partial handoff now — orch handoff-put %s %s < .scratch/handoff.md — so the work survives if the budget runs out, then repeat this call. This reminder comes once.\n' "$name" "$used" "$budget" "$(basename "$run_dir")" "$name" >&2
     exit 2
@@ -621,14 +664,12 @@ fi
 case "$tool" in
   Edit|Write|MultiEdit|NotebookEdit)
     [ -n "$file_path" ] || allow
-    case "$file_path" in
-      "$run_dir"/handoffs/*) block "that handoff belongs to another session; you may write only $handoff" ;;
-      "$run_dir"/*) block "the run directory is the orchestrator's; you may write only $handoff" ;;
-    esac
+    under "${file_path%/*}" "$run_dir/handoffs" && block "that handoff belongs to another session; you may write only $handoff"
+    under "${file_path%/*}" "$run_dir" && block "the run directory is the orchestrator's; you may write only $handoff"
     # The worktree is the session's own, from its record, else the one the file sits in; never the cwd's.
     own_wt=$(jq -r '.worktree // ""' <<<"$rec")
     if [ -n "$own_wt" ]; then
-      wt=$(canon "$own_wt")
+      own_root; wt=$own_wt
     else
       d=$(dirname "$file_path"); until [ -d "$d" ]; do d=$(dirname "$d"); done
       wt=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || block "edits are allowed only inside your git worktree"
@@ -642,10 +683,8 @@ case "$tool" in
         [ "$wt" = "${op[$j]}" ] && block "$file_path is in ${on[$j]}'s worktree; a session writes only in its own"
       done
     fi
-    case "$file_path" in
-      "$wt"/*) rel=${file_path#"$wt"/} ;;
-      *) block "path is outside your worktree ($wt)" ;;
-    esac
+    under "${file_path%/*}" "$wt" || block "path is outside your worktree ($wt)"
+    rel=${file_path#"$wt"/}
     # Scratch space the team rules send every session to, whatever its task's paths.
     case "$rel" in .scratch/*) allow "$rel" ;; esac
     ok=0
@@ -669,8 +708,6 @@ case "$tool" in
     # A quoted heredoc's body is data and left out, unless the command runs code that may read it as a script.
     if [ "$code" = 1 ]; then text=$cmd; else text=$(printf '%s' "$cmd" | strip_quoted_heredocs); fi
     flat=$(printf '%s' "$text" | tr -d '"'"'"'\\' | tr -s '[:space:]' ' ')
-    # git with any global options before the subcommand: git -C dir push, git --git-dir=x reset …
-    GIT='git( -[A-Za-z=/._-]+( [^ -][^ ]*)?)*'
     has() { printf '%s' "$flat" | grep -Eq "$1"; }
     # A command that runs code gets the text scan as well: every mention of orch is taken for a call.
     if [ "$code" = 1 ] && has '(^|[;&| /])orch +[a-z-]'; then
@@ -699,8 +736,21 @@ case "$tool" in
     if has '(^|[;&| /])claude [^|;&]*--(bg|background)( |=|$)'; then block "a team session starts no background session; ask the orchestrator for a teammate"; fi
     # Installing tooling onto the machine is the user's call, given once at plan approval (install-tools).
     # A project-local `npm install` or `bun install` is the project's own dependency step and passes.
-    if [ "$auth_install" != true ] && has '(^|[;&| ])(brew|apt|apt-get|dnf|yum|pacman|apk|choco|winget|pipx|cargo|gem) +(install|add)( |$)|(^|[;&| ])(npm|pnpm|yarn|bun) +(install|add|i)( [^|;&]*)? +(-g|--global)( |$)|(^|[;&| ])(pip3?|uv) +(install|pip install|tool install)( |$)|(^|[;&| ])npx +playwright +install|(^|[;&| ])playwright +install|(^|[;&| ])claude +mcp +add( |$)'; then
-      block "installing tooling on this machine is not authorized in this run's plan; report BLOCKED: with the tool and the install command from 'orch tools', the orchestrator asks the user and runs orch authorize <run> install-tools on"
+    # pip by a path inside the own worktree is its venv's, and uv pip installs into the project's venv unless told --system.
+    if [ "$auth_install" != true ]; then
+      inst_msg="installing tooling on this machine is not authorized in this run's plan; report BLOCKED: with the tool and the install command from 'orch tools', the orchestrator asks the user and runs orch authorize <run> install-tools on"
+      if has '(^|[;&| /])(brew|apt|apt-get|dnf|yum|pacman|apk|choco|winget|pipx|cargo|gem) +(install|add)( |$)|(^|[;&| /])(npm|pnpm|yarn|bun)( [^|;&]*)? ((install|add|i)( [^|;&]*)? (-g|--global)|(-g|--global)( [^|;&]*)? (install|add|i))( |$)|(^|[;&| /])yarn +global +add( |$)|(^|[;&| /])(go|deno) +install( |$)|(^|[;&| /])uv +(tool +install|pip +install( [^|;&]*)? --system)( |=|$)|(^|[;&| /])playwright(@[^ ]+)? +install( |$)|(^|[;&| /])claude +mcp +add( |$)'; then
+        block "$inst_msg"
+      fi
+      while IFS= read -r pw; do
+        pw=${pw#[;&| ]}
+        case "$pw" in uv\ *) continue ;; */*) ;; *) block "$inst_msg" ;; esac
+        pw=${pw%% *}; case "$pw" in /*) ;; *) pw=$cwd/$pw ;; esac
+        own_wt=$(jq -r '.worktree // ""' <<<"$rec")
+        [ -n "$own_wt" ] || own_wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+        own_root
+        pw=$(canon "$pw") && under "$pw" "$own_wt" || block "$inst_msg"
+      done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| ])(uv +)?([^ ;&|]*/)?pip[0-9.]* +install( |$)')
     fi
     if has '(^|[;&| ])sudo( |$)'; then block "no sudo in a team session"; fi
     if has '(curl|wget)[^|]*\| *(ba|z|da)?sh( |$)'; then block "piping a download into a shell is not allowed; download, read, then run"; fi
@@ -708,45 +758,60 @@ case "$tool" in
     tg=() unres=0
     write_scan "$cmd"
     if [ "${#tg[@]}" -gt 0 ]; then
-      orch_dir=${run_dir%/*}
+      orch_dir=$(canon "${run_dir%/*}") && [ -n "$orch_dir" ] || block "the orchestrator's directory ${run_dir%/*} cannot be resolved; ask the orchestrator"
       idx_real=$(canon "$INDEX_DIR")
       own_wt=$(jq -r '.worktree // ""' <<<"$rec")
       [ -n "$own_wt" ] || own_wt=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
-      [ -z "$own_wt" ] || own_wt=$(canon "$own_wt")
+      own_root
       others
       for ((k = 0; k < ${#tg[@]}; k++)); do
+        case "${tg[$k]}" in /dev/null|/dev/stdout|/dev/stderr|/dev/fd/*) continue ;; esac
         t=$(canon "${tg[$k]}") || { unres=1; continue; }
-        case "$t/" in "$orch_dir"/*|"$idx_real"/*) block "$state_msg (this command writes $t)" ;; esac
+        if under "$t" "$orch_dir" || under "$t" "$idx_real"; then block "$state_msg (this command writes $t)"; fi
         for ((j = 0; j < ${#op[@]}; j++)); do
-          case "$t/" in "${op[$j]}"/*) block "$t is in ${on[$j]}'s worktree; a session writes only in its own" ;; esac
+          under "$t" "${op[$j]}" && block "$t is in ${on[$j]}'s worktree; a session writes only in its own"
         done
-        if [ -n "$own_wt" ]; then
-          case "$t/" in
-            "$own_wt"/*)
-              rel=${t#"$own_wt"}; rel=${rel#/}
-              path_ok "$rel" || block "path ${rel:-.} is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it: it grants a path with orch paths $(basename "$run_dir") $name add <glob>, never by editing sessions.json." ;;
-          esac
-        fi
+        under "$t" "$own_wt" || block "$t is outside your worktree ($own_wt); a session writes only in its own"
+        rel=${t#"$own_wt"}; rel=${rel#/}
+        path_ok "$rel" || block "path ${rel:-.} is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it: it grants a path with orch paths $(basename "$run_dir") $name add <glob>, never by editing sessions.json."
       done
     fi
     # A target the scan cannot resolve is judged by the text: naming the run dir or the index is enough.
+    # This is a tripwire, not the fence: what such a write changed in the worktree is caught by the diff orch accept checks.
     if [ "$unres" = 1 ]; then
       has '(\.orchestrator|orchestrator-sessions)' && block "$state_msg"
       printf '%s' "$flat" | grep -qF -- "$INDEX_DIR" && block "$state_msg"
     fi
-    if has '(^|[;&| ])rm -[a-zA-Z]*[rR]'; then
-      tail_part=${flat#*rm }
-      for tok in $tail_part; do
-        case "$tok" in
-          -*) ;;
-          /*|~*|..*|\$HOME*) block "rm -r may target only relative paths inside your worktree (saw $tok)" ;;
-        esac
-      done
+    # rm -r, its flags split or not, is judged up to the end of its own command; an expansion there is unknown.
+    tok=$(printf '%s\n' "${text//\\$'\n'/ }" | tr -d '"'"'"'\\' | awk '
+{
+  gsub(/[0-9]*[<>]+&[0-9-]+/, " "); gsub(/[0-9]*[<>]+&?/, " > "); gsub(/[;&|()`]/, " ; ")
+  n = split($0, w, " "); rm = 0
+  for (i = 1; i <= n + 1; i++) {
+    x = (i > n) ? ";" : w[i]
+    if (x == ";") { if (r && bad != "") { print bad; exit } rm = 0; r = 0; bad = ""; continue }
+    if (x == ">") { if (w[i+1] != ";") i++; continue }
+    if (!rm) { if (x == "rm" || x ~ /\/rm$/) { rm = 1; r = 0; eo = 0; bad = "" } continue }
+    if (!eo && x == "--") eo = 1
+    else if (!eo && x == "--recursive") r = 1
+    else if (!eo && x ~ /^-[^-]/) { if (x ~ /[rR]/) r = 1 }
+    else if (bad == "" && x ~ /^(\/|~|\.\.|\$)/) bad = x
+  }
+}')
+    [ -z "$tok" ] || block "rm -r may target only relative paths inside your worktree (saw $tok)"
+    detail=$(printf '%s' "$cmd" | cut -c1-120)
+    # The same command a third time in a row may be a loop: said once per streak, never refused.
+    key=$(printf '%s' "$detail" | tr '\n|' '  ' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+    if [ "$(grep "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$run_dir/events.log" 2>/dev/null | tail -n 3 | T="$tool" K="$key" awk -F'|' '
+      { d = $6; gsub(/[[:space:]]+/, " ", d); sub(/^ /, "", d); sub(/ $/, "", d); s[NR] = ($4 == ENVIRON["T"] && d == ENVIRON["K"]) }
+      END { print (NR >= 2 && s[NR] && s[NR-1] && !s[NR-2]) ? 1 : 0 }')" = 1 ]; then
+      log_event "$run_dir" "$sid" "$name" "$tool" nudge loop-suspect
+      loop_msg="orchestrator guard for $name: this is the same command a third time in a row. If it keeps giving the same result, change the approach, or send a partial handoff and tell the orchestrator what holds you."
+      printf '%s\n' "$loop_msg" >&2
+      # On exit 0 only additionalContext reaches the model; without a permissionDecision it approves nothing.
+      jq -cn --arg m "$loop_msg" '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $m}}'
     fi
-    if [ "$role" != integrator ]; then
-      if has "${GIT} (checkout|switch)( [^ ]*)* $base( |$)"; then block "only the integrator works on the base branch ($base)"; fi
-    fi
-    allow "$(printf '%s' "$cmd" | cut -c1-120)"
+    allow "$detail"
     ;;
   Agent|Task)
     # A team session starts no subagent but the MCP helpers orch spawn gave this very session:
