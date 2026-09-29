@@ -788,13 +788,16 @@ case "$tool" in
       # prefix, target, interpreter or directory outside the worktree installs onto the machine.
       while IFS= read -r seg; do
         seg=${seg#[;&| ]}
-        case "$seg" in
-          uv\ *) opts=" --python -p --target --prefix " ;;
-          *pip*) opts=" --prefix --root --target -t "; case " $seg " in *" --user "*) block "$inst_msg" ;; esac ;;
-          npm\ *) opts=" --prefix " ;;
-          pnpm\ *) opts=" --dir -C --global-dir --modules-dir " ;;
-          yarn\ *) opts=" --modules-folder --cwd --global-folder " ;;
-          bun\ *) opts=" --cwd " ;;
+        # The tool is the first word's name, never a substring: a package called pipx must not make yarn read as pip.
+        tool_w=${seg%% *}; opts=""
+        case "${tool_w##*/}" in
+          uv) opts=" --python -p --target --prefix " ;;
+          pip|pip[0-9]*) opts=" --prefix --root --target -t "; case " $seg " in *" --user "*) block "$inst_msg" ;; esac ;;
+          npm) opts=" --prefix " ;;
+          pnpm) opts=" --dir -C --global-dir --modules-dir " ;;
+          yarn) opts=" --modules-folder --cwd --global-folder " ;;
+          bun) opts=" --cwd " ;;
+          *) block "$inst_msg" ;;
         esac
         set -f; set -- $seg; set +f
         while [ $# -gt 0 ]; do

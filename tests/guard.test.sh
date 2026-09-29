@@ -504,6 +504,9 @@ for form in ".venv/bin/pip install --user x" ".venv/bin/pip install --prefix /us
   "uv pip install --target /opt/x x" "npm install --prefix /usr/local typescript" "pnpm add --dir /opt/app x" "yarn add --modules-folder /opt/nm x"; do
   n=$((n + 1)); dev_cmd 2 "an install that lands outside the worktree is gated, form $n: $form" "$form"
 done
+dev_cmd 2 "a package whose name holds pip does not make yarn read as pip" "yarn add --modules-folder /opt/nm pipdeptree"
+dev_cmd 2 "nor pnpm" "pnpm add --dir /opt/app pipx"
+dev_cmd 2 "nor bun" "bun add --cwd /opt/app pip-tools"
 dev_cmd 0 "a venv pip installing into a target inside the worktree passes" ".venv/bin/pip install --target .scratch/site x"
 dev_cmd 0 "uv pip with the worktree's own interpreter passes" "uv pip install --python .venv/bin/python x"
 dev_cmd 0 "npm with a prefix inside the worktree passes" "npm install --prefix src x"
