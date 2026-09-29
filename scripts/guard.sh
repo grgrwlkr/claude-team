@@ -150,6 +150,13 @@ fi
 # Budget: allowed guarded calls so far, before this one. 0 is no cap; one that is not a whole number is no licence.
 case "$budget" in ''|*[!0-9]*) block "budget unreadable; ask the orchestrator" ;; esac
 if [ "$budget" -gt 0 ]; then
+  # Held from the count to this call's own log line, or parallel calls of one message all pass the count.
+  lock="$run_dir/.budget-$name.lock" tries=0
+  until mkdir "$lock" 2>/dev/null; do
+    [ "$tries" -lt $(( ${CLAUDE_ORCH_LOCK_WAIT:-10} * 10 )) ] || block "budget lock $lock held for ${CLAUDE_ORCH_LOCK_WAIT:-10} s; tell the orchestrator, which removes it when no call of yours is running"
+    sleep 0.1; tries=$((tries + 1))
+  done
+  trap 'rmdir "$lock" 2>/dev/null' EXIT
   used=$(grep -c "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$run_dir/events.log" 2>/dev/null || true)
   used=${used:-0}
   if [ "$used" -ge "$budget" ]; then

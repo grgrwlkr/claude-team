@@ -221,6 +221,29 @@ expect_grep 'budget unreadable' "$TMP_BASE/err" "for the same reason"
 jq 'map(if .name == "dev-1" then .budget = 2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 : > "$RUN/events.log"
 
+echo "# audit guard F12: budget count and log run under a lock, so parallel calls cannot overshoot"
+mkdir "$RUN/.budget-dev-1.lock"
+( bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")" >/dev/null 2>&1; echo $? > "$TMP_BASE/lockrc" ) &
+sleep 1
+expect_no_grep 'sid-dev|dev-1|' "$RUN/events.log" "a call waits while another call of the session holds the budget lock"
+rmdir "$RUN/.budget-dev-1.lock"
+wait
+expect_grep '^0$' "$TMP_BASE/lockrc" "and goes through once it is released"
+expect_exit 0 "the lock is released after the call" test ! -e "$RUN/.budget-dev-1.lock"
+mkdir "$RUN/.budget-dev-1.lock"
+expect_exit 2 "a lock held past the wait blocks, it is not skipped" env CLAUDE_ORCH_LOCK_WAIT=1 bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
+expect_grep 'budget lock' "$TMP_BASE/err" "and names the lock"
+rmdir "$RUN/.budget-dev-1.lock"
+: > "$RUN/events.log"
+jq 'map(if .name == "dev-1" then .budget = 5 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")" >/dev/null 2>&1 & done
+wait
+expect_exit 0 "twelve parallel calls on a budget of 5 allow exactly 5" test "$(grep -c '|sid-dev|dev-1|Bash|allow|' "$RUN/events.log")" -eq 5
+expect_exit 0 "and nudge exactly once" test "$(grep -c '|sid-dev|dev-1|Bash|nudge|' "$RUN/events.log")" -eq 1
+expect_exit 0 "and leave no lock behind" test ! -e "$RUN/.budget-dev-1.lock"
+jq 'map(if .name == "dev-1" then .budget = 2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+: > "$RUN/events.log"
+
 echo "# a session registered by its short id is guarded before its full id is known"
 jq '. + [{"taskId":"impl","name":"dev-x","role":"developer","id":"cccc3333","sessionId":"","pathsAllowed":["src/**"],"budget":50}]' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 expect_exit 2 "an edit outside its paths is refused" bash "$GUARD" <<< "$(hook_input cccc3333-1111-4222-8333-444455556666 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"
