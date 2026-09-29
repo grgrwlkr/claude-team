@@ -110,7 +110,7 @@ orch status <run> [--no-live]                     roster joined with claude agen
 orch events <run> [--since <line>]                guard log (blocks, budgets, pauses)
 orch handoff <run> <name>                         print a session's handoff
 orch handoff-put <run> <name>                     write a session's handoff from stdin (works from inside a worktree)
-orch accept <run> <task-id|name> ["<note>"] [--force]   the lead accepts a task; unblocks dependents whatever the handoff says; removes sessions no open task needs. An architect task is accepted only when orch architecture --check passes in its worktree on a committed map; --force skips that and says so in the log
+orch accept <run> <task-id|name> ["<note>"] [--force]   the lead accepts a task, records its branch head, prints what became ready and removes sessions no open task needs. Refused for a task never spawned, cancelled, or whose handoff is none, partial or blocked, and for a branch that changed files outside its pathsAllowed. An architect task is accepted only when orch architecture --check passes in its worktree on a committed map; --force accepts anyway and says why in the note
 orch task add <run> <file|->                      add a task (or an array of tasks) through the plan's validation
 orch task set <run> <task-id|name> <field> <json> change one field of a task; budget and pathsAllowed reach live sessions too
 orch paths <run> <task-id|name> add <glob>...     widen a task's allowed paths, in the plan and in its live sessions
@@ -136,7 +136,7 @@ orch budget <run> <task-id|name> <n>              change a task's budget mid-run
 orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
 orch resume <run> <name|all>
 orch decide <run> "<decision>"                    append to decisions.md
-orch close <run> [--force]                        containment report for the run's branches, session index cleanup, CLOSED marker; removes every session of the run and fails while claude agents still lists one
+orch close <run> [--force]                        containment report for the run's branches (session worktrees and handoffs), session index cleanup; removes every session of the run and fails while claude agents still lists one; only then writes CLOSED, --force recording the open tasks as cancelled
 EOF
 }
 
@@ -458,11 +458,44 @@ $dirty"
       note="$note (map check passed)"
     fi
   fi
+  local task name why="" hs root wt branch head outside before after t fresh=""
+  task=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$d/plan.json"); name=$(jq -r '.name' <<<"$task")
+  hs=$(handoff_state "$d" "$name" "$id")
+  if is_cancelled "$d" "$id"; then
+    why="it is cancelled"
+  # A forgotten session was spawned all the same.
+  elif ! cat "$d/sessions.json" "$d/forgotten.json" 2>/dev/null | jq -s -e --arg id "$id" 'add | map(select(.taskId == $id)) | length > 0' >/dev/null; then
+    why="it was never spawned"
+  else
+    case "$hs" in none|partial|blocked) why="its handoff is $hs" ;; esac
+  fi
+  if [ -n "$why" ]; then
+    [ "$force" -eq 1 ] || die "not accepting $id: $why. Read its handoff and its branch; orch accept … --force records the acceptance anyway, with the reason in the note"
+    note="$note (forced: $why)"
+  fi
+  root=$(repo_root); wt=$(task_worktree "$d" "$name"); branch=$(basename "$wt")
+  head=$(git -C "$root" rev-parse -q --verify "refs/heads/$branch^{commit}" 2>/dev/null) || head=""
+  # The guard cannot resolve every Bash write, so the branch itself is checked against the task's paths.
+  if [ -n "$head" ] && [ "$(jq '.pathsAllowed | length' <<<"$task")" -gt 0 ]; then
+    outside=$( { git -C "$root" diff --no-renames --name-only "$(jq -r '.baseBranch' "$d/plan.json")...$branch"
+                 [ ! -d "$wt" ] || { git -C "$wt" diff --no-renames --name-only HEAD; git -C "$wt" ls-files --others --exclude-standard; }; } \
+      | sort -u | jq -R . | jq -rs --argjson g "$(jq -c '.pathsAllowed' <<<"$task")" "$JQ_GLOB"'
+        .[] | select(. != "" and (startswith(".scratch/") | not) and (. as $f | any($g[]; . as $x | $f | test($x | guard_re)) | not))')
+    if [ -n "$outside" ]; then
+      [ "$force" -eq 1 ] || die "not accepting $id: $branch changed files outside its paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$task")):
+$outside
+Have them reverted or moved to a task that owns them, or grant the paths (orch paths); orch accept … --force records the acceptance anyway, with the files in the note"
+      note="$note (outside pathsAllowed: $(printf '%s' "$outside" | tr '\n' ' '))"
+    fi
+  fi
+  before=$(cmd_ready "$1")
   [ -f "$d/accepted.json" ] || echo '[]' > "$d/accepted.json"
-  jq --arg id "$id" --arg note "$note" --arg t "$(now)" \
-     'map(select(.taskId != $id)) + [{taskId:$id, at:$t, note:$note}]' "$d/accepted.json" > "$d/accepted.tmp" && mv "$d/accepted.tmp" "$d/accepted.json"
+  jq --arg id "$id" --arg note "$note" --arg t "$(now)" --arg head "$head" \
+     'map(select(.taskId != $id)) + [{taskId:$id, at:$t, note:$note, head:$head}]' "$d/accepted.json" > "$d/accepted.tmp" && mv "$d/accepted.tmp" "$d/accepted.json"
   ev "$d" orchestrator "$id" accept allow "$note"
-  echo "accepted $id — dependents are unblocked; orch ready shows what to spawn next"
+  after=$(cmd_ready "$1")
+  for t in $after; do printf '%s\n' "$before" | grep -qxF "$t" || fresh="$fresh $t"; done
+  echo "accepted $id${head:+ at $head}${fresh:+ — now ready:$fresh}"
   # An acceptance can finish sessions of other tasks too: a developer's, once the integrator building on it is accepted.
   local done_names; done_names=$(finished_sessions "$d") || true
   # shellcheck disable=SC2086  # one session name per word
@@ -1052,8 +1085,15 @@ spawn_one() {
   # shellcheck disable=SC2086  # $extra is deliberately word-split
   out=$(cd "$wt" && env -u CLAUDE_CODE_CHILD_SESSION claude --agent "orchestrator:$role" --bg --name "$name" --model "$model" --effort "$effort" --settings "$SPAWN_SETTINGS" $extra ${agents_args[@]+"${agents_args[@]}"} "$brief" 2>&1 | strip_ansi)
   sid_short=$(printf '%s\n' "$out" | sed -n 's/.*backgrounded · \([0-9a-f]\{8\}\).*/\1/p' | head -1)
-  [ -n "$sid_short" ] || die "could not parse the session id from claude --bg output:
-$out"
+  if [ -z "$sid_short" ]; then
+    # Unregistered, the session would run outside every guard rule; it is stopped before orch gives up.
+    local stray s
+    stray=$(claude agents --json --all 2>/dev/null | jq -r --arg n "$name" '.[] | select(.name == $n) | .id // empty' 2>/dev/null)
+    for s in $stray; do claude stop "$s" >/dev/null 2>&1 || echo "note: claude stop $s failed" >&2; done
+    die "could not parse the session id from claude --bg output:
+$out
+${stray:+stopped the session claude agents lists as $name: $(printf '%s' "$stray" | tr '\n' ' ')}${stray:-claude agents lists no session named $name; if one started, stop it by hand}"
+  fi
   # Registered by the short id claude --bg printed, the start of the full session id: the guard
   # recognises the session by it and orch status fills in the full id. Polling claude agents for the
   # full id cost minutes per session under load.
@@ -1120,9 +1160,14 @@ cmd_status() {
     printf '%-16s %-11s %-9s %-8s %-9s %-8s %s\n' "$name" "$role" "$id" "$state" "$hs" "$calls/$budget$mark" "${last:--}"
   done
   [ -f "$d/cancelled.json" ] && jq -r '.[] | "cancelled: \(.taskId) — \(.note)"' "$d/cancelled.json"
+  local t h cur
+  [ ! -f "$d/accepted.json" ] || jq -r '.[] | select((.head // "") != "") | "\(.taskId) \(.head)"' "$d/accepted.json" | while read -r t h; do
+    cur=$(git -C "$(repo_root)" rev-parse -q --verify "refs/heads/$(basename "$(task_worktree "$d" "$(jq -r --arg id "$t" '.tasks[] | select(.id == $id) | .name' "$d/plan.json")")")^{commit}" 2>/dev/null) || continue
+    [ "$cur" = "$h" ] || echo "moved since accept: $t — its branch was at $h, now $cur; read what changed before it is merged"
+  done
   [ -f "$d/PAUSE" ] && echo "RUN PAUSED: $(cat "$d/PAUSE")"
   local p; for p in "$d"/PAUSE-*; do [ -f "$p" ] && echo "PAUSED ${p##*/PAUSE-}: $(cat "$p")"; done
-  echo "ready to spawn: $(cmd_ready "$(jq -r '.run' "$d/plan.json")" | tr '\n' ' ')"
+  [ "${3:-}" = --no-ready ] || echo "ready to spawn: $(cmd_ready "$(jq -r '.run' "$d/plan.json")" | tr '\n' ' ')"
 }
 
 cmd_events() {
@@ -1573,20 +1618,25 @@ cmd_close() {
   if [ -n "$open" ] && [ "$force" -eq 0 ]; then
     die "tasks not accepted: ${open}- accept them, or close anyway with: orch close ${1:-} --force"
   fi
-  local root base h branch n=0 loose=0 gone=0
+  local root base h branch src n=0 loose=0 gone=0
   root=$(repo_root); base=$(jq -r '.baseBranch' "$d/plan.json")
-  for h in "$d"/handoffs/*.md; do
-    [ -f "$h" ] || continue
-    branch=$(awk '/^## Branch/ {f=1; next} f && NF {print $1; exit}' "$h" | tr -d '`,')
+  # The branches orch made for sessions, forgotten ones included, and those handoffs name, each with where it came from.
+  while IFS="$(printf '\t')" read -r branch src; do
     [ -n "$branch" ] && [ "$branch" != "$base" ] || continue
-    git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null 2>&1 || { gone=$((gone+1)); echo "already deleted: $branch"; continue; }
+    git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null 2>&1 || { gone=$((gone+1)); echo "already deleted: $branch ($src)"; continue; }
     n=$((n+1))
     if git -C "$root" merge-base --is-ancestor "$branch" "$base" 2>/dev/null; then
-      echo "contained in $base: $branch"
+      echo "contained in $base: $branch ($src)"
     else
-      loose=$((loose+1)); echo "NOT contained in $base: $branch"
+      loose=$((loose+1)); echo "NOT contained in $base: $branch ($src)"
     fi
-  done
+  done < <( { cat "$d/sessions.json" "$d/forgotten.json" 2>/dev/null | jq -s -r 'add | .[] | .worktree // "" | select(. != "") | split("/") | last | . + "\tsession"'
+              for h in "$d"/handoffs/*.md; do
+                [ -f "$h" ] || continue
+                branch=$(awk '/^## Branch/ {f=1; next} f && NF {print $1; exit}' "$h" | tr -d '`,')
+                [ -z "$branch" ] || printf '%s\thandoff\n' "$branch"
+              done; } \
+            | awk -F'\t' '!($1 in s) {o[++k] = $1; s[$1] = ""} index(", " s[$1] ", ", ", " $2 ", ") == 0 {s[$1] = s[$1] (s[$1] == "" ? "" : ", ") $2} END {for (i = 1; i <= k; i++) print o[i] "\t" s[o[i]]}')
   echo "$n refs checked, $loose not contained in $base, $gone already deleted$([ "$n" -eq 0 ] && printf ' — zero refs checked proves nothing about any branch; close before the cleanup to get this report')"
   local f dropped=0 real; real=$(cd "$d" && pwd -P)
   for f in "$INDEX_DIR"/*; do
@@ -1594,8 +1644,6 @@ cmd_close() {
     case "$(cat "$f")" in "$d"|"$real") rm -f "$f"; dropped=$((dropped+1)) ;; esac
   done
   echo "session index: $dropped entries of this run removed"
-  now > "$d/CLOSED"
-  ev "$d" orchestrator "${1:-}" close allow "$n refs checked, $loose not contained"
   # The run is over: no session it spawned may outlive it, forgotten ones included. Worktrees and
   # branches stay for the cleanup.
   need claude
@@ -1604,12 +1652,20 @@ cmd_close() {
   # shellcheck disable=SC2046
   [ ! -f "$d/forgotten.json" ] || remove_sessions "$d" "$d/forgotten.json" $(jq -r '.[].name' "$d/forgotten.json") || true
   local listed; listed=$(listed_sessions "$d") || listed="(claude agents --json could not be read: nothing is verified)"
-  cmd_status "$1" --no-live
+  cmd_status "$1" --no-live --no-ready
   if [ -n "$listed" ]; then
     printf 'orch: the run is not closed — these of its sessions are still listed in claude agents:\n%s\nremove each (orch rm %s <name>, or claude rm <id> after its worktree is settled), then run orch close again\n' "$listed" "${1:-}" >&2
     exit 1
   fi
   echo "no session of run ${1:-} is left in claude agents"
+  local t forced=""
+  for t in $open; do
+    jq --arg id "$t" --arg t "$(now)" 'map(select(.taskId != $id)) + [{taskId:$id, at:$t, note:"open when the run was closed with --force"}]' "$d/cancelled.json" > "$d/cancelled.tmp" && mv "$d/cancelled.tmp" "$d/cancelled.json"
+    forced="$forced $t"
+  done
+  [ -z "$forced" ] || echo "recorded as cancelled, open at close --force:$forced"
+  now > "$d/CLOSED"
+  ev "$d" orchestrator "${1:-}" close allow "$n refs checked, $loose not contained${forced:+; forced:$forced}"
 }
 
 need jq " (brew install jq / apt install jq)"

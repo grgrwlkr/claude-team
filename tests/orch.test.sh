@@ -96,7 +96,7 @@ expect_exit 0 "handoff-put writes the handoff from stdin" sh -c "'$ORCH' handoff
 expect_grep 'waiting on a fact' .orchestrator/r1/handoffs/analyst-spec.md "handoff-put content landed"
 expect_exit 1 "handoff-put refuses an unknown session name" sh -c "echo x | '$ORCH' handoff-put r1 nobody"
 expect_exit 1 "brief still refuses a dependent task while the dependency is partial" "$ORCH" brief r1 impl
-expect_exit 0 "accept records acceptance outside the handoff" "$ORCH" accept r1 spec "partial is fine, fact not needed"
+expect_exit 0 "accept records acceptance outside the handoff" "$ORCH" accept r1 spec "partial is fine, fact not needed" --force
 expect_exit 0 "brief renders once the task is accepted" "$ORCH" brief r1 impl
 expect_grep 'analyst-spec' "$TMP_BASE/out" "accepted dependency handoff is pasted into the brief"
 expect_exit 0 "ready lists the unblocked task" "$ORCH" ready r1
@@ -139,7 +139,7 @@ expect_exit 0 "plan reload keeps the review settings" "$ORCH" plan r1 "$TMP_BASE
 expect_grep '"venue": "pr"' .orchestrator/r1/plan.json "venue survives orch plan"
 
 echo "# briefs carry the venue"
-"$ORCH" accept r1 impl "so the reviewer brief can render" > /dev/null
+"$ORCH" accept r1 impl "so the reviewer brief can render" --force > /dev/null
 expect_exit 0 "developer brief in pr mode" "$ORCH" brief r1 impl
 expect_grep 'pull request' "$TMP_BASE/out" "developer is told to open a PR"
 expect_exit 0 "reviewer brief in pr mode" "$ORCH" brief r1 rev
@@ -185,7 +185,7 @@ JSON
 with_arch "$TMP_BASE/tested.json"
 expect_exit 0 "plan with a tester per developer task is accepted" "$ORCH" plan r1 "$TMP_BASE/tested.json"
 expect_grep '"interactive": true' .orchestrator/r1/plan.json "interactive survives orch plan"
-"$ORCH" accept r1 impl "for the tester brief" > /dev/null
+"$ORCH" accept r1 impl "for the tester brief" --force > /dev/null
 expect_exit 0 "tester brief renders" "$ORCH" brief r1 run
 expect_grep 'evidence' "$TMP_BASE/out" "tester brief demands evidence"
 expect_grep 'orch tools' "$TMP_BASE/out" "tester brief points at the inventory"
@@ -245,7 +245,7 @@ mkdir -p "$CLAUDE_ORCH_STATE"
 echo "/somewhere/else" > "$CLAUDE_ORCH_STATE/sid-other"
 expect_exit 1 "close refuses while tasks are not accepted" "$ORCH" close r2
 expect_grep 'merge-task' "$TMP_BASE/err" "the refusal lists the unaccepted tasks"
-for t in impl rev merge-task; do "$ORCH" accept r2 "$t" ok > /dev/null; done
+for t in impl rev merge-task; do "$ORCH" accept r2 "$t" ok --force > /dev/null; done
 expect_exit 0 "close succeeds once everything is accepted" "$ORCH" close r2
 expect_grep '1 refs checked' "$TMP_BASE/out" "close counts the refs it verified"
 expect_grep 'contained in main: w1' "$TMP_BASE/out" "close reports containment per branch"
@@ -268,10 +268,10 @@ expect_exit 0 "plan for the third run" "$ORCH" plan r3 "$TMP_BASE/gate.json"
 "$ORCH" accept r3 arch fixture --force > /dev/null
 printf '# d1\n## Status\ndone\n## Branch\ngone-branch at 0000000\n' > "$TMP_BASE/h4.md"
 expect_exit 0 "developer hands off a branch that was cleaned up since" sh -c "'$ORCH' handoff-put r3 d1 < '$TMP_BASE/h4.md'"
-"$ORCH" accept r3 impl ok > /dev/null
+"$ORCH" accept r3 impl ok --force > /dev/null
 expect_exit 1 "close still refuses: the integrator task is open" "$ORCH" close r3
 expect_no_grep 'not accepted:.* rev ' "$TMP_BASE/err" "the review of an accepted task is not listed as open"
-"$ORCH" accept r3 merge-task ok > /dev/null
+"$ORCH" accept r3 merge-task ok --force > /dev/null
 expect_exit 0 "close passes with the review task unaccepted" "$ORCH" close r3
 expect_grep '0 refs checked' "$TMP_BASE/out" "nothing left to check"
 expect_grep '1 already deleted' "$TMP_BASE/out" "close says the branch was deleted before it ran"
@@ -375,7 +375,7 @@ echo "# wave 4: accept takes a session name"
 expect_exit 0 "accept by session name" "$ORCH" accept r4 d4 "by name"
 jq -r '.[].taskId' .orchestrator/r4/accepted.json > "$TMP_BASE/v"
 expect_grep '^impl$' "$TMP_BASE/v" "the name resolved to its task"
-expect_exit 0 "accept a review round by its session name" "$ORCH" accept r4 rev-4-r2 "round name"
+expect_exit 0 "accept a review round by its session name" "$ORCH" accept r4 rev-4-r2 "round name" --force
 jq -r '.[].taskId' .orchestrator/r4/accepted.json > "$TMP_BASE/v"
 expect_grep '^rev$' "$TMP_BASE/v" "rev-4-r2 resolved to rev"
 expect_exit 1 "accept still refuses an unknown name" "$ORCH" accept r4 nobody
@@ -454,7 +454,7 @@ expect_grep 'd4  *-' "$TMP_BASE/out" "a session without a transcript reads -"
 expect_grep 'TOTAL  *120' "$TMP_BASE/out" "total line"
 
 echo "# wave 4: close treats a cancelled task as settled"
-for t in impl rev merge-task docs run; do "$ORCH" accept r4 "$t" ok > /dev/null; done
+for t in impl rev merge-task docs run; do "$ORCH" accept r4 "$t" ok --force > /dev/null; done
 expect_exit 0 "close with a cancelled task" "$ORCH" close r4
 
 echo "# wave 6: run r5 — qa per developer task, qa-lead, design review, architect, staged"
@@ -505,7 +505,7 @@ expect_exit 0 "the full plan again" "$ORCH" plan r5 "$TMP_BASE/r5.json"
 
 echo "# wave 6: briefs"
 "$ORCH" accept r5 arch fixture --force > /dev/null
-for t in spec design qal-a; do "$ORCH" accept r5 "$t" ok > /dev/null; done
+for t in spec design qal-a; do "$ORCH" accept r5 "$t" ok --force > /dev/null; done
 expect_exit 0 "approve the design stage" "$ORCH" approve r5 design "user: looks right, go on"
 expect_exit 0 "developer brief" "$ORCH" brief r5 impl
 expect_grep 'qa-5' "$TMP_BASE/out" "the developer is told who writes its TDD cases"
@@ -516,7 +516,7 @@ expect_exit 0 "qa brief" "$ORCH" brief r5 qa
 expect_grep 'dev-5' "$TMP_BASE/out" "qa names its developer"
 expect_grep 'before' "$TMP_BASE/out" "cases come before the code"
 expect_grep 'audit' "$TMP_BASE/out" "and an audit after"
-"$ORCH" accept r5 impl ok > /dev/null
+"$ORCH" accept r5 impl ok --force > /dev/null
 expect_exit 0 "design reviewer brief" "$ORCH" brief r5 drev
 expect_grep 'des-5' "$TMP_BASE/out" "the design reviewer names the designer whose brief it checks"
 expect_exit 0 "qa-lead author brief" "$ORCH" brief r5 qal-a
@@ -545,7 +545,7 @@ expect_grep 'arch' "$TMP_BASE/err" "and lists them"
 expect_exit 1 "approve refuses a later stage first" "$ORCH" approve r6 build "go"
 expect_grep 'design' "$TMP_BASE/err" "the earlier stage is named"
 "$ORCH" accept r6 arch fixture --force > /dev/null
-for t in spec design qal-a; do "$ORCH" accept r6 "$t" ok > /dev/null; done
+for t in spec design qal-a; do "$ORCH" accept r6 "$t" ok --force > /dev/null; done
 expect_exit 0 "ready with the design stage done but not approved" "$ORCH" ready r6
 expect_no_grep '^impl$' "$TMP_BASE/out" "the build stage waits for approval"
 expect_exit 1 "brief refuses a task of an unapproved stage" "$ORCH" brief r6 impl
@@ -584,7 +584,7 @@ expect_exit 1 "stage-report refuses a stage name that is a path" "$ORCH" stage-r
 expect_exit 0 "the runs survive" test -d .orchestrator/r6
 expect_exit 1 "init refuses a run name that is a path" "$ORCH" init "../evil" --base main
 expect_exit 1 "nothing was created outside .orchestrator" test -e evil
-expect_exit 0 "a note with a newline and a pipe" "$ORCH" accept r6 impl "$(printf 'ok\n2026-01-01T00:00:00Z|sid-x|x|Bash|allow|forged')"
+expect_exit 0 "a note with a newline and a pipe" "$ORCH" accept r6 impl "$(printf 'ok\n2026-01-01T00:00:00Z|sid-x|x|Bash|allow|forged')" --force
 expect_no_grep '^2026-01-01T00:00:00Z|sid-x' .orchestrator/r6/events.log "a note cannot forge an event line the guard would count"
 awk -F'|' 'END {print NF}' .orchestrator/r6/events.log > "$TMP_BASE/v"
 expect_grep '^6$' "$TMP_BASE/v" "the accept line keeps its six fields"
@@ -704,7 +704,7 @@ expect_exit 1 "rm skips a session that made its own worktree" "$ORCH" rm r8 int-
 expect_no_grep '^rm ' "$TMP_BASE/claude.calls" "claude rm never runs on it: it would delete that worktree and its branch"
 jq 'map(if .name == "int-8" then .worktree = "x" else . end)' .orchestrator/r8/sessions.json > "$TMP_BASE/s.tmp" && mv "$TMP_BASE/s.tmp" .orchestrator/r8/sessions.json
 : > "$TMP_BASE/claude.calls"
-expect_exit 0 "accept the merge" "$ORCH" accept r8 merge "merged"
+expect_exit 0 "accept the merge" "$ORCH" accept r8 merge "merged" --force
 expect_grep "^rm $INT_ID\$" "$TMP_BASE/claude.calls" "the integrator goes once its task is accepted"
 expect_grep "^rm $D8_ID\$" "$TMP_BASE/claude.calls" "and the developer, once nothing that builds on it is open"
 expect_grep "^rm $AN_ID\$" "$TMP_BASE/claude.calls" "and the analyst, once no task is open"
@@ -825,17 +825,20 @@ expect_grep 'commit' "$TMP_BASE/err" "an uncommitted map would never reach the i
 git -C "$WTA" add docs/architecture .claude/rules/architecture
 git -C "$WTA" commit -qm 'docs(architecture): map'
 expect_exit 0 "check still passes with the map committed after built-at" sh -c "cd '$WTA' && '$ORCH' architecture --check"
+printf '# arch-10\n## Status\ndone\n' | "$ORCH" handoff-put r10 arch-10 > /dev/null
+# The code commits above test the map's staleness; the architect is granted them so the path check passes.
+"$ORCH" paths r10 arch add 'src/**' 'lib/**' > /dev/null
 expect_exit 0 "accept runs the check in the architect's worktree and passes" "$ORCH" accept r10 arch "map checked"
 expect_exit 0 "ready after the architect" "$ORCH" ready r10
 expect_grep '^spec$' "$TMP_BASE/out" "the run opens"
 expect_no_grep '^arch$' "$TMP_BASE/out" "an accepted task is not offered for spawning"
 
 echo "# briefs point at the architect's map and only the modules a task touches"
-"$ORCH" accept r10 spec ok > /dev/null
+"$ORCH" accept r10 spec ok --force > /dev/null
 expect_exit 0 "developer brief" "$ORCH" brief r10 impl
 expect_grep "$WTA/docs/architecture" "$TMP_BASE/out" "the map is read from the architect's worktree"
 expect_grep 'modules/core.md' "$TMP_BASE/out" "the module its paths touch is named"
-"$ORCH" accept r10 impl ok > /dev/null
+"$ORCH" accept r10 impl ok --force > /dev/null
 expect_exit 0 "reviewer brief" "$ORCH" brief r10 rev
 expect_grep 'modules/core.md' "$TMP_BASE/out" "a reviewer gets the modules of the task it reviews"
 expect_exit 0 "integrator brief" "$ORCH" brief r10 merge
@@ -905,10 +908,94 @@ expect_no_grep 'REV-R1-FINDING' "$TMP_BASE/out" "not its earlier round"
 expect_grep 'QA-FINDING' "$TMP_BASE/out" "and qa's"
 expect_grep 'DR-FINDING' "$TMP_BASE/out" "and the design-reviewer's"
 expect_no_grep 'DEV-R2-TEXT' "$TMP_BASE/out" "not the developer's own previous handoff"
-"$ORCH" accept r12 impl ok > /dev/null
+"$ORCH" accept r12 impl ok --force > /dev/null
 expect_exit 0 "integrator brief" "$ORCH" brief r12 int
 grep ': branch r12-' "$TMP_BASE/out" | sed 's/.*: branch \(r12-[a-z0-9-]*\),.*/\1/' | tr '\n' ' ' > "$TMP_BASE/v"
 expect_grep '^r12-arch-r12 r12-an-12 r12-dev-12 r12-qa-12 $' "$TMP_BASE/v" "integrator brief lists every branch with commits off base, architect's included, in dependency order"
 expect_grep ": branch r12-dev-12, head $SHA_DEV" "$TMP_BASE/out" "with its head"
+
+echo "# accept, close, spawn: run r13"
+expect_exit 0 "init r13" "$ORCH" init r13 --base main
+"$ORCH" acceptance r13 off > /dev/null
+cat > "$TMP_BASE/r13.json" <<'JSON'
+{"run":"r13","baseBranch":"main","tasks":[
+ {"id":"impl","role":"developer","name":"d13","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"qa","role":"qa","name":"qa-13","qaOf":"impl","goal":"cases","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"rev","role":"reviewer","name":"rev-13","reviewOf":"impl","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"budget":10,"mcp":[]},
+ {"id":"res","role":"researcher","name":"res-13","goal":"facts","pathsAllowed":["docs/research/**"],"acceptance":["q"],"dependsOn":[],"budget":10,"mcp":[]},
+ {"id":"merge","role":"integrator","name":"int-13","goal":"merge","pathsAllowed":["**"],"acceptance":["z"],"dependsOn":["impl"],"budget":10,"mcp":[]}
+]}
+JSON
+with_arch "$TMP_BASE/r13.json"
+"$ORCH" plan r13 "$TMP_BASE/r13.json" > /dev/null
+"$ORCH" accept r13 arch fixture --force > /dev/null
+mkdir -p "$TMP_BASE/bin-garbled"
+cat > "$TMP_BASE/bin-garbled/claude" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$TMP_BASE/claude.calls"
+case "\$*" in
+  *--bg*) echo "something claude --bg never printed before" ;;
+  agents*) echo '[{"id":"feed1234","name":"qa-13","kind":"background","state":"working"},{"id":"other999","name":"qa-13x","kind":"background","state":"working"}]' ;;
+esac
+EOF
+chmod +x "$TMP_BASE/bin-garbled/claude"
+: > "$TMP_BASE/claude.calls"
+expect_exit 1 "spawn dies when the session id cannot be parsed" env PATH="$TMP_BASE/bin-garbled:$PATH" "$ORCH" spawn r13 qa
+expect_grep '^stop feed1234$' "$TMP_BASE/claude.calls" "the session it launched, found by name, is stopped before it dies"
+expect_no_grep '^stop other999$' "$TMP_BASE/claude.calls" "no other session is stopped"
+expect_grep 'feed1234' "$TMP_BASE/err" "and it says which session it stopped"
+expect_exit 1 "accept refuses a task never spawned" "$ORCH" accept r13 qa "looks fine"
+expect_grep 'never spawned' "$TMP_BASE/err" "and says why"
+expect_exit 0 "spawn d13" "$ORCH" spawn r13 impl
+WT13="$REPO/.claude/worktrees/r13-d13"
+expect_exit 1 "accept refuses a task with no handoff" "$ORCH" accept r13 impl ok
+expect_grep 'none' "$TMP_BASE/err" "the refusal names the handoff state"
+printf '# d13\n## Status\npartial\n' | "$ORCH" handoff-put r13 d13 > /dev/null
+expect_exit 1 "accept refuses a partial handoff" "$ORCH" accept r13 impl ok
+expect_grep 'partial' "$TMP_BASE/err" "the refusal says partial"
+printf '# d13\n## Status\nblocked on the user\n' | "$ORCH" handoff-put r13 d13 > /dev/null
+expect_exit 1 "accept refuses a blocked handoff" "$ORCH" accept r13 impl ok
+expect_grep 'blocked' "$TMP_BASE/err" "the refusal says blocked"
+printf '# d13\n## Status\ndone\n## Branch\nr13-d13\n' | "$ORCH" handoff-put r13 d13 > /dev/null
+mkdir -p "$WT13/src" "$WT13/docs" "$WT13/lib" "$WT13/.scratch"
+echo 'export const b = 2' > "$WT13/src/b.ts"; echo 'notes' > "$WT13/docs/notes.md"
+git -C "$WT13" add src docs && git -C "$WT13" commit -qm 'b and notes'
+echo 'x' > "$WT13/lib/x.ts"; echo 'h' > "$WT13/.scratch/handoff.md"
+expect_exit 1 "accept refuses a branch that changed paths the task does not own" "$ORCH" accept r13 impl ok
+expect_grep 'docs/notes.md' "$TMP_BASE/err" "the committed file outside pathsAllowed is named"
+expect_grep 'lib/x.ts' "$TMP_BASE/err" "so is an uncommitted one"
+expect_no_grep 'src/b.ts' "$TMP_BASE/err" "an allowed file is not"
+expect_no_grep 'handoff.md' "$TMP_BASE/err" "nor scratch"
+expect_exit 0 "accept --force records it anyway" "$ORCH" accept r13 impl ok --force
+expect_grep 'now ready: merge$' "$TMP_BASE/out" "accept prints the tasks it made ready, and only those"
+jq -r '.[] | select(.taskId == "impl") | .note' .orchestrator/r13/accepted.json > "$TMP_BASE/v"
+expect_grep 'docs/notes.md' "$TMP_BASE/v" "the note records the files outside pathsAllowed"
+git -C "$WT13" rm -q docs/notes.md && git -C "$WT13" commit -qm 'drop notes'; rm -f "$WT13/lib/x.ts"
+expect_exit 0 "accept passes once the branch keeps to its paths" "$ORCH" accept r13 impl ok
+expect_no_grep 'now ready' "$TMP_BASE/out" "nothing new became ready"
+jq -r '.[] | select(.taskId == "impl") | .head' .orchestrator/r13/accepted.json > "$TMP_BASE/v"
+expect_grep "^$(git rev-parse r13-d13)\$" "$TMP_BASE/v" "accept records the head of the task's branch"
+expect_exit 0 "status before the branch moves" "$ORCH" status r13 --no-live
+expect_no_grep 'moved since' "$TMP_BASE/out" "nothing flagged"
+echo 'export const c = 3' > "$WT13/src/c.ts"; git -C "$WT13" add src && git -C "$WT13" commit -qm 'after accept'
+expect_exit 0 "status after the branch moved" "$ORCH" status r13 --no-live
+expect_grep 'moved since accept: impl' "$TMP_BASE/out" "status flags an accepted task whose branch moved"
+expect_exit 0 "cancel res" "$ORCH" cancel r13 res "not needed"
+expect_exit 1 "accept refuses a cancelled task" "$ORCH" accept r13 res ok
+expect_grep 'cancelled' "$TMP_BASE/err" "and says so"
+"$ORCH" cancel r13 res --undo > /dev/null
+printf '# rev-13\n## Status\ndone\n## Branch\nw1\n' | "$ORCH" handoff-put r13 rev-13 > /dev/null
+expect_exit 1 "close fails while a session stays listed" env STUB_RM_FAIL=1 "$ORCH" close r13 --force
+expect_exit 1 "a failed close leaves no CLOSED marker" test -f .orchestrator/r13/CLOSED
+expect_no_grep '|close|' .orchestrator/r13/events.log "nor a close event"
+expect_exit 0 "close --force" "$ORCH" close r13 --force
+expect_grep 'NOT contained in main: r13-d13 (session, handoff)' "$TMP_BASE/out" "close checks the session's worktree branch and says where each branch came from"
+expect_grep 'contained in main: w1 (handoff)' "$TMP_BASE/out" "a branch named only in a handoff"
+expect_no_grep 'ready to spawn' "$TMP_BASE/out" "close prints no ready line"
+expect_exit 0 "CLOSED marker written on success" test -f .orchestrator/r13/CLOSED
+jq -r 'map(.taskId) | sort | join(",")' .orchestrator/r13/cancelled.json > "$TMP_BASE/v"
+expect_grep '^merge,res$' "$TMP_BASE/v" "close --force records the open tasks as cancelled"
+grep '|close|' .orchestrator/r13/events.log > "$TMP_BASE/v"
+expect_grep 'forced: res merge' "$TMP_BASE/v" "the close event names them"
 
 summary
