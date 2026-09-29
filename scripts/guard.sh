@@ -408,6 +408,127 @@ scan_cmds() {
   scan_one
 }
 
+# git_calls: reads a command's text, quotes and backslashes stripped, and prints every git call in it as
+# "G<tab><the dir -C, --git-dir or --work-tree gives it, . for none><tab><subcommand and arguments>", global options dropped and combined short
+# flags split, and every cd before one as "D<tab><dir>". Like the text rules, it takes any word git for a call.
+git_calls() {
+  awk '
+function flush() { if (g) print "G\t" dir "\t" sc args; g = 0 }
+{
+  gsub(/[0-9]*[<>]+&[0-9-]+/, " ")
+  gsub(/[0-9]*[<>]+&?/, " > ")
+  gsub(/[;&|()`]/, " ; ")
+  n = split($0, w, " "); seg = 1
+  for (i = 1; i <= n; i++) {
+    x = w[i]
+    if (x == ";") { flush(); seg = 1; continue }
+    if (x == ">") { if (w[i+1] != ";") i++; continue }
+    if (seg) {
+      if (x ~ /^([{!]|if|then|else|elif|do|while|until)$/) continue
+      seg = 0
+      if (x == "cd" || x == "pushd") {
+        if (i < n && w[i+1] != ";" && w[i+1] != ">") { i++; print "D\t" w[i] } else print "D\t~"
+        continue
+      }
+    }
+    if (x == "git" || x ~ /\/git$/) { flush(); g = 1; ph = 0; dir = "."; sc = ""; args = ""; eo = 0; gdir = 0; continue }
+    if (!g) continue
+    if (ph == 0) {
+      if (x == "-C") { if (i < n) { i++; dir = (w[i] ~ /^[\/~]/) ? w[i] : dir "/" w[i] } }
+      # the branch is read where HEAD lives: in the --git-dir, else in the --work-tree
+      else if (x ~ /^--(git-dir|work-tree)(=|$)/) {
+        v = x; sub(/^--[a-z-]+=?/, "", v)
+        if (v == "" && i < n) { i++; v = w[i] }
+        if (x ~ /^--git-dir/ || !gdir) dir = (v ~ /^[\/~]/) ? v : dir "/" v
+        if (x ~ /^--git-dir/) gdir = 1
+      }
+      else if (x ~ /^(-c|--namespace|--config-env|--attr-source|--super-prefix)$/) i++
+      else if (x !~ /^-/) { sc = x; ph = 1 }
+      continue
+    }
+    if (!eo && x == "--") eo = 1
+    else if (!eo && x ~ /^-[A-Za-z][A-Za-z]+$/) { for (k = 2; k <= length(x); k++) args = args " -" substr(x, k, 1); continue }
+    args = args " " x
+  }
+  flush()
+}'
+}
+# git_at <dir> <from>: the directory a cd or git -C lands in, resolved from <from>; the hook's cwd when it
+# cannot be known (an expansion, a directory still to be made), as before git calls were followed.
+git_at() {
+  local p=$1
+  case "$p" in \~) p=$HOME ;; \~/*) p=$HOME/${p#\~/} ;; esac
+  case "$p" in /*) ;; *) p=${2:-?}/$p ;; esac
+  (cd "$p" 2>/dev/null && pwd -P) || printf '%s' "$cwd0"
+}
+# base_write <what>: <what> changes the base branch, which is the integrator's, and only under push-base.
+base_write() {
+  [ "$role" = integrator ] && [ "$auth_push" = true ] && return 0
+  [ "$role" = integrator ] && block "$1 is not authorized in this run's plan. Report BLOCKED: and let the orchestrator set it with orch authorize <run> push-base on after the user says so."
+  block "$1 is the integrator's, and only when the plan authorizes it"
+}
+# judge_git <dir>: judges the git call in ga (subcommand first, as git_calls prints it), run in <dir>.
+judge_git() {
+  local d=$1 k a u dst pos force=0 all=0 del=0 tobase=0 dl=0 fo=0
+  pos=()
+  case "${ga[0]-}" in
+    push)
+      for ((k = 1; k < ${#ga[@]}; k++)); do
+        a=${ga[$k]}
+        case "$a" in
+          -f|--force|--force-with-lease|--force-with-lease=*) force=1 ;;
+          --all|--branches|--mirror) all=1 ;;
+          -d|--delete) del=1 ;;
+          -o|--push-option|--repo|--receive-pack|--exec) k=$((k + 1)) ;;
+          -*) ;;
+          *) pos[${#pos[@]}]=$a ;;
+        esac
+      done
+      # the first operand is the remote, the rest are refspecs [+]<src>[:<dst>]
+      for ((k = 1; k < ${#pos[@]}; k++)); do
+        a=${pos[$k]}
+        case "$a" in +*) force=1; a=${a#+} ;; esac
+        case "$a" in :) all=1 ;; :*) del=1 ;; esac
+        dst=${a##*:}; dst=${dst#refs/heads/}
+        case "$dst" in HEAD|@) [ -z "$d" ] || dst=$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null) ;; esac
+        [ "$dst" = "$base" ] && tobase=1
+      done
+      if [ "$all" = 1 ]; then tobase=1
+      elif [ "${#pos[@]}" -le 1 ] && [ -n "$d" ]; then
+        u=$(git -C "$d" rev-parse --abbrev-ref '@{u}' 2>/dev/null)
+        [ -n "$u" ] && [ "${u#*/}" = "$base" ] && tobase=1
+      fi
+      [ "$force" = 0 ] || block "force push is never allowed"
+      [ "$tobase" = 0 ] || base_write "pushing the base branch ($base)"
+      [ "$del" = 0 ] || block "destructive git command; ask the orchestrator" ;;
+    reset|clean|branch)
+      for ((k = 1; k < ${#ga[@]}; k++)); do
+        case "${ga[$k]}" in
+          --) break ;;
+          --hard) [ "${ga[0]}" = reset ] && fo=1 ;;
+          -f|--force) [ "${ga[0]}" = reset ] || fo=1 ;;
+          -D) dl=1; fo=1 ;;
+          -d|--delete) dl=1 ;;
+        esac
+      done
+      case "${ga[0]}" in
+        reset|clean) [ "$fo" = 0 ] || block "destructive git command; ask the orchestrator" ;;
+        branch)
+          [ "$dl" = 1 ] && [ "$fo" != 0 ] && block "destructive git command; ask the orchestrator"
+          [ "$dl" = 1 ] && del_merged ;;
+      esac ;;
+    worktree) [ "${ga[1]-}" = remove ] && del_merged ;;
+    commit|merge|rebase|cherry-pick|am)
+      if [ "$role" != integrator ] && [ -n "$d" ] && [ "$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$base" ]; then
+        block "this git call runs on the base branch ($base) in $d; commits there are the integrator's. Move to your worktree."
+      fi ;;
+  esac
+}
+del_merged() {
+  [ "$role" = integrator ] && [ "$auth_delete" = true ] && return 0
+  block "deleting branches or worktrees needs role integrator and delete-merged in the plan's authorize block; verify containment in $base first and ask the orchestrator"
+}
+
 file_path=""
 case "$tool" in
   Edit|Write|MultiEdit|NotebookEdit)
@@ -562,23 +683,16 @@ case "$tool" in
         case "$arch_tail" in ''|' --check') ;; *) judge_orch architecture "" "" 0 ;; esac
       done < <(printf '%s\n' "$flat" | grep -Eo '(^|[;&| /])orch +architecture[^;&|<>]*' | sed -E 's/^[;&| /]?orch +architecture//; s/ +$//')
     fi
-    if has "${GIT} push[^|;&]*( -f( |$)|--force)"; then block "force push is never allowed"; fi
-    if has "${GIT} push[^|;&]*(^| |:|\+)$base( |$)"; then
-      if [ "$role" = integrator ] && [ "$auth_push" = true ]; then
-        :  # the plan carries the user's standing authorization for this run
-      elif [ "$role" = integrator ]; then
-        block "pushing the base branch ($base) is not authorized in this run's plan. Report BLOCKED: and let the orchestrator set it with orch authorize <run> push-base on after the user says so."
-      else
-        block "pushing the base branch ($base) is the integrator's, and only when the plan authorizes it"
-      fi
-    fi
-    if has "${GIT} reset --hard|${GIT} branch -D|${GIT} clean -[a-zA-Z]*f|${GIT} push[^|;&]*--delete"; then block "destructive git command; ask the orchestrator"; fi
-    if has "${GIT} (branch -d|worktree remove)( |$)"; then
-      if [ "$role" = integrator ] && [ "$auth_delete" = true ]; then
-        :  # cleanup of merged branches and worktrees is authorized for this run
-      else
-        block "deleting branches or worktrees needs role integrator and delete-merged in the plan's authorize block; verify containment in $base first and ask the orchestrator"
-      fi
+    # Each git call is judged in the directory it runs in: its -C, else the last cd before it, else the cwd.
+    cwd0=$(cd "$(jq -r '.cwd' <<<"$input")" 2>/dev/null && pwd -P)
+    gd=$cwd0
+    while IFS=$'\t' read -r kind dir gargs; do
+      if [ "$kind" = D ]; then gd=$(git_at "$dir" "$gd"); continue; fi
+      read -r -a ga <<<"$gargs"
+      judge_git "$(git_at "$dir" "$gd")"
+    done < <(printf '%s\n' "${text//\\$'\n'/ }" | tr -d '"'"'"'\\' | git_calls)
+    if has '(^|[;&|( /])gh pr merge( |$)|(^|[;&|( /])gh api [^;&|]*(/merges|/pulls/[^ /]+/merge)( |$|\?)|(^|[;&|( /])gh api graphql [^;&|]*merge(PullRequest|Branch)'; then
+      base_write "merging a pull request or branch through gh"
     fi
     if has '(^|[;&| ])claude (stop|kill|rm|respawn)( |$)'; then block "sessions are stopped only by the orchestrator or the user"; fi
     # A session started here is one orch never registered, so the run could not remove it when it ends.
@@ -631,10 +745,6 @@ case "$tool" in
     fi
     if [ "$role" != integrator ]; then
       if has "${GIT} (checkout|switch)( [^ ]*)* $base( |$)"; then block "only the integrator works on the base branch ($base)"; fi
-      cur=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
-      if [ "$cur" = "$base" ] && has "${GIT} (commit|merge|rebase|cherry-pick|am)( |$)"; then
-        block "you are on the base branch ($base); commits there are the integrator's. Move to your worktree."
-      fi
     fi
     allow "$(printf '%s' "$cmd" | cut -c1-120)"
     ;;

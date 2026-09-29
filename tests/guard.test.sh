@@ -415,6 +415,61 @@ dev_cmd 2 "an unquoted heredoc body is still scanned" "cat <<EOF > .scratch/n.md
 dev_cmd 2 "a quoted body piped into a shell is still scanned" "cat <<'X' | bash${NL}git push --force${NL}X"
 dev_cmd 2 "the command after the terminator is still scanned" "cat <<'X' > .scratch/n.md${NL}text${NL}X${NL}git reset --hard"
 dev_cmd 2 "and a here-string is no heredoc" "cat <<< 'x'${NL}git reset --hard"
+
+echo "# audit guard F5: git is judged by its normalised argv and by the branch it runs on"
+git init -q --bare "$TMP_BASE/origin.git"
+git -C "$REPO" remote add origin "$TMP_BASE/origin.git"
+git -C "$REPO" push -q origin main w1 2>/dev/null
+auth() { jq ".authorize.pushBase = $1 | .authorize.deleteMerged = $1" "$RUN/plan.json" > "$RUN/plan.tmp" && mv "$RUN/plan.tmp" "$RUN/plan.json"; }
+int_cmd() { expect_exit "$1" "$2" bash "$GUARD" <<< "$(hook_bash sid-int "$W3" "$3")"; }
+dev_cmd 2 "a commit through git -C into the main checkout lands on base" "git -C $REPO commit --allow-empty -m x"
+dev_cmd 2 "so does one after a cd into the main checkout" "cd $REPO && git commit --allow-empty -m x"
+dev_cmd 2 "and one after a cd further down the command" "ls; cd $REPO; git commit --allow-empty -m x"
+dev_cmd 2 "global options before -C do not hide it" "git -c user.name=x --no-pager -C $REPO commit -m x"
+dev_cmd 2 "nor does pointing --git-dir and --work-tree at the main checkout" "git --git-dir=$REPO/.git --work-tree $REPO commit -m x"
+dev_at 0 "a commit through git -C into the own worktree passes from the main checkout" "$REPO" "git -C $WT commit --allow-empty -m x"
+dev_cmd 2 "a push to HEAD:refs/heads/<base> is a push to base" "git push origin HEAD:refs/heads/main"
+dev_cmd 2 "so is a push to refs/heads/<base>" "git push origin refs/heads/main"
+dev_cmd 2 "and one to <x>:<base>" "git push origin w1:main"
+dev_cmd 2 "and --all" "git push --all origin"
+dev_cmd 2 "and --mirror" "git push --mirror origin"
+dev_at 2 "and a push of HEAD from the base branch" "$REPO" "git push origin HEAD"
+dev_cmd 0 "a branch whose name ends in the base's is not the base" "git push origin feature/main mainline"
+git -C "$WT" branch -q --set-upstream-to=origin/main w1
+dev_cmd 2 "a bare push whose upstream is <remote>/<base> is a push to base" "git push"
+dev_cmd 2 "so is one that names only the remote" "git push -o ci.skip origin"
+git -C "$WT" branch -q --set-upstream-to=origin/w1 w1
+dev_cmd 0 "a bare push to the branch's own upstream passes" "git push"
+dev_cmd 2 "-f inside combined flags is a force push" "git push -uf origin w1"
+expect_grep 'force push' "$TMP_BASE/err" "named as one"
+dev_cmd 2 "so is a +refspec" "git push origin +w1"
+dev_cmd 2 "and --force-with-lease" "git push --force-with-lease origin w1"
+dev_cmd 2 "gh pr merge is the integrator's" "gh pr merge 12 --merge"
+dev_cmd 2 "so is merging through gh api pulls/<n>/merge" "gh api -X PUT repos/o/r/pulls/12/merge"
+dev_cmd 2 "and through gh api …/merges" "gh api repos/o/r/merges -f base=main -f head=w1"
+dev_cmd 2 "and through the graphql mergePullRequest mutation" "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
+dev_cmd 0 "reading a PR through gh passes" "gh pr view 12 && gh api repos/o/r/pulls/12"
+dev_cmd 2 "reset with --hard anywhere in its argv is destructive" "git reset -q --hard"
+dev_cmd 2 "so is one with --hard last" "git reset HEAD~1 --hard"
+dev_cmd 2 "clean with split flags is destructive" "git clean -d -f"
+dev_cmd 2 "so is clean -fdx" "git clean -fdx"
+dev_cmd 2 "and clean --force" "git clean --force -d"
+dev_cmd 0 "a dry-run clean passes" "git clean -n -d"
+dev_cmd 2 "push -d deletes a remote branch" "git push -d origin w9"
+dev_cmd 2 "so does push <remote> :<branch>" "git push origin :w9"
+dev_cmd 2 "branch --delete needs the integrator and delete-merged" "git branch --delete w9"
+auth false
+int_cmd 2 "an unauthorized integrator may not gh pr merge" "gh pr merge 12 --squash"
+expect_grep 'not authorized' "$TMP_BASE/err" "and is told the plan does not authorize it"
+auth true
+int_cmd 0 "an authorized integrator may gh pr merge" "gh pr merge 12 --squash"
+int_cmd 0 "and push to HEAD:refs/heads/<base>" "git push origin HEAD:refs/heads/main"
+int_cmd 2 "but not delete the base remotely" "git push origin :main"
+int_cmd 2 "branch --delete --force stays destructive under authorization" "git branch --delete --force w9"
+int_cmd 2 "so does branch -d -f" "git branch -d -f w9"
+int_cmd 2 "and branch -df" "git branch -df w9"
+int_cmd 0 "branch --delete of a merged branch is the authorized integrator's" "git branch --delete w9"
+git -C "$WT" branch -q --unset-upstream w1
 set_rec dev-1 '.budget = 2'
 
 echo "# stop gate"
