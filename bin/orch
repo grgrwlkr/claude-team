@@ -137,7 +137,7 @@ orch handoff <run> <name>                         print a session's latest round
 orch handoff-put <run> <name> [--file <path>] [--by-lead "<source>"]   write a session's handoff from the file or stdin (works from inside a worktree); --by-lead stamps it as written by the orchestrator from that source
 orch qa-request <run> <name> "<what to check>"      a developer asks for qa of its task: adds a qa task after it (paths qa/<task name>/**) and prints the line to send the orchestrator
 orch accept <run> <task-id|name> ["<note>"] [--force]   the lead accepts a task, records its branch head, prints what became ready and removes sessions no open task needs. Refused for a task never spawned, cancelled, or whose handoff is none, partial or blocked, and for a branch that changed files outside its pathsAllowed. An architect task is accepted only when orch architecture --check passes in its worktree on a committed map; --force accepts anyway and says why in the note
-orch task add <run> <file|->                      add a task (or an array of tasks) through the plan's validation
+orch task add <run> <file|->                      add a task (or an array of tasks) through the plan's validation; a developer task with "chore": true is reviewed by the lead: no reviewer or qa task, and accept requires a note
 orch task set <run> <task-id|name> <field> <json> change one field of a task; budget and pathsAllowed reach live sessions too
 orch task patch <run> <file>                      change fields of several tasks at once, {"<task-id|name>": {"<field>": <json>}}, validated once
 orch paths <run> <task-id|name> add <glob>...     widen a task's allowed paths, in the plan and in its live sessions
@@ -163,7 +163,8 @@ orch tools [--refresh]                            inventory of the machine's mea
 orch budget <run> <task-id|name> <n|+n>           change a task's budget mid-run (+n adds), in the plan and in the live session's record the guard reads; the first budget stays as budgetInitial
 orch pause <run> <name|all> "<reason>"            guard refuses Bash/Edit/Write of that session (or all)
 orch resume <run> <name|all>
-orch decide <run> "<decision>"                    append to decisions.md
+orch decide <run> "<decision>" [--for <task>]...  append to decisions.md and log a decide event, one per --for task (else one for the run)
+orch lead-branch <run> <branch>                   register a branch the lead made itself, so close checks it is contained in the base
 orch close <run> [--force]                        containment report for the run's branches (session worktrees and handoffs), session index cleanup; removes every session of the run and fails while claude agents still lists one; only then writes CLOSED, --force recording the open tasks as cancelled
 EOF
 }
@@ -264,10 +265,11 @@ cmd_plan() {
     + ( . as $p | [ .tasks[] | .dependsOn[]? as $dep | select(($p.tasks | map(.id) | index($dep)) == null) | bad("task \(.id): dependsOn unknown task \($dep)") ] )
     + ( [ .tasks[] | select((.role | IN("reviewer", "qa", "design-reviewer") | not) and ((.pathsAllowed // []) | length) == 0) | bad("task \(.id): pathsAllowed is empty; only the reviewer, qa and the design-reviewer may own no paths") ] )
     + ( . as $p
-        | [ $p.tasks[] | select(.role == "developer") as $t
+        | [ $p.tasks[] | select(.role == "developer" and .chore != true) as $t
             | select(([ $p.tasks[] | select(.role == "reviewer")
                         | select(((.reviewOf // "") == $t.id) or (((.dependsOn // []) | index($t.id)) != null)) ] | length) == 0)
             | bad("task \($t.id) writes code and no reviewer task reviews it; add a reviewer task with reviewOf: \"\($t.id)\"") ] )
+    + [ .tasks[] | select(has("chore") and .role != "developer") | bad("task \(.id): chore belongs on a developer task, which the lead reviews itself; a \(.role) task is not one") ]
     # Two tasks can be live together unless one is in the dependency closure of the other, they sit in
     # different stages of a staged run, or one is the architect design task, which every other task waits for.
     # The integrator owns ** to resolve conflicts in the branches it merges, not to write work of its own.
@@ -333,7 +335,7 @@ cmd_plan() {
     err=$(jq -r '
       def bad(msg): "ERROR: " + msg;
       . as $p
-      | [ $p.tasks[] | select(.role == "developer") as $t
+      | [ $p.tasks[] | select(.role == "developer" and .chore != true) as $t
           | select(([ $p.tasks[] | select(.role == "qa" and (.qaOf // "") == $t.id) ] | length) == 0)
           | bad("interactive verification is on and task \($t.id) has no qa task; add a qa task with qaOf: \"\($t.id)\" that also runs the app and checks the criteria") ]
       | .[]' "$file")
@@ -539,6 +541,10 @@ cmd_accept() {
   for a in "${@:3}"; do if [ "$a" = --force ]; then force=1; else note="$a"; fi; done
   [ -n "$id" ] || die "accept <run> <task-id|name> [\"<note>\"] [--force]"
   id=$(resolve_task "$d" "$id") || die "no task or session '${2:-}' in plan"
+  # No reviewer read a chore's diff, so the note is the only record that anyone did; --force does not replace it.
+  if [ "$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .chore // false' "$d/plan.json")" = true ] && [ -z "$note" ]; then
+    die "not accepting $id: it is a chore task, reviewed by you alone; accept it with a note naming the diff you read, e.g. orch accept ${1:-} $id \"read <base>...<branch>: <what it changes>\""
+  fi
   # An architect's map is accepted only as the check finds it, committed on the architect's branch.
   if [ "$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .role' "$d/plan.json")" = architect ]; then
     if [ "$force" -eq 1 ]; then
@@ -931,6 +937,8 @@ render_brief() {
     review_line="review venue: pull request. The task branches carry PRs against $base; merge them in dependency order (gh pr merge <n> --merge, or locally and then push $base when authorized — a pushed merge closes its PR). You open no PR of your own for $base; put the merged PR numbers in your handoff."
   elif [ "$venue" = pr ] && [ "$role" != researcher ]; then
     review_line="review venue: pull request. When your work is ready, push your branch and open a PR against $base (gh pr create --draft --base $base, or glab mr create) with the acceptance criteria as a checklist, then put the PR link in your handoff and in your DONE message. Reviewers comment in threads there; answer each thread with what you changed and the commit that changed it."
+  elif [ "$(jq -r '.chore // false' <<<"$task")" = true ]; then
+    review_line="review: a chore task, with no reviewer and no qa — the orchestrator reads your branch diff against $base itself before it accepts; keep the diff small and say in your handoff what it changes."
   else
     review_line="review venue: branch. A reviewer will read your branch diff against $base and file findings through the orchestrator; answer its questions with file and line."
   fi
@@ -1544,9 +1552,28 @@ cmd_resume() {
 }
 
 cmd_decide() {
-  local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "decide <run> \"<decision>\""
-  printf -- '- %s — %s\n' "$(now)" "$2" >> "$d/decisions.md"
+  local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "decide <run> \"<decision>\" [--for <task-id|name>]..."
+  local run="$1" text="$2" ids="" id t for=""; shift 2
+  while [ $# -gt 0 ]; do
+    [ "$1" = --for ] && [ -n "${2:-}" ] || die "decide <run> \"<decision>\" [--for <task-id|name>]..."
+    id=$(resolve_task "$d" "$2") || die "no task or session '$2' in plan"
+    ids="$ids $id"; for="${for:+$for, }$id"; shift 2
+  done
+  printf -- '- %s — %s%s\n' "$(now)" "$text" "${for:+ (for $for)}" >> "$d/decisions.md"
+  [ -n "$ids" ] || ev "$d" orchestrator "$run" decide allow "$text"
+  for t in $ids; do ev "$d" orchestrator "$t" decide allow "$text"; done
   echo "recorded in $d/decisions.md — now message the parties"
+}
+
+# cmd_lead_branch: a branch the lead made itself is in no session record or handoff, so close would never check it.
+cmd_lead_branch() {
+  local d; d=$(run_dir "${1:-}"); local b="${2:-}"
+  [ -n "$b" ] || die "lead-branch <run> <branch>"
+  [ "$b" != "$(jq -r '.baseBranch' "$d/plan.json")" ] || die "$b is the base branch; register a branch whose work goes into it"
+  git -C "$(repo_root)" rev-parse -q --verify "refs/heads/$b" >/dev/null 2>&1 || die "no branch $b in this repository"
+  grep -qxF -- "$b" "$d/lead-branches" 2>/dev/null || printf '%s\n' "$b" >> "$d/lead-branches"
+  ev "$d" orchestrator "${1:-}" lead-branch allow "$b"
+  echo "lead branch $b registered: orch close checks it is contained in the base"
 }
 
 # cmd_task: add or change tasks through the same validation as orch plan, on the stored plan, so an
@@ -1995,7 +2022,7 @@ cmd_close() {
   fi
   local root base h branch src n=0 loose=0 gone=0
   root=$(repo_root); base=$(jq -r '.baseBranch' "$d/plan.json")
-  # The branches orch made for sessions, forgotten ones included, and those handoffs name, each with where it came from.
+  # The branches orch made for sessions, forgotten ones included, those handoffs name and the lead's own, each with where it came from.
   while IFS="$(printf '\t')" read -r branch src; do
     [ -n "$branch" ] && [ "$branch" != "$base" ] || continue
     git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null 2>&1 || { gone=$((gone+1)); echo "already deleted: $branch ($src)"; continue; }
@@ -2010,7 +2037,8 @@ cmd_close() {
                 [ -f "$h" ] || continue
                 branch=$(awk '/^## Branch/ {f=1; next} f && NF {print $1; exit}' "$h" | tr -d '`,')
                 [ -z "$branch" ] || printf '%s\thandoff\n' "$branch"
-              done; } \
+              done
+              [ ! -f "$d/lead-branches" ] || awk '{print $0 "\tlead"}' "$d/lead-branches"; } \
             | awk -F'\t' '!($1 in s) {o[++k] = $1; s[$1] = ""} index(", " s[$1] ", ", ", " $2 ", ") == 0 {s[$1] = s[$1] (s[$1] == "" ? "" : ", ") $2} END {for (i = 1; i <= k; i++) print o[i] "\t" s[o[i]]}')
   echo "$n refs checked, $loose not contained in $base, $gone already deleted$([ "$n" -eq 0 ] && printf ' — zero refs checked proves nothing about any branch; close before the cleanup to get this report')"
   local f dropped=0 real; real=$(cd "$d" && pwd -P)
@@ -2080,6 +2108,7 @@ case "$cmd" in
   pause) cmd_pause "$@" ;;
   resume) cmd_resume "$@" ;;
   decide) cmd_decide "$@" ;;
+  lead-branch) cmd_lead_branch "$@" ;;
   close) cmd_close "$@" ;;
   acceptance) cmd_acceptance "$@" ;;
   approve) cmd_approve "$@" ;;

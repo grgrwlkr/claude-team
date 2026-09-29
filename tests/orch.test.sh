@@ -1481,4 +1481,55 @@ expect_exit 0 "runs with a paused run" "$ORCH" runs
 expect_grep '^r20  *paused  *8  *0 ' "$TMP_BASE/out" "a paused run, and no live session the default stub lists"
 "$ORCH" resume r20 all > /dev/null
 
+echo "# chore tasks, orch decide --for, orch lead-branch: run r21"
+"$ORCH" init r21 --base main > /dev/null 2>&1
+"$ORCH" acceptance r21 off > /dev/null
+cat > "$TMP_BASE/r21.json" <<'JSON'
+{"run":"r21","tasks":[
+ {"id":"glue","role":"developer","chore":true,"name":"glue-21","goal":"add the dependency","pathsAllowed":["package.json"],"acceptance":["installs"],"dependsOn":[],"budget":20,"mcp":[]}
+]}
+JSON
+with_arch "$TMP_BASE/r21.json"
+expect_exit 0 "plan takes a chore developer task without a reviewer" "$ORCH" plan r21 "$TMP_BASE/r21.json"
+"$ORCH" interactive r21 on > /dev/null
+expect_exit 0 "and without a qa task when interactive verification is on" "$ORCH" plan r21 "$TMP_BASE/r21.json"
+"$ORCH" interactive r21 off > /dev/null
+jq '.tasks[1].chore = false' "$TMP_BASE/r21.json" > "$TMP_BASE/r21-v.json"
+expect_exit 1 "chore false still needs a reviewer" "$ORCH" plan r21 "$TMP_BASE/r21-v.json"
+expect_grep 'no reviewer task reviews it' "$TMP_BASE/err" "the missing reviewer is the reason"
+jq '.tasks[0].chore = true' "$TMP_BASE/r21.json" > "$TMP_BASE/r21-v.json"
+expect_exit 1 "plan refuses chore on a task that is not a developer" "$ORCH" plan r21 "$TMP_BASE/r21-v.json"
+expect_grep 'task arch: chore belongs on a developer task' "$TMP_BASE/err" "and says why"
+"$ORCH" accept r21 arch fixture --force > /dev/null
+expect_exit 0 "brief of a chore task" "$ORCH" brief r21 glue
+expect_grep 'the orchestrator reads your branch diff .* itself' "$TMP_BASE/out" "the brief says the lead reviews it"
+expect_no_grep 'A reviewer will read' "$TMP_BASE/out" "and promises no reviewer"
+echo '[{"taskId":"glue","name":"glue-21","role":"developer","id":"g21aaaaa","sessionId":"sid-glue21","pathsAllowed":["package.json"],"budget":20}]' > .orchestrator/r21/sessions.json
+printf '# glue-21\n## Status\ndone\n' | "$ORCH" handoff-put r21 glue-21 > /dev/null
+expect_exit 1 "accept refuses a chore task without a note" "$ORCH" accept r21 glue
+expect_grep 'chore' "$TMP_BASE/err" "the refusal names the chore rule"
+expect_exit 1 "--force does not stand in for the note" "$ORCH" accept r21 glue --force
+expect_exit 0 "accept a chore task with the lead's note" "$ORCH" accept r21 glue "read main...r21-glue-21: one line in package.json"
+expect_grep '"note": "read main...r21-glue-21' .orchestrator/r21/accepted.json "the note is recorded"
+expect_exit 0 "decide without --for" "$ORCH" decide r21 "Keep the lockfile."
+expect_grep '|orchestrator|r21|decide|allow|Keep the lockfile.$' .orchestrator/r21/events.log "decide logs an event"
+expect_exit 0 "decide --for a task" "$ORCH" decide r21 "Pin the version." --for glue-21
+expect_grep '|orchestrator|glue|decide|allow|Pin the version.$' .orchestrator/r21/events.log "decide --for logs the event against the task"
+expect_grep 'Pin the version. (for glue)$' .orchestrator/r21/decisions.md "and names it in decisions.md"
+cp .orchestrator/r21/decisions.md "$TMP_BASE/r21-dec.md"
+expect_exit 1 "decide --for an unknown task" "$ORCH" decide r21 "x" --for nosuch
+expect_exit 0 "records nothing" cmp -s "$TMP_BASE/r21-dec.md" .orchestrator/r21/decisions.md
+git branch lead/r21-in main
+git branch lead/r21-loose "$(git commit-tree 'main^{tree}' -p main -m 'lead glue')"
+expect_exit 0 "lead-branch registers the lead's branch" "$ORCH" lead-branch r21 lead/r21-loose
+expect_exit 0 "and another" "$ORCH" lead-branch r21 lead/r21-in
+expect_exit 0 "registering one twice is harmless" "$ORCH" lead-branch r21 lead/r21-in
+expect_exit 1 "lead-branch refuses a branch that does not exist" "$ORCH" lead-branch r21 lead/nosuch
+expect_exit 1 "lead-branch refuses the base branch" "$ORCH" lead-branch r21 main
+expect_grep '|orchestrator|r21|lead-branch|allow|lead/r21-loose$' .orchestrator/r21/events.log "lead-branch is logged"
+expect_exit 0 "close r21" "$ORCH" close r21
+expect_grep '^NOT contained in main: lead/r21-loose (lead)$' "$TMP_BASE/out" "close checks the lead's branch"
+expect_grep '^contained in main: lead/r21-in (lead)$' "$TMP_BASE/out" "and reports a contained one"
+[ "$(grep -c 'lead/r21-in' "$TMP_BASE/out")" -eq 1 ] && { PASS=$((PASS+1)); echo "ok   once"; } || { FAIL=$((FAIL+1)); echo "FAIL close printed:"; cat "$TMP_BASE/out"; }
+
 summary
