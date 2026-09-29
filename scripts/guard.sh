@@ -167,7 +167,8 @@ case "$tool" in
     [ "$ok" -eq 1 ] || block "path $rel is outside your allowed paths ($(jq -r '.pathsAllowed | join(", ")' <<<"$rec")). Ask the orchestrator if the task needs it: it grants a path with orch paths $(basename "$run_dir") $name add <glob>, never by editing sessions.json."
     allow "$rel"
     ;;
-  Bash)
+  # Monitor runs its command in the same shell Bash does.
+  Bash|Monitor)
     cmd=$(jq -r '.tool_input.command // empty' <<<"$input")
     [ -n "$cmd" ] || allow
     # Quotes and backslashes stripped, whitespace collapsed: `git "push" --force` reads as `git push --force`.

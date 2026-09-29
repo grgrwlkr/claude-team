@@ -112,6 +112,9 @@ expect_exit 0 "brew install allowed when authorized" bash "$GUARD" <<< "$(hook_i
 echo "# hooks.json routes MCP tools through the guard"
 jq -r '.hooks.PreToolUse[].matcher' "$PLUGIN_ROOT/hooks/hooks.json" > "$TMP_BASE/matchers"
 expect_grep '^mcp__\.\*$' "$TMP_BASE/matchers" "PreToolUse has an mcp__.* matcher"
+expect_grep '^Bash|Monitor|' "$TMP_BASE/matchers" "audit F2: Monitor runs shell commands and goes through the guard with Bash"
+expect_exit 2 "audit F2: a Monitor command is judged like a Bash one" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Monitor '{"command":"git push --force origin w1","description":"x"}')"
+expect_exit 0 "audit F2: a harmless Monitor command passes" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Monitor '{"command":"tail -f build.log","description":"x"}')"
 
 echo "# wave 3: the handoff channel is free of budget, pause and prose scanning"
 NL='
@@ -168,7 +171,7 @@ expect_exit 0 "a session may start an MCP helper agent"bash "$GUARD" <<< "$(hook
 expect_exit 2 "but no other subagent" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Agent '{"subagent_type":"general-purpose","prompt":"do the task"}')"
 expect_exit 2 "nor one with no type" bash "$GUARD" <<< "$(hook_input sid-int "$WT" Agent '{"prompt":"do the task"}')"
 jq -r '.hooks.PreToolUse[].matcher' "$PLUGIN_ROOT/hooks/hooks.json" > "$TMP_BASE/matchers"
-expect_grep '^Agent$' "$TMP_BASE/matchers" "PreToolUse routes the Agent tool through the guard"
+expect_grep '^Agent|Task$' "$TMP_BASE/matchers" "PreToolUse routes the Agent tool, and its older name Task, through the guard"
 expect_exit 0 "a session may run orch architecture" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch architecture")"
 expect_exit 0 "a session may run orch tools" bash "$GUARD" <<< "$(hook_bash sid-int "$WT" "orch tools")"
 jq '. + [{"taskId":"arch","name":"arch-1","role":"architect","id":"cccc3333","sessionId":"sid-arch","pathsAllowed":["docs/architecture/**"],"budget":50}]' "$RUN/sessions.json" > "$RUN/sessions.tmp" && mv "$RUN/sessions.tmp" "$RUN/sessions.json"
