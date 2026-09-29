@@ -2,6 +2,11 @@
 # orch CLI: init, plan, brief composition, pause/resume, spawn --dry-run. Never launches a real session.
 . "$(dirname "$0")/lib.sh"
 ORCH="$PLUGIN_ROOT/bin/orch"
+# with_arch <plan file>: puts first the architect design task every plan with code needs; tests that
+# are not about the architect accept it with --force right after orch plan.
+with_arch() {
+  jq '.tasks = [{id:"arch", role:"architect", name:("arch-" + .run), phase:"design", goal:"map", pathsAllowed:["docs/architecture/**"], acceptance:["map checked"], dependsOn:[], budget:20}] + .tasks' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
 
 fresh_tmp
 stub_claude
@@ -29,7 +34,9 @@ cat > "$TMP_BASE/plan.json" <<'JSON'
  {"id":"merge-task","role":"integrator","name":"int-1","goal":"Merge the branches.","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":[],"budget":90}
 ]}
 JSON
+with_arch "$TMP_BASE/plan.json"
 expect_exit 0 "plan stores the graph" "$ORCH" plan r1 "$TMP_BASE/plan.json"
+"$ORCH" accept r1 arch fixture --force > /dev/null
 expect_grep '"dev-impl"' .orchestrator/r1/plan.json "plan.json written"
 printf '{"run":"r1","tasks":[{"id":"a","role":"wizard","name":"x","goal":"g","pathsAllowed":[],"acceptance":[],"dependsOn":[],"budget":1}]}' > "$TMP_BASE/bad.json"
 expect_exit 1 "plan rejects unknown role" "$ORCH" plan r1 "$TMP_BASE/bad.json"
@@ -120,6 +127,7 @@ cat > "$TMP_BASE/reviewed.json" <<'JSON'
  {"id":"merge-task","role":"integrator","name":"int-1","goal":"merge","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":["rev"],"budget":60}
 ]}
 JSON
+with_arch "$TMP_BASE/reviewed.json"
 expect_exit 0 "plan accepts a reviewed graph" "$ORCH" plan r1 "$TMP_BASE/reviewed.json"
 expect_exit 0 "review venue defaults to branch" "$ORCH" review r1 venue branch
 expect_exit 0 "review venue can be a pull request" "$ORCH" review r1 venue pr
@@ -174,6 +182,7 @@ cat > "$TMP_BASE/tested.json" <<'JSON'
  {"id":"merge-task","role":"integrator","name":"int-1","goal":"merge","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":["rev","run"],"budget":60}
 ]}
 JSON
+with_arch "$TMP_BASE/tested.json"
 expect_exit 0 "plan with a tester per developer task is accepted" "$ORCH" plan r1 "$TMP_BASE/tested.json"
 expect_grep '"interactive": true' .orchestrator/r1/plan.json "interactive survives orch plan"
 "$ORCH" accept r1 impl "for the tester brief" > /dev/null
@@ -197,7 +206,9 @@ cat > "$TMP_BASE/gate.json" <<'JSON'
  {"id":"merge-task","role":"integrator","name":"int-1","goal":"merge","pathsAllowed":["**"],"acceptance":["green"],"dependsOn":["impl","rev"],"budget":60}
 ]}
 JSON
+with_arch "$TMP_BASE/gate.json"
 expect_exit 0 "plan for the gate run" "$ORCH" plan r2 "$TMP_BASE/gate.json"
+"$ORCH" accept r2 arch fixture --force > /dev/null
 printf '# d1\n## Status\nblocked — waiting until the analyst is done\n## Branch\nw1 at 0000000\n' > "$TMP_BASE/h1.md"
 expect_exit 0 "developer hands off blocked" sh -c "'$ORCH' handoff-put r2 d1 < '$TMP_BASE/h1.md'"
 expect_exit 0 "ready after a blocked handoff" "$ORCH" ready r2
@@ -254,6 +265,7 @@ echo "# wave 3: close settles a review with the task it reviews, and says when b
 expect_exit 0 "init third run" "$ORCH" init r3 --base main
 "$ORCH" acceptance r3 off > /dev/null
 expect_exit 0 "plan for the third run" "$ORCH" plan r3 "$TMP_BASE/gate.json"
+"$ORCH" accept r3 arch fixture --force > /dev/null
 printf '# d1\n## Status\ndone\n## Branch\ngone-branch at 0000000\n' > "$TMP_BASE/h4.md"
 expect_exit 0 "developer hands off a branch that was cleaned up since" sh -c "'$ORCH' handoff-put r3 d1 < '$TMP_BASE/h4.md'"
 "$ORCH" accept r3 impl ok > /dev/null
@@ -291,7 +303,9 @@ cat > "$TMP_BASE/r4.json" <<'JSON'
  {"id":"docs","role":"researcher","name":"res-4","goal":"facts","pathsAllowed":["docs/research/**"],"acceptance":["q"],"dependsOn":[],"budget":10,"mcp":"inherit"}
 ]}
 JSON
+with_arch "$TMP_BASE/r4.json"
 expect_exit 0 "plan r4" "$ORCH" plan r4 "$TMP_BASE/r4.json"
+"$ORCH" accept r4 arch fixture --force > /dev/null
 
 echo "# every session starts without MCP servers and starts one on demand through a helper agent"
 expect_exit 0 "developer spawn with an MCP list" "$ORCH" spawn r4 impl --dry-run
@@ -490,7 +504,8 @@ expect_exit 0 "acceptance back on" "$ORCH" acceptance r5 on
 expect_exit 0 "the full plan again" "$ORCH" plan r5 "$TMP_BASE/r5.json"
 
 echo "# wave 6: briefs"
-for t in arch spec design qal-a; do "$ORCH" accept r5 "$t" ok > /dev/null; done
+"$ORCH" accept r5 arch fixture --force > /dev/null
+for t in spec design qal-a; do "$ORCH" accept r5 "$t" ok > /dev/null; done
 expect_exit 0 "approve the design stage" "$ORCH" approve r5 design "user: looks right, go on"
 expect_exit 0 "developer brief" "$ORCH" brief r5 impl
 expect_grep 'qa-5' "$TMP_BASE/out" "the developer is told who writes its TDD cases"
@@ -529,7 +544,8 @@ expect_exit 1 "approve refuses a stage whose tasks are open" "$ORCH" approve r6 
 expect_grep 'arch' "$TMP_BASE/err" "and lists them"
 expect_exit 1 "approve refuses a later stage first" "$ORCH" approve r6 build "go"
 expect_grep 'design' "$TMP_BASE/err" "the earlier stage is named"
-for t in arch spec design qal-a; do "$ORCH" accept r6 "$t" ok > /dev/null; done
+"$ORCH" accept r6 arch fixture --force > /dev/null
+for t in spec design qal-a; do "$ORCH" accept r6 "$t" ok > /dev/null; done
 expect_exit 0 "ready with the design stage done but not approved" "$ORCH" ready r6
 expect_no_grep '^impl$' "$TMP_BASE/out" "the build stage waits for approval"
 expect_exit 1 "brief refuses a task of an unapproved stage" "$ORCH" brief r6 impl
@@ -583,7 +599,9 @@ cat > "$TMP_BASE/r7.json" <<'JSON'
  {"id":"rev","role":"reviewer","name":"rev-7","reviewOf":"impl","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"budget":10,"mcp":[]}
 ]}
 JSON
+with_arch "$TMP_BASE/r7.json"
 expect_exit 0 "plan r7" "$ORCH" plan r7 "$TMP_BASE/r7.json"
+"$ORCH" accept r7 arch fixture --force > /dev/null
 : > "$TMP_BASE/claude.calls"
 expect_exit 0 "spawn the wave" "$ORCH" spawn r7 --wave
 jq -r '[.[].name] | sort | join(",")' .orchestrator/r7/sessions.json > "$TMP_BASE/v"
@@ -624,7 +642,9 @@ cat > "$TMP_BASE/r8.json" <<'JSON'
  {"id":"merge","role":"integrator","name":"int-8","goal":"merge","pathsAllowed":["**"],"acceptance":["z"],"dependsOn":["impl"],"budget":10,"mcp":[]}
 ]}
 JSON
+with_arch "$TMP_BASE/r8.json"
 expect_exit 0 "plan r8" "$ORCH" plan r8 "$TMP_BASE/r8.json"
+"$ORCH" accept r8 arch fixture --force > /dev/null
 expect_exit 0 "spawn an-8" "$ORCH" spawn r8 spec
 AN_ID=$(jq -r '.[] | select(.name == "an-8") | .id' .orchestrator/r8/sessions.json)
 printf '# an-8\n## Status\ndone\n' > .orchestrator/r8/handoffs/an-8.md
@@ -719,5 +739,120 @@ expect_exit 0 "close again" "$ORCH" close r9 --force
 expect_grep "^rm $A9_ID\$" "$TMP_BASE/claude.calls" "close removes the run's sessions"
 expect_grep "^rm $B9_ID\$" "$TMP_BASE/claude.calls" "and the forgotten ones"
 if grep -qE "^($A9_ID|$B9_ID)\$" "$TMP_BASE/claude.bg"; then FAIL=$((FAIL+1)); echo "FAIL a session of r9 is still listed"; else PASS=$((PASS+1)); echo "ok   no session of r9 is listed after close"; fi
+
+echo "# the architect is mandatory: a plan with code starts with it"
+variant 'del(.tasks[] | select(.role == "architect")) | .tasks |= map(.dependsOn |= map(select(. != "arch")))'
+expect_exit 1 "a plan with developer tasks and no architect design task is refused" "$ORCH" plan r6 "$TMP_BASE/r5v.json"
+expect_grep 'architect' "$TMP_BASE/err" "the refusal names the architect"
+variant '.tasks |= map(if .id == "arch" then .dependsOn = ["design"] else . end)'
+expect_exit 1 "the architect's design task depends on nothing" "$ORCH" plan r6 "$TMP_BASE/r5v.json"
+expect_grep 'first' "$TMP_BASE/err" "because it runs first"
+variant '.tasks |= map(if .id == "arch" then .stage = "build" elif .id == "spec" then .dependsOn = [] else . end)'
+expect_exit 1 "in a staged plan it belongs to the first stage" "$ORCH" plan r6 "$TMP_BASE/r5v.json"
+expect_grep 'first stage' "$TMP_BASE/err" "the refusal names the stage"
+
+echo "# the architect gates the run: nothing else starts before its checked map is accepted"
+expect_exit 0 "init r10" "$ORCH" init r10 --base main
+"$ORCH" acceptance r10 off > /dev/null
+cat > "$TMP_BASE/r10.json" <<'JSON'
+{"run":"r10","baseBranch":"main","tasks":[
+ {"id":"arch","role":"architect","name":"arch-10","phase":"design","goal":"map","pathsAllowed":["docs/architecture/**"],"acceptance":["map checked"],"dependsOn":[],"budget":30,"mcp":[]},
+ {"id":"spec","role":"analyst","name":"an-10","goal":"spec","pathsAllowed":["docs/specs/**"],"acceptance":["s"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"impl","role":"developer","name":"d10","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":["spec"],"budget":20,"mcp":[]},
+ {"id":"qa","role":"qa","name":"qa-10","qaOf":"impl","goal":"cases","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":["spec"],"budget":20,"mcp":[]},
+ {"id":"rev","role":"reviewer","name":"rev-10","reviewOf":"impl","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"budget":10,"mcp":[]},
+ {"id":"merge","role":"integrator","name":"int-10","goal":"merge","pathsAllowed":["**"],"acceptance":["z"],"dependsOn":["impl"],"budget":10,"mcp":[]}
+]}
+JSON
+expect_exit 0 "plan r10" "$ORCH" plan r10 "$TMP_BASE/r10.json"
+jq -r '.tasks[] | select(.id == "arch") | .pathsAllowed | join(",")' .orchestrator/r10/plan.json > "$TMP_BASE/v"
+expect_grep '\.claude/rules/architecture/\*\*' "$TMP_BASE/v" "the architect may write the generated path-scoped rules"
+expect_exit 0 "ready at the start" "$ORCH" ready r10
+expect_grep '^arch$' "$TMP_BASE/out" "the architect is ready"
+expect_no_grep '^spec$' "$TMP_BASE/out" "a task with no dependencies still waits for the architect"
+expect_exit 1 "brief refuses a task before the map is accepted" "$ORCH" brief r10 spec
+expect_grep 'architect' "$TMP_BASE/err" "and says who it waits for"
+expect_exit 0 "architect brief" "$ORCH" brief r10 arch
+expect_grep 'orch architecture --check' "$TMP_BASE/out" "the architect is told the check it must pass"
+expect_exit 1 "accept refuses an architect task that never ran" "$ORCH" accept r10 arch "looks fine"
+expect_grep 'worktree' "$TMP_BASE/err" "because there is no map to check"
+expect_exit 0 "spawn the architect" "$ORCH" spawn r10 arch
+WTA="$REPO/.claude/worktrees/r10-arch-10"
+expect_exit 1 "accept refuses a worktree without a map" "$ORCH" accept r10 arch "looks fine"
+expect_grep 'README' "$TMP_BASE/err" "the failed check is shown"
+
+echo "# orch architecture --check: the map against the current tree"
+mkdir -p "$WTA/docs/architecture/modules"
+printf '# Architecture\n\nbuilt-at: %s\n' "$(git -C "$WTA" rev-parse HEAD)" > "$WTA/docs/architecture/README.md"
+printf '# core\n' > "$WTA/docs/architecture/modules/core.md"
+cat > "$WTA/docs/architecture/modules.json" <<'JSON'
+{"modules":[{"name":"core","doc":"modules/core.md","paths":["src/*.ts"],"summary":"Exports the constant a.\nNothing depends on it yet."}],"ignore":[]}
+JSON
+expect_exit 0 "architecture reads the map of the worktree it runs in, not the main checkout" sh -c "cd '$WTA' && '$ORCH' architecture"
+expect_grep '0 commits behind' "$TMP_BASE/out" "the worktree's map is found"
+expect_exit 1 "check fails while the rules are not generated" sh -c "cd '$WTA' && '$ORCH' architecture --check"
+expect_grep 'sync' "$TMP_BASE/out" "and names the fix"
+expect_exit 0 "sync writes the path-scoped rules" sh -c "cd '$WTA' && '$ORCH' architecture --sync"
+expect_grep '"src/\*.ts"' "$WTA/.claude/rules/architecture/core.md" "the rule is scoped to the module's paths"
+expect_grep 'Nothing depends on it yet' "$WTA/.claude/rules/architecture/core.md" "and carries its summary"
+expect_grep 'docs/architecture/modules/core.md' "$WTA/.claude/rules/architecture/core.md" "and points at the full description"
+expect_exit 0 "check passes on a synced, current, complete map" sh -c "cd '$WTA' && '$ORCH' architecture --check"
+mkdir -p "$WTA/src/deep" "$WTA/lib"
+echo 'export const c = 3' > "$WTA/src/deep/c.ts"
+echo 'export const x = 1' > "$WTA/lib/x.ts"
+expect_exit 1 "check fails on files no module covers" sh -c "cd '$WTA' && '$ORCH' architecture --check"
+expect_grep 'lib' "$TMP_BASE/out" "an uncovered directory is named"
+expect_grep 'src/deep' "$TMP_BASE/out" "* does not cross a directory, as in Claude Code's paths"
+jq '.modules[0].paths = ["src/**", "old/**"] | .ignore = ["lib/**"]' "$WTA/docs/architecture/modules.json" > "$TMP_BASE/m.json" && mv "$TMP_BASE/m.json" "$WTA/docs/architecture/modules.json"
+(cd "$WTA" && "$ORCH" architecture --sync > /dev/null)
+expect_exit 1 "check fails on a module path that matches no file" sh -c "cd '$WTA' && '$ORCH' architecture --check"
+expect_grep 'old/\*\*' "$TMP_BASE/out" "the dead path is named"
+jq '.modules[0].paths = ["src/**"]' "$WTA/docs/architecture/modules.json" > "$TMP_BASE/m.json" && mv "$TMP_BASE/m.json" "$WTA/docs/architecture/modules.json"
+(cd "$WTA" && "$ORCH" architecture --sync > /dev/null)
+expect_exit 1 "check fails when the code moved past built-at" sh -c "cd '$WTA' && '$ORCH' architecture --check"
+expect_grep 'core' "$TMP_BASE/out" "the stale module is named"
+git -C "$WTA" add src lib
+git -C "$WTA" commit -qm 'code moves on'
+printf '# Architecture\n\nbuilt-at: %s\n' "$(git -C "$WTA" rev-parse HEAD)" > "$WTA/docs/architecture/README.md"
+expect_exit 0 "check passes once built-at is moved to the code the map describes" sh -c "cd '$WTA' && '$ORCH' architecture --check"
+printf -- '---\npaths:\n  - "gone/**"\n---\n<!-- Generated by orch architecture --sync from docs/architecture/modules.json. -->\n' > "$WTA/.claude/rules/architecture/gone.md"
+expect_exit 1 "check fails on a generated rule whose module is gone" sh -c "cd '$WTA' && '$ORCH' architecture --check"
+expect_grep 'gone.md' "$TMP_BASE/out" "the orphan is named"
+(cd "$WTA" && "$ORCH" architecture --sync > /dev/null)
+[ ! -e "$WTA/.claude/rules/architecture/gone.md" ] && { PASS=$((PASS+1)); echo "ok   sync removes the orphan it generated"; } || { FAIL=$((FAIL+1)); echo "FAIL gone.md survived --sync"; }
+expect_exit 1 "accept refuses a map that is not committed on the architect's branch" "$ORCH" accept r10 arch "map checked"
+expect_grep 'commit' "$TMP_BASE/err" "an uncommitted map would never reach the integrator"
+git -C "$WTA" add docs/architecture .claude/rules/architecture
+git -C "$WTA" commit -qm 'docs(architecture): map'
+expect_exit 0 "check still passes with the map committed after built-at" sh -c "cd '$WTA' && '$ORCH' architecture --check"
+expect_exit 0 "accept runs the check in the architect's worktree and passes" "$ORCH" accept r10 arch "map checked"
+expect_exit 0 "ready after the architect" "$ORCH" ready r10
+expect_grep '^spec$' "$TMP_BASE/out" "the run opens"
+expect_no_grep '^arch$' "$TMP_BASE/out" "an accepted task is not offered for spawning"
+
+echo "# briefs point at the architect's map and only the modules a task touches"
+"$ORCH" accept r10 spec ok > /dev/null
+expect_exit 0 "developer brief" "$ORCH" brief r10 impl
+expect_grep "$WTA/docs/architecture" "$TMP_BASE/out" "the map is read from the architect's worktree"
+expect_grep 'modules/core.md' "$TMP_BASE/out" "the module its paths touch is named"
+"$ORCH" accept r10 impl ok > /dev/null
+expect_exit 0 "reviewer brief" "$ORCH" brief r10 rev
+expect_grep 'modules/core.md' "$TMP_BASE/out" "a reviewer gets the modules of the task it reviews"
+expect_exit 0 "integrator brief" "$ORCH" brief r10 merge
+expect_grep 'r10-arch-10' "$TMP_BASE/out" "the integrator merges the architect's branch too"
+
+echo "# accept --force records a skipped check"
+expect_exit 0 "init r11" "$ORCH" init r11 --base main
+"$ORCH" acceptance r11 off > /dev/null
+jq '.run = "r11" | .tasks |= map(.name = (.name + "-11"))' "$TMP_BASE/r10.json" > "$TMP_BASE/r11.json"
+"$ORCH" plan r11 "$TMP_BASE/r11.json" > /dev/null
+expect_exit 0 "accept --force without a worktree" "$ORCH" accept r11 arch "the user took the risk" --force
+expect_grep 'check skipped' .orchestrator/r11/events.log "the skipped check is on record"
+
+echo "# graph tools: a one-shot npx run needs no install"
+echo '{}' > package.json
+expect_exit 0 "architecture in a js repository" "$ORCH" architecture
+expect_grep 'no install' "$TMP_BASE/out" "npx one-shot is offered as allowed"
+rm -f package.json
 
 summary

@@ -40,7 +40,7 @@ You can attach to any session (`claude agents`, `Enter`), message any of them, o
 | analyst | `docs/specs/**` | spec with testable acceptance criteria, plan, docs after implementation |
 | developer | its task's source and test paths | code on its branch, tests with the three runs shown, draft PR |
 | designer | `docs/design/**`, `design/`, `assets/` | design brief, tokens, states, assets; self-contained guidance for UI, game HUD, graphics, 3D |
-| architect (optional) | `docs/architecture/**` | the architecture map — modules, dependency graphs, coupling, data flow — built once and kept current; the change's design; answers structure questions |
+| architect (first in every run that changes code) | `docs/architecture/**`, `.claude/rules/architecture/**` | the architecture map — modules, dependency graphs, coupling, data flow — checked against the code (`orch architecture --check`) and brought up to date before anything else starts; `modules.json` and the path-scoped rules generated from it, which Claude Code loads whenever a session opens a module's file; the change's design; answers structure questions |
 | qa | its cases' paths, per developer task | TDD cases before the code, then an audit for skipped, weakened or hollow tests and runs that were never real |
 | qa-lead | acceptance test paths | acceptance tests for the whole change right after the spec; at the end runs them on the integrated result and proposes the verdict |
 | design-reviewer | nothing (read-only) | compares the running implementation with the designer's brief and tokens by screenshots, in rounds |

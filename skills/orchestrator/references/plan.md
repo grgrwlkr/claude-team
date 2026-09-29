@@ -50,7 +50,7 @@ Fields:
 | `verifies` | tester tasks only: the id of the developer task whose build this interactive run checks. Required for every developer task when the plan has `interactive: true` |
 | `qaOf` | qa tasks: the developer task whose TDD cases this QA writes and whose result it audits. Required for every developer task |
 | `designOf` | design-reviewer tasks: the developer task whose implementation is checked against the design. Required for every developer task that depends, directly or not, on a designer task |
-| `phase` | qa-lead tasks: `author` (acceptance tests after the spec) or `accept` (after every developer task); architect tasks: `design` (map, then the change's design) or `update` (map after the merge) |
+| `phase` | qa-lead tasks: `author` (acceptance tests after the spec) or `accept` (after every developer task); architect tasks: `design` (the map checked and brought up to date, then the change's design) or `update` (map after the merge). A plan with a developer task needs a `design` task; it depends on nothing, sits in the first stage of a staged plan, and every other task waits until it is accepted. `orch plan` adds `docs/architecture/**` and `.claude/rules/architecture/**` to every architect task's paths |
 | `stage` | staged plans: the stage this task belongs to, one of the plan's `stages`; no task depends on a later stage |
 | `reviewOf` | reviewer tasks only: the id of the task whose code this review covers. `orch plan` refuses a graph where a developer task has no reviewer |
 
@@ -88,6 +88,6 @@ A session's paths and budget are copied from the plan into `sessions.json` at sp
 
 ## Acceptance
 
-`accepted.json` beside the plan holds the lead's verdicts (`orch accept <run> <task-id> "<note>"`). A task counts as done when it is accepted **or** its handoff says `done`, so a teammate that finished the work but reported `blocked` on something the lead has since resolved does not stall its dependents, and nobody edits a handoff to change its status.
+`accepted.json` beside the plan holds the lead's verdicts (`orch accept <run> <task-id> "<note>"`). An architect task is accepted only when `orch architecture --check` passes in its worktree and the map there is committed; `--force` skips that and the note says so. A task counts as done when it is accepted **or** its handoff says `done`, so a teammate that finished the work but reported `blocked` on something the lead has since resolved does not stall its dependents, and nobody edits a handoff to change its status.
 
 Two refinements. The handoff's status is the first word under `## Status`, not a word found somewhere in it: `blocked — waiting until dev-1 is done` is blocked. And a **developer** task's own `done` opens the door only to the roles that verify it — reviewer, tester, QA; everything that builds on the code (the integrator, a later developer task) becomes ready only after `orch accept`, so review findings can actually hold a merge back.
