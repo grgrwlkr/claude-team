@@ -313,7 +313,7 @@ expect_grep '--strict-mcp-config' "$TMP_BASE/out" "strict MCP config on"
 expect_grep '--mcp-config [^ ]*mcp/d4.json' "$TMP_BASE/out" "the session's own MCP config file"
 jq -r '.mcpServers | length' .orchestrator/r4/mcp/d4.json > "$TMP_BASE/keys"
 expect_grep '^0$' "$TMP_BASE/keys" "the session starts with no MCP server at all"
-expect_grep '--agents @[^ ]*mcp/d4.agents.json' "$TMP_BASE/out" "helper agents are passed with --agents"
+expect_grep '--agents "$(cat [^ ]*mcp/d4.agents.json)"' "$TMP_BASE/out" "helper agents are passed with --agents, inline as the real spawn passes them"
 jq -r 'keys | join(",")' .orchestrator/r4/mcp/d4.agents.json > "$TMP_BASE/keys"
 expect_grep '^mcp-userA$' "$TMP_BASE/keys" "one helper per server the task may use"
 jq -r '."mcp-userA".mcpServers[0].userA.command' .orchestrator/r4/mcp/d4.agents.json > "$TMP_BASE/keys"
@@ -1118,5 +1118,103 @@ expect_grep '^77 src/a/\*\*,src/shared/\*\*$' "$TMP_BASE/v" "--replan syncs budg
 expect_exit 0 "task set still works with a registered session" "$ORCH" task set r15 a budget 90
 jq -r '.[] | select(.taskId == "a") | .budget' .orchestrator/r15/sessions.json > "$TMP_BASE/v"
 expect_grep '^90$' "$TMP_BASE/v" "task set reaches the live session"
+
+echo "# handoff, handoff-put --file and --by-lead, spawn options, the run lock, plugin version: run r16"
+PV=$(jq -r '.version' "$PLUGIN_ROOT/.claude-plugin/plugin.json")
+expect_exit 0 "init r16" "$ORCH" init r16 --base main
+jq -r '.pluginVersion' .orchestrator/r16/plan.json > "$TMP_BASE/v"
+expect_grep "^$PV\$" "$TMP_BASE/v" "init records the plugin version"
+"$ORCH" acceptance r16 off > /dev/null
+cat > "$TMP_BASE/r16.json" <<'JSON'
+{"run":"r16","baseBranch":"main","tasks":[
+ {"id":"impl","role":"developer","name":"d16","goal":"code","pathsAllowed":["src/**"],"acceptance":["x"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"qa","role":"qa","name":"qa-16","qaOf":"impl","goal":"cases","pathsAllowed":["docs/qa/**"],"acceptance":["c"],"dependsOn":[],"budget":20,"mcp":[]},
+ {"id":"rev","role":"reviewer","name":"rev-16","reviewOf":"impl","goal":"review","pathsAllowed":[],"acceptance":["y"],"dependsOn":["impl"],"budget":10,"mcp":[]}
+]}
+JSON
+with_arch "$TMP_BASE/r16.json"
+expect_exit 0 "plan r16" "$ORCH" plan r16 "$TMP_BASE/r16.json"
+"$ORCH" accept r16 arch fixture --force > /dev/null
+jq -r '.pluginVersion' .orchestrator/r16/plan.json > "$TMP_BASE/v"
+expect_grep "^$PV\$" "$TMP_BASE/v" "orch plan keeps the recorded plugin version"
+
+expect_exit 1 "handoff refuses a name that is a path" "$ORCH" handoff r16 ../../r14/handoffs/d14
+expect_grep 'plain name' "$TMP_BASE/err" "the name rule is the reason"
+expect_exit 1 "handoff of a session that has not handed off" "$ORCH" handoff r16 d16
+expect_grep 'no handoff yet from d16' "$TMP_BASE/err" "an orch message, not a raw cat error"
+
+expect_exit 1 "spawn refuses a --round that is not a number" "$ORCH" spawn r16 impl --round x --dry-run
+expect_grep '--round needs a round number' "$TMP_BASE/err" "the --round rule is the reason"
+expect_exit 1 "spawn refuses --round 0" "$ORCH" spawn r16 impl --round 0 --dry-run
+expect_exit 1 "spawn refuses a --round without a value" "$ORCH" spawn r16 impl --dry-run --round
+expect_grep '--round needs a round number' "$TMP_BASE/err" "and says so"
+expect_exit 1 "spawn refuses --wave with --round" "$ORCH" spawn r16 --wave --round 2 --dry-run
+expect_exit 1 "spawn refuses --wave with --budget" "$ORCH" spawn r16 --wave --budget 5 --dry-run
+expect_grep '--wave' "$TMP_BASE/err" "the refusal names --wave"
+expect_exit 1 "spawn refuses an unknown option" "$ORCH" spawn r16 --rounds 2 impl --dry-run
+expect_grep 'unknown option --rounds' "$TMP_BASE/err" "the unknown option is named"
+expect_exit 0 "spawn dry-run of r16" "$ORCH" spawn r16 impl --dry-run
+expect_grep "^cd $REPO/.claude/worktrees/r16-d16 && env -u CLAUDE_CODE_CHILD_SESSION claude --agent orchestrator:developer " "$TMP_BASE/out" "dry-run prints the command the real spawn runs, in the worktree it runs in"
+expect_exit 1 "start refuses an unknown option" "$ORCH" start --effort max -- "x"
+expect_grep 'unknown option --effort' "$TMP_BASE/err" "the unknown option is named"
+
+jq '.pluginVersion = "0.0.1"' .orchestrator/r16/plan.json > "$TMP_BASE/v" && mv "$TMP_BASE/v" .orchestrator/r16/plan.json
+expect_exit 0 "spawn dry-run on another plugin version" "$ORCH" spawn r16 impl --dry-run
+expect_grep "run r16 was started on plugin 0.0.1, installed is $PV" "$TMP_BASE/err" "spawn warns about the version change"
+expect_exit 0 "doctor with a run on another plugin version" "$ORCH" doctor --no-daemon
+expect_grep "^warn run r16 was started on plugin 0.0.1, installed is $PV" "$TMP_BASE/out" "doctor warns about it too"
+jq --arg v "$PV" '.pluginVersion = $v' .orchestrator/r16/plan.json > "$TMP_BASE/v" && mv "$TMP_BASE/v" .orchestrator/r16/plan.json
+expect_exit 0 "spawn dry-run on the recorded version" "$ORCH" spawn r16 impl --dry-run
+expect_no_grep 'started on plugin' "$TMP_BASE/err" "no warning when the versions agree"
+
+mkdir -p "$TMP_BASE/nojq"
+for t in bash env git head dirname cat; do ln -sf "$(command -v "$t")" "$TMP_BASE/nojq/$t"; done
+ln -sf "$TMP_BASE/bin/claude" "$TMP_BASE/nojq/claude"
+expect_exit 1 "doctor without jq fails" env PATH="$TMP_BASE/nojq" "$ORCH" doctor --no-daemon
+expect_grep '^FAIL jq not on PATH' "$TMP_BASE/out" "doctor is the one that reports the missing jq"
+expect_exit 0 "help without jq" env PATH="$TMP_BASE/nojq" "$ORCH" help
+
+printf '# d16\n## Status\npartial\nFILE-FORM\n' > "$TMP_BASE/h16.md"
+expect_exit 0 "handoff-put --file" sh -c "'$ORCH' handoff-put r16 d16 --file '$TMP_BASE/h16.md' < /dev/null"
+expect_grep 'FILE-FORM' .orchestrator/r16/handoffs/d16.md "the handoff comes from the file"
+expect_exit 1 "handoff-put --file of a missing file" sh -c "'$ORCH' handoff-put r16 d16 --file '$TMP_BASE/nope.md' < /dev/null"
+expect_grep 'no such file' "$TMP_BASE/err" "the missing file is the reason"
+expect_exit 1 "handoff-put refuses an unknown option" sh -c "'$ORCH' handoff-put r16 d16 --fiel x < /dev/null"
+expect_grep 'unknown option --fiel' "$TMP_BASE/err" "the unknown option is named"
+printf '# d16-r2\n## Status\ndone\nROUND-TWO\n' | "$ORCH" handoff-put r16 d16-r2 > /dev/null
+expect_exit 0 "handoff prints the latest round" "$ORCH" handoff r16 d16
+expect_grep 'ROUND-TWO' "$TMP_BASE/out" "round 2 is printed"
+expect_no_grep 'FILE-FORM' "$TMP_BASE/out" "round 1 is not"
+expect_grep 'earlier rounds: d16.md' "$TMP_BASE/err" "the other rounds are listed"
+printf '# rev-16\n## Status\nblocked on the user\n' | "$ORCH" handoff-put r16 rev-16 --by-lead "the BLOCKED message of rev-16" > /dev/null
+expect_grep '^written by the orchestrator from the BLOCKED message of rev-16$' .orchestrator/r16/handoffs/rev-16.md "--by-lead stamps the handoff"
+expect_grep 'blocked on the user' .orchestrator/r16/handoffs/rev-16.md "and keeps its text"
+expect_grep '|orchestrator|rev-16|handoff-put|allow|written by the orchestrator from the BLOCKED message of rev-16' .orchestrator/r16/events.log "and logs who wrote it"
+
+expect_exit 0 "spawn d16" "$ORCH" spawn r16 impl
+mkdir .orchestrator/r16/.lock
+"$ORCH" budget r16 d16 33 > /dev/null 2>&1 & P16=$!
+sleep 1
+jq -r '.[] | select(.name == "d16") | .budget' .orchestrator/r16/sessions.json > "$TMP_BASE/v"
+expect_grep '^20$' "$TMP_BASE/v" "budget waits for the run lock"
+rmdir .orchestrator/r16/.lock; wait "$P16"
+jq -r '.[] | select(.name == "d16") | .budget' .orchestrator/r16/sessions.json > "$TMP_BASE/v"
+expect_grep '^33$' "$TMP_BASE/v" "and writes once the lock is free"
+mkdir .orchestrator/r16/.lock
+"$ORCH" paths r16 d16 add 'lib/**' > /dev/null 2>&1 & P16=$!
+sleep 1
+jq -r '.[] | select(.name == "d16") | .pathsAllowed | join(",")' .orchestrator/r16/sessions.json > "$TMP_BASE/v"
+expect_grep '^src/\*\*$' "$TMP_BASE/v" "paths waits for the run lock"
+rmdir .orchestrator/r16/.lock; wait "$P16"
+jq -r '.[] | select(.name == "d16") | .pathsAllowed | join(",")' .orchestrator/r16/sessions.json > "$TMP_BASE/v"
+expect_grep '^src/\*\*,lib/\*\*$' "$TMP_BASE/v" "and writes once the lock is free"
+mkdir .orchestrator/r16/.lock
+"$ORCH" task set r16 impl budget 44 > /dev/null 2>&1 & P16=$!
+sleep 1
+jq -r '.[] | select(.name == "d16") | .budget' .orchestrator/r16/sessions.json > "$TMP_BASE/v"
+expect_grep '^33$' "$TMP_BASE/v" "task set waits for the run lock"
+rmdir .orchestrator/r16/.lock; wait "$P16"
+jq -r '.[] | select(.name == "d16") | .budget' .orchestrator/r16/sessions.json > "$TMP_BASE/v"
+expect_grep '^44$' "$TMP_BASE/v" "and writes once the lock is free"
 
 summary

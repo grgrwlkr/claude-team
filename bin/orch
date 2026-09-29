@@ -104,6 +104,14 @@ state_root() {
 }
 strip_ansi() { sed 's/\x1b\[[0-9;]*[A-Za-z]//g'; }
 now() { date +%Y-%m-%dT%H:%M:%S%z; }
+# shq <s>: s as one word of a shell command line, quoted only when it needs it.
+shq() { case "$1" in ''|*[!A-Za-z0-9_./:=@%+,-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;; *) printf '%s' "$1" ;; esac; }
+plugin_version() { jq -r '.version // empty' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null; }
+# version_drift <run_dir>: a line when the run was started on another plugin version than the installed one.
+version_drift() {
+  local was is; was=$(jq -r '.pluginVersion // empty' "$1/plan.json"); is=$(plugin_version)
+  [ -z "$was" ] || [ "$was" = "$is" ] || printf 'run %s was started on plugin %s, installed is %s; sessions spawned now run the new agents and hooks\n' "$(basename "$1")" "$was" "${is:-unknown}"
+}
 
 usage() {
   cat <<'EOF'
@@ -117,8 +125,8 @@ orch spawn <run> <task-id> [--round N] [--budget N] [--dry-run]   spawn one task
 orch spawn <run> --wave [--dry-run]               spawn every ready task
 orch status <run> [--no-live]                     roster joined with claude agents --json
 orch events <run> [--since <line>]                guard log (blocks, budgets, pauses)
-orch handoff <run> <name>                         print a session's handoff
-orch handoff-put <run> <name>                     write a session's handoff from stdin (works from inside a worktree)
+orch handoff <run> <name>                         print a session's latest round's handoff, naming the earlier rounds
+orch handoff-put <run> <name> [--file <path>] [--by-lead "<source>"]   write a session's handoff from the file or stdin (works from inside a worktree); --by-lead stamps it as written by the orchestrator from that source
 orch accept <run> <task-id|name> ["<note>"] [--force]   the lead accepts a task, records its branch head, prints what became ready and removes sessions no open task needs. Refused for a task never spawned, cancelled, or whose handoff is none, partial or blocked, and for a branch that changed files outside its pathsAllowed. An architect task is accepted only when orch architecture --check passes in its worktree on a committed map; --force accepts anyway and says why in the note
 orch task add <run> <file|->                      add a task (or an array of tasks) through the plan's validation
 orch task set <run> <task-id|name> <field> <json> change one field of a task; budget and pathsAllowed reach live sessions too
@@ -157,6 +165,13 @@ cmd_doctor() {
   git rev-parse --git-dir >/dev/null 2>&1 && echo "ok   git repository: $(repo_root)" || { echo "FAIL not inside a git repository"; rc=1; }
   command -v orch >/dev/null 2>&1 && echo "ok   orch on PATH" || echo "warn orch not on PATH (plugin bin/ is added when the plugin is enabled; fine when calling by path)"
   [ -f "$RULES" ] && echo "ok   rules file $RULES" || { echo "FAIL rules file missing at $RULES"; rc=1; }
+  if command -v jq >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    local p m
+    for p in "$(repo_root)"/.orchestrator/*/plan.json; do
+      [ -f "$p" ] && [ ! -f "${p%plan.json}CLOSED" ] || continue
+      m=$(version_drift "$(dirname "$p")"); [ -z "$m" ] || echo "warn $m"
+    done
+  fi
   if [ "$nodaemon" -eq 0 ]; then
     if claude daemon status >/dev/null 2>&1; then echo "ok   background service running"; else echo "info background service not running; the first claude --bg starts it"; fi
   fi
@@ -170,6 +185,7 @@ cmd_start() {
       --model) model="$2"; shift 2 ;;
       --fallback) fallback="$2"; shift 2 ;;
       --) shift; break ;;
+      -*) die "unknown option $1" ;;
       *) break ;;
     esac
   done
@@ -199,8 +215,8 @@ cmd_init() {
   : > "$d/events.log"
   echo '[]' > "$d/sessions.json"
   printf '# Decisions — run %s\n\n' "$run" > "$d/decisions.md"
-  jq -n --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$(now)" \
-    '{run:$run, baseBranch:$base, orchestrator:$o, createdAt:$t,
+  jq -n --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$(now)" --arg pv "$(plugin_version)" \
+    '{run:$run, baseBranch:$base, orchestrator:$o, createdAt:$t, pluginVersion:$pv,
       authorize:{pushBase:false, deleteMerged:false, tag:false, installTools:false, mutateData:false},
       review:{venue:"branch", maxRounds:3}, interactive:false, acceptance:true, tasks:[]}' > "$d/plan.json"
   echo '[]' > "$d/accepted.json"
@@ -289,8 +305,9 @@ cmd_plan() {
         else [] end )
     | .[]' "$file")
   if [ -n "$err" ]; then printf '%s\n' "$err" >&2; exit 1; fi
-  local base orch_name created auth review interactive acceptance
+  local base orch_name created auth review interactive acceptance pv
   base=$(jq -r '.baseBranch' "$d/plan.json"); orch_name=$(jq -r '.orchestrator' "$d/plan.json"); created=$(jq -r '.createdAt' "$d/plan.json")
+  pv=$(jq -c '.pluginVersion // null' "$d/plan.json")
   auth=$(jq -c '.authorize // {pushBase:false, deleteMerged:false, tag:false, installTools:false}' "$d/plan.json")
   review=$(jq -c '.review // {venue:"branch", maxRounds:3}' "$d/plan.json")
   interactive=$(jq -r '.interactive // false' "$d/plan.json")
@@ -336,9 +353,10 @@ cmd_plan() {
     if [ -n "$sha" ]; then archb=$((15 + $(git -C "$r" diff --name-only "$sha" HEAD | wc -l) / 5)); else archb=$((40 + $(git -C "$r" ls-files | wc -l) / 20)); fi
   fi
   local old; old=$(cat "$d/plan.json")
-  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" --argjson auth "$auth" --argjson review "$review" --argjson inter "$interactive" --argjson acc "$acceptance" --argjson archb "$archb" \
+  jq --arg run "$run" --arg base "$base" --arg o "$orch_name" --arg t "$created" --argjson auth "$auth" --argjson review "$review" --argjson inter "$interactive" --argjson acc "$acceptance" --argjson archb "$archb" --argjson pv "$pv" \
      '{developer: 120, reviewer: 30, "design-reviewer": 25, qa: 60, tester: 50, integrator: 50, analyst: 50, researcher: 70, designer: 70} as $budgets
       | .run = $run | .baseBranch = (.baseBranch // $base) | .orchestrator = $o | .createdAt = $t | .authorize = $auth | .review = $review | .interactive = $inter | .acceptance = $acc
+      | (if $pv == null then del(.pluginVersion) else .pluginVersion = $pv end)
       | .tasks |= map(.budget = (.budget // (if .role == "qa-lead" then (if .phase == "accept" then 40 else 80 end) elif .role == "architect" then $archb else ($budgets[.role] // 150) end)) | .model = (.model // "opus") | .effort = (.effort // "high") | .dependsOn = (.dependsOn // []) | .pathsAllowed = (.pathsAllowed // []) | .acceptance = (.acceptance // [])
           | if .role == "architect" then .pathsAllowed += (["docs/architecture/**", ".claude/rules/architecture/**"] - .pathsAllowed) else . end)' \
      "$file" > "$d/plan.json.tmp" && mv "$d/plan.json.tmp" "$d/plan.json"
@@ -745,8 +763,16 @@ mcp_launch() {
 }
 
 cmd_handoff_put() {
-  local d; d=$(run_dir "${1:-}"); local name="${2:-}"
-  [ -n "$name" ] || die "handoff-put <run> <name>  (content on stdin)"
+  local d; d=$(run_dir "${1:-}"); local name="${2:-}" file="" by=""
+  [ -n "$name" ] || die "handoff-put <run> <name> [--file <path>] [--by-lead \"<source>\"]  (without --file the content comes on stdin)"
+  shift 2
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file) [ -n "${2:-}" ] || die "--file needs a path"; file="$2"; shift 2 ;;
+      --by-lead) [ -n "${2:-}" ] || die "--by-lead needs the source, e.g. \"the DONE message of dev-1\""; by="$2"; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
   # A later round runs under <task name>-r<N> (orch spawn --round N), up to the run's maxRounds.
   jq -e --arg n "$name" '
     (.review.maxRounds // 3) as $max
@@ -756,10 +782,20 @@ cmd_handoff_put() {
            | $m != null and ($names | index($m.base)) != null and ($m.r | tonumber) >= 2 and ($m.r | tonumber) <= $max )
     ' "$d/plan.json" >/dev/null || die "no session named '$name' in the plan (rounds are <task name>-r2 … -r<maxRounds>)"
   local tmp="$d/handoffs/.$name.tmp"
-  cat > "$tmp" || die "could not read stdin"
+  if [ -n "$file" ]; then
+    [ -f "$file" ] || die "no such file $file"
+    cat "$file" > "$tmp" || die "could not read $file"
+  else
+    cat > "$tmp" || die "could not read stdin"
+  fi
   [ -s "$tmp" ] || { rm -f "$tmp"; die "empty handoff refused"; }
   mv "$tmp" "$d/handoffs/$name.md"
-  ev "$d" handoff-put "$name" handoff allow "$(wc -c < "$d/handoffs/$name.md" | tr -d ' ') bytes"
+  if [ -n "$by" ]; then
+    { printf 'written by the orchestrator from %s\n\n' "$by"; cat "$d/handoffs/$name.md"; } > "$tmp" && mv "$tmp" "$d/handoffs/$name.md"
+    ev "$d" orchestrator "$name" handoff-put allow "written by the orchestrator from $by, $(wc -c < "$d/handoffs/$name.md" | tr -d ' ') bytes"
+  else
+    ev "$d" handoff-put "$name" handoff allow "$(wc -c < "$d/handoffs/$name.md" | tr -d ' ') bytes"
+  fi
   echo "handoff stored: $d/handoffs/$name.md"
 }
 
@@ -1144,8 +1180,14 @@ spawn_one() {
           [ -f "$d/mcp/$name.agents.json" ] && agents_file="$d/mcp/$name.agents.json" ;;
     *) die "task '$id': mcp must be a list of server names or \"inherit\", got $mcp" ;;
   esac
-  local cmdline="env -u CLAUDE_CODE_CHILD_SESSION claude --agent orchestrator:$role --bg --name $name --model $model --effort $effort --settings '$SPAWN_SETTINGS' $extra${agents_file:+ --agents @$agents_file}"
+  local argv=(env -u CLAUDE_CODE_CHILD_SESSION claude --agent "orchestrator:$role" --bg --name "$name" --model "$model" --effort "$effort" --settings "$SPAWN_SETTINGS")
+  # shellcheck disable=SC2206  # $extra is deliberately word-split
+  argv+=($extra)
   if [ "$dry" -eq 1 ]; then
+    # The helper agents are printed as the file they are read from: server definitions may carry keys.
+    local a cmdline; cmdline="cd $(shq "$(task_worktree "$d" "$task_name")") &&"
+    for a in "${argv[@]}"; do cmdline="$cmdline $(shq "$a")"; done
+    [ -z "$agents_file" ] || cmdline="$cmdline --agents \"\$(cat $(shq "$agents_file"))\""
     printf '%s "<brief, %s bytes>" budget=%s\n' "$cmdline" "$(printf '%s' "$brief" | wc -c | tr -d ' ')" "$(jq -r '.budget' <<<"$task")"
     return 0
   fi
@@ -1156,8 +1198,7 @@ spawn_one() {
   lock_run "$d"
   wt=$(make_worktree "$d" "$task_name") || { unlock_run "$d"; exit 1; }
   unlock_run "$d"
-  # shellcheck disable=SC2086  # $extra is deliberately word-split
-  out=$(cd "$wt" && env -u CLAUDE_CODE_CHILD_SESSION claude --agent "orchestrator:$role" --bg --name "$name" --model "$model" --effort "$effort" --settings "$SPAWN_SETTINGS" $extra ${agents_args[@]+"${agents_args[@]}"} "$brief" 2>&1 | strip_ansi)
+  out=$(cd "$wt" && "${argv[@]}" ${agents_args[@]+"${agents_args[@]}"} "$brief" 2>&1 | strip_ansi)
   sid_short=$(printf '%s\n' "$out" | sed -n 's/.*backgrounded · \([0-9a-f]\{8\}\).*/\1/p' | head -1)
   if [ -z "$sid_short" ]; then
     # Unregistered, the session would run outside every guard rule; it is stopped before orch gives up.
@@ -1182,19 +1223,25 @@ ${stray:+stopped the session claude agents lists as $name: $(printf '%s' "$stray
 
 cmd_spawn() {
   local d; d=$(run_dir "${1:-}"); shift || true
-  local dry=0 wave=0 id="" round=1 budget=""
+  local dry=0 wave=0 id="" round="" budget=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) dry=1 ;;
       --wave) wave=1 ;;
-      --round) round="$2"; shift ;;
+      --round)
+        case "${2:-}" in ''|*[!0-9]*) die "--round needs a round number, 1 or more" ;; esac
+        [ "$2" -ge 1 ] || die "--round needs a round number, 1 or more"
+        round="$2"; shift ;;
       --budget)
         case "${2:-}" in ''|*[!0-9]*) die "--budget needs a number of tool calls" ;; esac
         budget="$2"; shift ;;
+      -*) die "unknown option $1" ;;
       *) id="$1" ;;
     esac; shift
   done
+  local v; v=$(version_drift "$d"); [ -z "$v" ] || echo "orch: warning: $v" >&2
   if [ "$wave" -eq 1 ]; then
+    [ -z "$round" ] && [ -z "$budget" ] || die "--wave spawns every ready task at round 1 on its plan budget; --round and --budget are for one task"
     # The tasks of a wave launch in parallel: each claude --bg takes seconds, and far more under load.
     local t pids="" p fail=0
     for t in $(cmd_ready "$(jq -r '.run' "$d/plan.json")"); do spawn_one "$d" "$t" "$dry" 1 & pids="$pids $!"; done
@@ -1203,7 +1250,7 @@ cmd_spawn() {
     [ "$fail" -eq 0 ] || die "$fail of the wave's spawns failed; the messages above say why"
   else
     [ -n "$id" ] || die "spawn <run> <task-id> [--round N] [--budget N] | --wave"
-    spawn_one "$d" "$id" "$dry" "$round" "$budget"
+    spawn_one "$d" "$id" "$dry" "${round:-1}" "$budget"
   fi
 }
 
@@ -1251,7 +1298,20 @@ cmd_events() {
   awk -v s="$since" 'NR > s' "$d/events.log"
 }
 
-cmd_handoff() { local d; d=$(run_dir "${1:-}"); [ -n "${2:-}" ] || die "handoff <run> <name>"; cat "$d/handoffs/$2.md"; }
+cmd_handoff() {
+  local d; d=$(run_dir "${1:-}"); local n="${2:-}" f o r others=""
+  [ -n "$n" ] || die "handoff <run> <name>"
+  plain_name "$n" || die "handoff: '$n' must be a plain name, a task or session name, not a path"
+  f=$(latest_handoff "$d" "$n")
+  [ -f "$f" ] || die "no handoff yet from $n"
+  for o in "$d/handoffs/$n.md" "$d/handoffs/$n"-r*.md; do
+    r=${o#"$d/handoffs/$n"}; r=${r#-r}; r=${r%.md}
+    case "$r" in *[!0-9]*) continue ;; esac
+    [ -f "$o" ] && [ "$o" != "$f" ] && others="$others ${o##*/}"
+  done
+  [ -z "$others" ] || echo "latest round: ${f##*/}; earlier rounds:$others — in $d/handoffs" >&2
+  cat "$f"
+}
 
 # cmd_budget: the guard reads a live session's budget from sessions.json, not from the plan,
 # so a mid-run change has to land in both.
@@ -1264,7 +1324,9 @@ cmd_budget() {
   hits=$((hits + $(jq -r --arg w "$who" '[.[] | select(.taskId == $w or .name == $w)] | length' "$d/sessions.json")))
   [ "$hits" -gt 0 ] || die "no task or session '$who' in run ${1:-}"
   jq --arg w "$who" --argjson n "$n" '.tasks |= map(if .id == $w or .name == $w then .budget = $n else . end)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
+  lock_run "$d"
   jq --arg w "$who" --argjson n "$n" 'map(if .taskId == $w or .name == $w then .budget = $n else . end)' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
+  unlock_run "$d"
   ev "$d" orchestrator "$who" budget allow "$n"
   echo "budget of $who: $n guarded calls — the guard honours it from the session's next call"
 }
@@ -1322,7 +1384,9 @@ cmd_task() {
   rm -f "$tmp"
   case "$field" in
     budget|pathsAllowed)
+      lock_run "$d"
       jq --arg id "$id" --arg f "$field" --argjson v "$3" 'map(if .taskId == $id then .[$f] = $v else . end)' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
+      unlock_run "$d"
       echo "live sessions of $id carry the new $field" ;;
   esac
   ev "$d" orchestrator "${id:-new}" "task-$sub" allow "$field"
@@ -1335,7 +1399,9 @@ cmd_paths() {
   shift 3
   local globs; globs=$(printf '%s\n' "$@" | jq -R . | jq -sc .)
   jq --arg id "$id" --argjson g "$globs" '.tasks |= map(if .id == $id then (.pathsAllowed // []) as $p | .pathsAllowed = $p + ($g - $p) else . end)' "$d/plan.json" > "$d/plan.tmp" && mv "$d/plan.tmp" "$d/plan.json"
+  lock_run "$d"
   jq --arg id "$id" --argjson g "$globs" 'map(if .taskId == $id then (.pathsAllowed // []) as $p | .pathsAllowed = $p + ($g - $p) else . end)' "$d/sessions.json" > "$d/sessions.json.tmp" && mv "$d/sessions.json.tmp" "$d/sessions.json"
+  unlock_run "$d"
   ev "$d" orchestrator "$id" paths allow "$*"
   echo "paths of $id now: $(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .pathsAllowed | join(", ")' "$d/plan.json") — the guard honours them from the session's next call"
 }
@@ -1744,8 +1810,9 @@ cmd_close() {
   ev "$d" orchestrator "${1:-}" close allow "$n refs checked, $loose not contained${forced:+; forced:$forced}"
 }
 
-need jq " (brew install jq / apt install jq)"
 cmd="${1:-}"; shift || true
+# doctor is the one that reports a missing jq, and help needs none.
+case "$cmd" in doctor|""|-h|--help|help) ;; *) need jq " (brew install jq / apt install jq)" ;; esac
 case "$cmd" in
   doctor) cmd_doctor "$@" ;;
   start) cmd_start "$@" ;;
