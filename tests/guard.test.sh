@@ -209,6 +209,18 @@ expect_exit 0 "the repeated call goes through" bash "$GUARD" <<< "$(hook_bash si
 expect_exit 0 "and the one after" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
 jq 'map(if .name == "dev-1" then .budget = 2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 
+echo "# audit tests-guard F15: a budget the guard cannot read is no licence"
+: > "$RUN/events.log"
+jq 'map(if .name == "dev-1" then .budget = "abc" else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+expect_exit 2 "a non-numeric budget blocks, not unlimited" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
+expect_grep 'budget unreadable; ask the orchestrator' "$TMP_BASE/err" "and says the budget is unreadable"
+expect_exit 0 "the handoff stays writable" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "orch handoff-put r1 dev-1 < .scratch/handoff.md")"
+jq 'map(if .name == "dev-1" then del(.budget) else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+expect_exit 2 "a missing budget blocks too" bash "$GUARD" <<< "$(hook_bash sid-dev "$WT" "ls")"
+expect_grep 'budget unreadable' "$TMP_BASE/err" "for the same reason"
+jq 'map(if .name == "dev-1" then .budget = 2 else . end)' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
+: > "$RUN/events.log"
+
 echo "# a session registered by its short id is guarded before its full id is known"
 jq '. + [{"taskId":"impl","name":"dev-x","role":"developer","id":"cccc3333","sessionId":"","pathsAllowed":["src/**"],"budget":50}]' "$RUN/sessions.json" > "$RUN/s.tmp" && mv "$RUN/s.tmp" "$RUN/sessions.json"
 expect_exit 2 "an edit outside its paths is refused" bash "$GUARD" <<< "$(hook_input cccc3333-1111-4222-8333-444455556666 "$WT" Edit '{"file_path":"'"$WT"'/docs/x.md"}')"

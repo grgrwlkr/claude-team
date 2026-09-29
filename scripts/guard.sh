@@ -47,7 +47,7 @@ if [ -z "$rec" ] || [ "$rec" = null ]; then
 fi
 name=$(jq -r '.name' <<<"$rec")
 role=$(jq -r '.role' <<<"$rec")
-budget=$(jq -r '.budget // 0' <<<"$rec")
+budget=$(jq -r '.budget // empty' <<<"$rec")
 base=$(jq -r '.baseBranch // "main"' "$run_dir/plan.json" 2>/dev/null)
 [ -n "$base" ] && [ "$base" != null ] || base=main
 handoff="$run_dir/handoffs/$name.md"
@@ -147,8 +147,9 @@ if [ -f "$run_dir/PAUSE" ]; then
   block "the whole run is paused by the orchestrator: $(cat "$run_dir/PAUSE" 2>/dev/null). Wait for its message."
 fi
 
-# Budget: allowed guarded calls so far, before this one.
-if [ "$budget" -gt 0 ] 2>/dev/null; then
+# Budget: allowed guarded calls so far, before this one. 0 is no cap; one that is not a whole number is no licence.
+case "$budget" in ''|*[!0-9]*) block "budget unreadable; ask the orchestrator" ;; esac
+if [ "$budget" -gt 0 ]; then
   used=$(grep -c "^[^|]*|$sid|[^|]*|[^|]*|allow|" "$run_dir/events.log" 2>/dev/null || true)
   used=${used:-0}
   if [ "$used" -ge "$budget" ]; then
