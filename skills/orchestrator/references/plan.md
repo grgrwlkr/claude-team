@@ -103,13 +103,17 @@ Rules of thumb: a wave is the set of ready tasks; spawn them together, one sessi
 
 ## Authorizations
 
-`plan.json` carries the user's standing answers for the whole run, collected once at plan approval and never asked again:
+`plan.json` carries the user's scoped answers for the run. Reuse them while their conditions hold; a materially new action needs its own applicable authorization:
+
+Plan approval covers only the operations named to the user: owned commits and local integration, plus the exact remote branch/PR/comment actions if PR venue is selected. Base push, deletion, release and tool installation remain distinct. Record scope in the plan summary and run decisions; a new operation needs its applicable authorization. The flags below do not grant unnamed actions.
 
 ```json
 "authorize": { "pushBase": false, "deleteMerged": false, "tag": false, "installTools": false, "mutateData": false }
 ```
 
-The lead writes them with `orch authorize <run> push-base|delete-merged|tag|install-tools|mutate-data on|off`, `orch plan` preserves them, and `scripts/guard.sh` reads them: with `pushBase` the integrator pushes the base branch (and merges pull requests), with `deleteMerged` it deletes merged branches and worktrees. No other role gains anything from either flag. `installTools` lets a session install the verification tooling `orch tools` lists as missing; the guard blocks package installs otherwise. `mutateData` reaches qa through its brief: creating or changing data in development databases and services.
+The lead writes supported flags with `orch authorize <run> push-base|delete-merged|tag|install-tools|mutate-data on|off`; `orch plan` preserves them. The current pushBase check gates both a raw base-branch push and a forge PR merge, so the approved scope must name the path the integrator will use before enabling it. deleteMerged gates branch/worktree cleanup and installTools gates verification-tool installation. Other roles gain no authority from those integrator flags. mutateData reaches QA through its brief and covers only the agreed development-data changes.
+
+The current guard implements specific push, delete and install checks. `tag` is stored but has no equivalent guard consumer in this version; the lead must check the release/tag authorization explicitly. Do not describe all recorded flags as technically enforced. None of these flags grants private-data publication.
 
 ## Interactive verification
 

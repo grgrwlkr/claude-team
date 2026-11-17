@@ -54,17 +54,18 @@ Write the plan as a task graph: roles, names, goals, allowed paths, acceptance, 
 
 Forks whose wrong guess would waste the run go to the user before spawning, as one numbered list with options and your recommendation. Everything else: take the default and say so in the plan summary.
 
-In that same list, settle every action this run may need that a session cannot take on its own, because after approval the run must never stop to ask again:
+In that same list, name the actions this run needs beyond ordinary reads and owned edits. Reuse answers already given; ask later only for a material new action outside that scope:
 
 - **one run or staged** — `"mode": "staged"` with an ordered `stages` list (architecture, spec, each development stage) and a `stage` on every task. Staged is the one place the run waits for the user on purpose: after each stage you show the result and the next stage starts only on their word. See 4b.
-- **push the base branch** — the integrator merges locally regardless; may it push?
+- **commits and local integration** — name the owned task branches and the integrator's permitted local merges; plan approval must cover them before execution.
+- **push the base branch or merge through the forge** — separate permission from authorized local integration; name which operation the integrator may perform. The runtime's pushBase flag controls both paths, so do not enable it when the user's scope excludes the path the plan would use.
 - **delete merged branches and worktrees** at the end?
 - **tag or release?**
 - **interactive verification** — should qa run the application after each developer round and check the result visually? Run `orch tools` first and quote its table: what is available on this machine, what is missing and how it installs. If the user wants it and tools are missing, ask in the same breath whether the run may install them (`orch authorize <run> install-tools on`); otherwise qa reports `BLOCKED:` on the first criterion it cannot exercise. Record the answer with `orch interactive <run> on|off`.
 - **may qa change development data** (sign-ups, invites, records)? `orch authorize <run> mutate-data on`; without it qa uses fixtures or a throwaway database and reports `BLOCKED:` on a criterion that needs shared data written.
-- **where review happens** — on the branch (the reviewer reads `git diff base...HEAD` and files findings through you), or on a pull or merge request (everyone who changed code opens one, reviewers comment in threads, authors answer them). Say which forge tooling you actually found (`gh`, `glab`, a remote at all) so the choice is informed: `orch review <run> venue branch|pr`.
+- **where review happens** — branch mode reads `git diff base...HEAD` and returns local findings. PR mode requires explicit approval for pushing the named working branches, opening/updating their PRs and publishing the reviewers' comments and authors' replies. Name these remote effects before approval, not only the venue label. State the actual forge tools (`gh`, `glab`, remote) and record the choice with `orch review <run> venue branch|pr`.
 
-Record each yes: `orch authorize <run> push-base on`, `delete-merged on`, `tag on`. The guard reads the plan, so an authorized integrator acts without another round trip; the plan is also where the answer survives your own compaction. A gate the user declined stays declined and the run ends with the exact command they can run themselves.
+Record the explicit operation scope in the plan summary and run decisions, and supported flags with `orch authorize <run> push-base on`, `delete-merged on`, `tag on`. Guard coverage is narrower than all possible actions: push/delete/install checks are implemented, while tag and other scoped permissions still need the lead's verification. A recorded flag is not proof of universal enforcement. Reuse valid approvals, keep declined actions declined, and report the precise remaining boundary without bypassing it.
 
 Show the plan as a table (task, role, name, paths, depends on, budget) plus the authorizations, and wait for the user's go. The go is the instruction to run; an answered question is not.
 
@@ -107,7 +108,7 @@ Accept the reviewed task only after a clean round, or after you yourself confirm
 In a staged run `orch ready` holds back every task of a stage until the user has approved all earlier ones. When a stage's tasks are accepted:
 
 1. `orch stage-report <run> <stage>` writes `<run dir>/stages/<stage>/index.html` with every task's state, status, branch and what it did, and the screenshots its handoff names (copied to `img/`, only from inside the repository).
-2. Read the page before anyone else does: it carries handoff text and screenshots verbatim, and a session may have pasted a key or personal data into them. Then show it to the user: publish the page with its `img/` files as an artifact when your harness offers one, otherwise open the file. Add in chat what you verified yourself and what you did not.
+2. Inspect the page and images for credentials and private content because handoffs are included verbatim. Remove accidental sensitive material from the delivery copy. Show the local artifact or an explicitly authorized private destination; an available upload tool does not authorize external publication. State what was actually verified and what was not.
 3. End your turn and wait. On the user's go, `orch approve <run> <stage> "<their words>"` — it refuses while a task of the stage is open, or an earlier stage is not approved — then spawn the next wave. When the user lifts staging for the rest of the run, `orch approve <run> --rest "<their words>"`. A change of direction goes into `decisions.md` and the plan (`orch task add|set|patch`, `orch cancel`) before anything is spawned.
 
 ## 5. Report and close
@@ -124,7 +125,7 @@ Then `orch close <run>`, **before** you or the user delete any branch — after 
 
 - Never spawn a teammate for verification you can run yourself in one command.
 - Never accept a handoff on its word.
-- Never go beyond the authorizations recorded in the plan — and never stop the run to ask for one you forgot to collect: finish the rest and hand the user the command.
+- Never go beyond recorded authorization. Reuse valid grants; for a new material action, finish independent work and ask only for that remaining boundary before executing it.
 - Never let two sessions edit the same path at the same time.
 - Never delete a branch or worktree without a containment check that counted the refs it verified.
 - Never end a run, finished or abandoned, before `orch close` has passed: a session left in `claude agents` means the run is not over.

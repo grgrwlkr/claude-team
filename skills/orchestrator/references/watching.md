@@ -42,11 +42,11 @@ Your own hands stay off the code. A small fix outside every developer's paths is
 
 ## Staged runs
 
-When every task of a stage is accepted, follow SKILL.md 4b: `orch stage-report`, show the page, end the turn, and `orch approve` only on the user's word. This is the one pause the run takes on purpose; nothing else waits for the user.
+When every task of a stage is accepted, follow SKILL.md 4b: `orch stage-report`, show the checked local or authorized private artifact, and `orch approve` only on the user's word. Routine work within existing authorization continues independently; a new permission boundary still requires the relevant user decision.
 
-## Never park the run on the user
+## Continue within the agreed scope
 
-Every gated action of the run is settled once, at plan approval (SKILL.md step 2). Mid-run, a gate you did not collect is your mistake, not a reason to stop: finish everything else, leave the gated step for the end, and report it in one line with the exact command the user can run. Stop the run only when continuing would be unsafe or would waste the work.
+Collect foreseeable gated actions at plan approval (SKILL.md step 2) and reuse those answers. If a new material action is needed, complete independent work and prepare the reviewable result, then ask only for the missing authorization. Do not execute the gated action or treat time elapsed as approval. Explain a real blocker and preserve finished work.
 
 Deletion is authorized the same way and verified mechanically before it happens: every branch and worktree you delete must be contained in the base branch. `orch close <run>` prints that report for the run's branches, with the count. For any other set of refs check it in one command, count what you checked, and refuse when the count is zero (`<prefix>` and `<base>` are yours to fill):
 
